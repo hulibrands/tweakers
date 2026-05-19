@@ -1,0 +1,11 @@
+.fixture-highlight {
+  outline: 2px solid #2f80ed;
+}
+
+[data-product-id].fixture-highlight {
+  position: relative;
+}
+
+#checkout-root .fixture-badge {
+  font-weight: 700;
+}

@@ -1,0 +1,71 @@
+{
+  "manifest_version": 3,
+  "name": "Static Fixture Extension",
+  "version": "1.0.0",
+  "description": "Fixture extension for static analysis tests.",
+  "permissions": [
+    "storage",
+    "scripting",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "https://shop.example.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://shop.example.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.svg"
+  },
+  "commands": {
+    "toggle-panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Toggle the fixture panel"
+    }
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules/block.json"
+      }
+    ]
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "panel.css",
+        "assets/helper.js"
+      ],
+      "matches": [
+        "https://shop.example.com/*"
+      ]
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "https://partner.example.com/*"
+    ]
+  }
+}

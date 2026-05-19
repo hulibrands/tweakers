@@ -1,0 +1,38 @@
+{
+  "id": "co.thomashulihan.github-accounts",
+  "name": "GitHub Accounts",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Assign Codex projects to GitHub accounts and keep project-local Git identity aligned.",
+  "forkOf": {
+    "upstreamId": "co.Arconte112.github-accounts",
+    "upstreamGithubRepo": "hulibrands/codex-plusplus",
+    "upstreamPath": "tweaks/github-accounts",
+    "upstreamVersion": "0.1.0",
+    "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
+    "forkedAt": "2026-05-17T22:00:00.000Z"
+  },
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/github-accounts",
+  "tags": [
+    "github",
+    "git",
+    "accounts",
+    "projects"
+  ],
+  "scope": "both",
+  "permissions": [
+    "ipc",
+    "filesystem",
+    "settings"
+  ],
+  "mcp": {
+    "command": "node",
+    "args": [
+      "./mcp-server.js"
+    ]
+  }
+}

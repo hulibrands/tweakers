@@ -1,0 +1,25 @@
+{
+  "id": "co.thomashulihan.mode-switcher",
+  "name": "Mode Switcher",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "forkOf": {
+    "upstreamId": "co.thomas.mode-switcher",
+    "upstreamGithubRepo": "hulibrands/tweakers",
+    "upstreamPath": "mode-switcher",
+    "upstreamVersion": "0.1.0",
+    "upstreamCommitSha": "5c9e0563f24f4ad4ddd4337921f759b83f20dea8",
+    "forkedAt": "2026-05-17T22:00:00.000Z"
+  },
+  "description": "Toggle between vanilla Codex and Codex++ from the Config page.",
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/mode-switcher",
+  "tags": [
+    "ui",
+    "config"
+  ],
+  "scope": "both"
+}

@@ -1,0 +1,368 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-05-19T12:22:50.306Z",
+  "entries": [
+    {
+      "id": "co.thomashulihan.account-switcher",
+      "path": "tweaks/account-switcher",
+      "manifest": {
+        "id": "co.thomashulihan.account-switcher",
+        "name": "Easy Account Switcher",
+        "version": "0.1.0",
+        "description": "Save, switch, and manage local Codex auth sessions from the account menu.",
+        "githubRepo": "hulibrands/tweakers",
+        "forkOf": {
+          "upstreamId": "me.erkin.codex-plusplus-account-switcher",
+          "upstreamGithubRepo": "erknvl/codex-plusplus-account-switcher",
+          "upstreamVersion": "1.1.0",
+          "upstreamCommitSha": "c0d55514b6082660550bbebaed4391ea589a7aa8",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "tags": [
+          "auth",
+          "accounts",
+          "settings"
+        ],
+        "scope": "both",
+        "main": "index.bundled.js",
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/account-switcher"
+      }
+    },
+    {
+      "id": "co.thomashulihan.better-browser-agent",
+      "path": "tweaks/better-browser-agent",
+      "manifest": {
+        "id": "co.thomashulihan.better-browser-agent",
+        "name": "Better Browser Agent",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "forkOf": {
+          "upstreamId": "co.bennett.better-browser",
+          "upstreamGithubRepo": "b-nnett/codex-plusplus-better-browser",
+          "upstreamVersion": "0.1.2",
+          "upstreamCommitSha": "dfcc75ec0d8e980698974a3a2b80531cd553af77",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "description": "Browser-side-panel diagnostics and agent inspection helpers for Codex++.",
+        "author": {
+          "name": "Thomas Hulihan"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/better-browser-agent",
+        "tags": [
+          "browser",
+          "tabs",
+          "devtools",
+          "shortcuts",
+          "agent",
+          "extensions"
+        ],
+        "scope": "main",
+        "main": "index.js",
+        "patches": [
+          {
+            "id": "review-runtime-bridge-browser-plus-menu-cap",
+            "asset": "review-runtime-bridge-*.js",
+            "anchor": "M=u&&!l.some(Dr)",
+            "replacement": "M=u&&l.filter(Dr).length<25",
+            "description": "Allow multiple browser right-panel tabs before hiding the browser plus-menu entry."
+          },
+          {
+            "id": "review-runtime-bridge-browser-tab-detector",
+            "asset": "review-runtime-bridge-*.js",
+            "anchor": "function Dr(e){return e.tabId===g.BROWSER}",
+            "replacement": "function Dr(e){return e.tabId===g.BROWSER||typeof e.tabId===\"string\"&&e.tabId.startsWith(g.BROWSER+\":\")}",
+            "description": "Treat browser tab ids with BROWSER-prefixed suffixes as browser tabs."
+          },
+          {
+            "id": "review-runtime-bridge-find-shortcut-detector",
+            "asset": "review-runtime-bridge-*.js",
+            "anchor": "if(!n||e!==g.BROWSER)return!1;",
+            "replacement": "if(!n||!(e===g.BROWSER||typeof e===\"string\"&&e.startsWith(g.BROWSER+\":\")))return!1;",
+            "description": "Keep browser find-shortcut routing active for suffixed browser tab ids."
+          },
+          {
+            "id": "review-runtime-bridge-browser-overlay-condition",
+            "asset": "review-runtime-bridge-*.js",
+            "anchor": "p=i?.tabId!==g.BROWSER||!a||o",
+            "replacement": "p=!(i?.tabId===g.BROWSER||typeof i?.tabId===\"string\"&&i.tabId.startsWith(g.BROWSER+\":\"))||!a||o",
+            "description": "Apply browser overlay behavior to suffixed browser tab ids."
+          },
+          {
+            "id": "app-shell-browser-shortcut-active-tab",
+            "asset": "app-shell-*.js",
+            "anchor": "m=s?.tabId===h.BROWSER?l:null",
+            "replacement": "m=(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))?l:null",
+            "description": "Report right-panel browser shortcut state for suffixed browser tab ids."
+          },
+          {
+            "id": "app-shell-browser-close-active-tab",
+            "asset": "app-shell-*.js",
+            "anchor": "s?.tabId===h.BROWSER&&c.closeTab(t,s.tabId)",
+            "replacement": "(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))&&c.closeTab(t,s.tabId)",
+            "description": "Close the active suffixed browser tab from app-shell close commands."
+          }
+        ]
+      }
+    },
+    {
+      "id": "co.thomashulihan.followup",
+      "path": "tweaks/followup",
+      "manifest": {
+        "id": "co.thomashulihan.followup",
+        "name": "Codex Follow-up",
+        "version": "0.3.0",
+        "githubRepo": "hulibrands/tweakers",
+        "forkOf": {
+          "upstreamId": "co.Arconte112.followup",
+          "upstreamGithubRepo": "Arconte112/codex-plusplus-followup",
+          "upstreamVersion": "0.3.0",
+          "upstreamCommitSha": "3d169c4f2f6508c3cf6a89a6531ed939209b5d6c",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "description": "Clickable context-aware follow-up prompts with AGENTS.md instruction sync.",
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "tags": [
+          "ui",
+          "followups"
+        ],
+        "scope": "both",
+        "main": "index.js",
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/followup"
+      }
+    },
+    {
+      "id": "co.thomashulihan.github-accounts",
+      "path": "tweaks/github-accounts",
+      "manifest": {
+        "id": "co.thomashulihan.github-accounts",
+        "name": "GitHub Accounts",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Assign Codex projects to GitHub accounts and keep project-local Git identity aligned.",
+        "forkOf": {
+          "upstreamId": "co.Arconte112.github-accounts",
+          "upstreamGithubRepo": "hulibrands/codex-plusplus",
+          "upstreamPath": "tweaks/github-accounts",
+          "upstreamVersion": "0.1.0",
+          "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/github-accounts",
+        "tags": [
+          "github",
+          "git",
+          "accounts",
+          "projects"
+        ],
+        "scope": "both",
+        "permissions": [
+          "ipc",
+          "filesystem",
+          "settings"
+        ],
+        "mcp": {
+          "command": "node",
+          "args": [
+            "./mcp-server.js"
+          ]
+        }
+      }
+    },
+    {
+      "id": "co.thomashulihan.mode-switcher",
+      "path": "tweaks/mode-switcher",
+      "manifest": {
+        "id": "co.thomashulihan.mode-switcher",
+        "name": "Mode Switcher",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "forkOf": {
+          "upstreamId": "co.thomas.mode-switcher",
+          "upstreamGithubRepo": "hulibrands/tweakers",
+          "upstreamPath": "mode-switcher",
+          "upstreamVersion": "0.1.0",
+          "upstreamCommitSha": "5c9e0563f24f4ad4ddd4337921f759b83f20dea8",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "description": "Toggle between vanilla Codex and Codex++ from the Config page.",
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/mode-switcher",
+        "tags": [
+          "ui",
+          "config"
+        ],
+        "scope": "both"
+      }
+    },
+    {
+      "id": "co.thomashulihan.project-chrome-profile",
+      "path": "tweaks/project-chrome-profile",
+      "manifest": {
+        "id": "co.thomashulihan.project-chrome-profile",
+        "name": "Plugin Profiles",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Assign Chrome profiles to project paths for Chrome-backed workflows.",
+        "forkOf": {
+          "upstreamId": "co.bennett.project-chrome-profile",
+          "upstreamGithubRepo": "hulibrands/codex-plusplus",
+          "upstreamPath": "tweaks/project-chrome-profile",
+          "upstreamVersion": "0.1.0",
+          "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/project-chrome-profile",
+        "tags": [
+          "chrome",
+          "google",
+          "profiles",
+          "projects"
+        ],
+        "scope": "both",
+        "permissions": [
+          "ipc",
+          "filesystem",
+          "settings"
+        ],
+        "mcp": {
+          "command": "node",
+          "args": [
+            "./mcp-server.js"
+          ]
+        }
+      }
+    },
+    {
+      "id": "co.thomashulihan.shadcn-codex-ui",
+      "path": "tweaks/shadcn-codex-ui",
+      "manifest": {
+        "id": "co.thomashulihan.shadcn-codex-ui",
+        "name": "Shadcn Codex UI",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Scoped, reversible shadcn-style token and surface treatment for Codex++.",
+        "iconUrl": "./assets/icon.png",
+        "forkOf": {
+          "upstreamId": "co.Arconte112.shadcn-codex-ui",
+          "upstreamGithubRepo": "hulibrands/codex-plusplus",
+          "upstreamPath": "tweaks/shadcn-codex-ui",
+          "upstreamVersion": "0.1.0",
+          "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/shadcn-codex-ui",
+        "tags": [
+          "ui",
+          "theme",
+          "shadcn",
+          "settings"
+        ],
+        "scope": "both",
+        "permissions": [
+          "settings"
+        ]
+      }
+    },
+    {
+      "id": "co.thomashulihan.titlebar-controls",
+      "path": "tweaks/titlebar-controls",
+      "manifest": {
+        "id": "co.thomashulihan.titlebar-controls",
+        "name": "Titlebar Controls",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Align Codex titlebar controls with the native macOS window buttons.",
+        "author": {
+          "name": "Thomas Hulihan"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/titlebar-controls",
+        "tags": [
+          "ui",
+          "titlebar",
+          "macos"
+        ],
+        "scope": "renderer",
+        "main": "index.js"
+      }
+    },
+    {
+      "id": "co.thomashulihan.tweaks-directory",
+      "path": "tweaks/tweaks-directory",
+      "manifest": {
+        "id": "co.thomashulihan.tweaks-directory",
+        "name": "Tweaks Directory",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Adds installed tweaks and the Tweak Store as a Tweaks tab in the Plugins directory.",
+        "author": {
+          "name": "Thomas Hulihan"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/tweaks-directory",
+        "tags": [
+          "ui",
+          "tweaks",
+          "plugins"
+        ],
+        "permissions": [
+          "ipc",
+          "settings",
+          "codex.views"
+        ],
+        "scope": "both",
+        "main": "index.cjs"
+      }
+    },
+    {
+      "id": "co.thomashulihan.ui-improvements",
+      "path": "tweaks/ui-improvements",
+      "manifest": {
+        "id": "co.thomashulihan.ui-improvements",
+        "name": "Bennett's UI Improvements",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "forkOf": {
+          "upstreamId": "co.bennett.ui-improvements",
+          "upstreamGithubRepo": "b-nnett/codex-plusplus-bennett-ui",
+          "upstreamVersion": "0.1.6",
+          "upstreamCommitSha": "cc34f6d1dc6e8f624ee4d0152938efccca268d4a",
+          "forkedAt": "2026-05-17T22:00:00.000Z"
+        },
+        "description": "UI Improvements fork with local sidebar, usage, and message metric behavior.",
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "tags": [
+          "ui",
+          "usage",
+          "upgrade"
+        ],
+        "scope": "both",
+        "main": "index.js",
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/ui-improvements"
+      }
+    }
+  ]
+}

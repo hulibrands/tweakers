@@ -1,0 +1,18 @@
+{
+  "id": "co.thomashulihan.titlebar-controls",
+  "name": "Titlebar Controls",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Align Codex titlebar controls with the native macOS window buttons.",
+  "author": {
+    "name": "Thomas Hulihan"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/titlebar-controls",
+  "tags": [
+    "ui",
+    "titlebar",
+    "macos"
+  ],
+  "scope": "renderer",
+  "main": "index.js"
+}

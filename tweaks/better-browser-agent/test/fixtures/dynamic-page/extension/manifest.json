@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Dynamic Runner Fixture Extension",
+  "version": "0.0.1",
+  "permissions": [],
+  "host_permissions": ["https://fixture.test/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://fixture.test/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

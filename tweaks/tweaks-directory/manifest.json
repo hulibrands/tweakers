@@ -1,0 +1,23 @@
+{
+  "id": "co.thomashulihan.tweaks-directory",
+  "name": "Tweaks Directory",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Adds installed tweaks and the Tweak Store as a Tweaks tab in the Plugins directory.",
+  "author": {
+    "name": "Thomas Hulihan"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/tweaks-directory",
+  "tags": [
+    "ui",
+    "tweaks",
+    "plugins"
+  ],
+  "permissions": [
+    "ipc",
+    "settings",
+    "codex.views"
+  ],
+  "scope": "both",
+  "main": "index.cjs"
+}

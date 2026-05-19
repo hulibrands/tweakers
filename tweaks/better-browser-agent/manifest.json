@@ -1,0 +1,72 @@
+{
+  "id": "co.thomashulihan.better-browser-agent",
+  "name": "Better Browser Agent",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "forkOf": {
+    "upstreamId": "co.bennett.better-browser",
+    "upstreamGithubRepo": "b-nnett/codex-plusplus-better-browser",
+    "upstreamVersion": "0.1.2",
+    "upstreamCommitSha": "dfcc75ec0d8e980698974a3a2b80531cd553af77",
+    "forkedAt": "2026-05-17T22:00:00.000Z"
+  },
+  "description": "Browser-side-panel diagnostics and agent inspection helpers for Codex++.",
+  "author": {
+    "name": "Thomas Hulihan"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/better-browser-agent",
+  "tags": [
+    "browser",
+    "tabs",
+    "devtools",
+    "shortcuts",
+    "agent",
+    "extensions"
+  ],
+  "scope": "main",
+  "main": "index.js",
+  "patches": [
+    {
+      "id": "review-runtime-bridge-browser-plus-menu-cap",
+      "asset": "review-runtime-bridge-*.js",
+      "anchor": "M=u&&!l.some(Dr)",
+      "replacement": "M=u&&l.filter(Dr).length<25",
+      "description": "Allow multiple browser right-panel tabs before hiding the browser plus-menu entry."
+    },
+    {
+      "id": "review-runtime-bridge-browser-tab-detector",
+      "asset": "review-runtime-bridge-*.js",
+      "anchor": "function Dr(e){return e.tabId===g.BROWSER}",
+      "replacement": "function Dr(e){return e.tabId===g.BROWSER||typeof e.tabId===\"string\"&&e.tabId.startsWith(g.BROWSER+\":\")}",
+      "description": "Treat browser tab ids with BROWSER-prefixed suffixes as browser tabs."
+    },
+    {
+      "id": "review-runtime-bridge-find-shortcut-detector",
+      "asset": "review-runtime-bridge-*.js",
+      "anchor": "if(!n||e!==g.BROWSER)return!1;",
+      "replacement": "if(!n||!(e===g.BROWSER||typeof e===\"string\"&&e.startsWith(g.BROWSER+\":\")))return!1;",
+      "description": "Keep browser find-shortcut routing active for suffixed browser tab ids."
+    },
+    {
+      "id": "review-runtime-bridge-browser-overlay-condition",
+      "asset": "review-runtime-bridge-*.js",
+      "anchor": "p=i?.tabId!==g.BROWSER||!a||o",
+      "replacement": "p=!(i?.tabId===g.BROWSER||typeof i?.tabId===\"string\"&&i.tabId.startsWith(g.BROWSER+\":\"))||!a||o",
+      "description": "Apply browser overlay behavior to suffixed browser tab ids."
+    },
+    {
+      "id": "app-shell-browser-shortcut-active-tab",
+      "asset": "app-shell-*.js",
+      "anchor": "m=s?.tabId===h.BROWSER?l:null",
+      "replacement": "m=(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))?l:null",
+      "description": "Report right-panel browser shortcut state for suffixed browser tab ids."
+    },
+    {
+      "id": "app-shell-browser-close-active-tab",
+      "asset": "app-shell-*.js",
+      "anchor": "s?.tabId===h.BROWSER&&c.closeTab(t,s.tabId)",
+      "replacement": "(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))&&c.closeTab(t,s.tabId)",
+      "description": "Close the active suffixed browser tab from app-shell close commands."
+    }
+  ]
+}

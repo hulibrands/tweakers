@@ -1,0 +1,25 @@
+{
+  "id": "co.thomashulihan.followup",
+  "name": "Codex Follow-up",
+  "version": "0.3.0",
+  "githubRepo": "hulibrands/tweakers",
+  "forkOf": {
+    "upstreamId": "co.Arconte112.followup",
+    "upstreamGithubRepo": "Arconte112/codex-plusplus-followup",
+    "upstreamVersion": "0.3.0",
+    "upstreamCommitSha": "3d169c4f2f6508c3cf6a89a6531ed939209b5d6c",
+    "forkedAt": "2026-05-17T22:00:00.000Z"
+  },
+  "description": "Clickable context-aware follow-up prompts with AGENTS.md instruction sync.",
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "tags": [
+    "ui",
+    "followups"
+  ],
+  "scope": "both",
+  "main": "index.js",
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/followup"
+}

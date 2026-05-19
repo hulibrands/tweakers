@@ -1,0 +1,31 @@
+{
+  "id": "co.thomashulihan.shadcn-codex-ui",
+  "name": "Shadcn Codex UI",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Scoped, reversible shadcn-style token and surface treatment for Codex++.",
+  "iconUrl": "./assets/icon.png",
+  "forkOf": {
+    "upstreamId": "co.Arconte112.shadcn-codex-ui",
+    "upstreamGithubRepo": "hulibrands/codex-plusplus",
+    "upstreamPath": "tweaks/shadcn-codex-ui",
+    "upstreamVersion": "0.1.0",
+    "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
+    "forkedAt": "2026-05-17T22:00:00.000Z"
+  },
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/shadcn-codex-ui",
+  "tags": [
+    "ui",
+    "theme",
+    "shadcn",
+    "settings"
+  ],
+  "scope": "both",
+  "permissions": [
+    "settings"
+  ]
+}
