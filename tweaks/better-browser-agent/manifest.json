@@ -10,7 +10,7 @@
     "upstreamCommitSha": "dfcc75ec0d8e980698974a3a2b80531cd553af77",
     "forkedAt": "2026-05-17T22:00:00.000Z"
   },
-  "description": "Browser-side-panel diagnostics and agent inspection helpers for Codex++.",
+  "description": "ShadGPT-owned Better Browser fork with agent inspection and extension analysis for Codex's browser side panel.",
   "author": {
     "name": "Thomas Hulihan"
   },
@@ -25,47 +25,54 @@
   ],
   "scope": "main",
   "main": "index.js",
+  "mcp": {
+    "command": "node",
+    "args": [
+      "./mcp-server.js"
+    ],
+    "enabledByDefault": false
+  },
   "patches": [
     {
       "id": "review-runtime-bridge-browser-plus-menu-cap",
-      "asset": "review-runtime-bridge-*.js",
-      "anchor": "M=u&&!l.some(Dr)",
-      "replacement": "M=u&&l.filter(Dr).length<25",
+      "asset": "thread-app-shell-chrome-*.js",
+      "anchor": "Le=k&&!D.some(st)",
+      "replacement": "Le=k&&D.filter(st).length<25",
       "description": "Allow multiple browser right-panel tabs before hiding the browser plus-menu entry."
     },
     {
       "id": "review-runtime-bridge-browser-tab-detector",
-      "asset": "review-runtime-bridge-*.js",
-      "anchor": "function Dr(e){return e.tabId===g.BROWSER}",
-      "replacement": "function Dr(e){return e.tabId===g.BROWSER||typeof e.tabId===\"string\"&&e.tabId.startsWith(g.BROWSER+\":\")}",
+      "asset": "thread-app-shell-chrome-*.js",
+      "anchor": "function st(e){return e.tabId===se.BROWSER}",
+      "replacement": "function st(e){return e.tabId===se.BROWSER||typeof e.tabId===\"string\"&&e.tabId.startsWith(se.BROWSER+\":\")}",
       "description": "Treat browser tab ids with BROWSER-prefixed suffixes as browser tabs."
     },
     {
       "id": "review-runtime-bridge-find-shortcut-detector",
       "asset": "review-runtime-bridge-*.js",
-      "anchor": "if(!n||e!==g.BROWSER)return!1;",
-      "replacement": "if(!n||!(e===g.BROWSER||typeof e===\"string\"&&e.startsWith(g.BROWSER+\":\")))return!1;",
+      "anchor": "if(!n||e!==T.BROWSER)return!1;",
+      "replacement": "if(!n||!(e===T.BROWSER||typeof e===\"string\"&&e.startsWith(T.BROWSER+\":\")))return!1;",
       "description": "Keep browser find-shortcut routing active for suffixed browser tab ids."
     },
     {
       "id": "review-runtime-bridge-browser-overlay-condition",
       "asset": "review-runtime-bridge-*.js",
-      "anchor": "p=i?.tabId!==g.BROWSER||!a||o",
-      "replacement": "p=!(i?.tabId===g.BROWSER||typeof i?.tabId===\"string\"&&i.tabId.startsWith(g.BROWSER+\":\"))||!a||o",
+      "anchor": "h=i?.tabId!==T.BROWSER||!a||o",
+      "replacement": "h=!(i?.tabId===T.BROWSER||typeof i?.tabId===\"string\"&&i.tabId.startsWith(T.BROWSER+\":\"))||!a||o",
       "description": "Apply browser overlay behavior to suffixed browser tab ids."
     },
     {
       "id": "app-shell-browser-shortcut-active-tab",
       "asset": "app-shell-*.js",
-      "anchor": "m=s?.tabId===h.BROWSER?l:null",
-      "replacement": "m=(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))?l:null",
+      "anchor": "d=s?.tabId===Be.BROWSER?c:null",
+      "replacement": "d=(s?.tabId===Be.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(Be.BROWSER+\":\"))?c:null",
       "description": "Report right-panel browser shortcut state for suffixed browser tab ids."
     },
     {
       "id": "app-shell-browser-close-active-tab",
       "asset": "app-shell-*.js",
-      "anchor": "s?.tabId===h.BROWSER&&c.closeTab(t,s.tabId)",
-      "replacement": "(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))&&c.closeTab(t,s.tabId)",
+      "anchor": "s?.tabId===Be.BROWSER&&Ve.closeTab(t,s.tabId)",
+      "replacement": "(s?.tabId===Be.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(Be.BROWSER+\":\"))&&Ve.closeTab(t,s.tabId)",
       "description": "Close the active suffixed browser tab from app-shell close commands."
     }
   ]

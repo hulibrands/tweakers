@@ -28,6 +28,8 @@
  *                               multiple rows and run batch actions.
  *  • show-pinned-chat-project-names  Shows a small project name under
  *                                    pinned sidebar chats.
+ *  • clarify-stale-chat-branch-label Rewords sidebar hover text that shows
+ *                                    a historical chat branch.
  *  • show-message-metrics-on-hover  Shows Codex token metrics beside
  *                                   assistant messages on hover.
  *
@@ -64,6 +66,11 @@ const FEATURE_DEFS = Object.freeze([
       "Remove the rounded inner corners on the main content panel so it sits flush against the sidebar.",
   },
   {
+    id: "settings-search",
+    title: "Settings search",
+    description: "Add a search field above Settings tabs so sections can be filtered quickly.",
+  },
+  {
     id: "match-sidebar-width",
     title: "Match settings sidebar width",
     description:
@@ -91,6 +98,16 @@ const FEATURE_DEFS = Object.freeze([
     title: "Show project label for pinned chats",
     description: "Show a smaller, subdued project label under pinned chats, and under all chats in chronological list mode.",
   },
+  {
+    id: "slash-menu-polish",
+    title: "Slash menu polish",
+    description: "Tighten slash menu rows with calmer section headers and clearer active state.",
+  },
+  {
+    id: "clarify-stale-chat-branch-label",
+    title: "Clarify stale chat branch labels",
+    description: "Reword sidebar hover text so an old chat branch is shown as historical, not the active repo branch.",
+  },
 ]);
 
 const DEFAULT_FEATURE_FLAGS = Object.freeze({
@@ -98,21 +115,32 @@ const DEFAULT_FEATURE_FLAGS = Object.freeze({
   "show-usage-in-sidebar": false,
   "show-message-metrics-on-hover": true,
   "square-sidebar": false,
+  "settings-search": false,
   "match-sidebar-width": true,
   "sidebar-action-grid": true,
   "sidebar-project-backgrounds": true,
   "sidebar-chat-multi-select": true,
   "show-pinned-chat-project-names": true,
+  "slash-menu-polish": false,
+  "clarify-stale-chat-branch-label": true,
 });
 
 const BRIDGE_EVENT = "codexpp-ui-improvements-setting-changed";
 const COLOR_EVENT = "codexpp-ui-improvements-project-color-changed";
 const PROJECT_COLOR_STORAGE_KEY = "sidebar-project-backgrounds:colors";
+const MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY =
+  "__codexpp_ui_improvements_browser_annotation_composer_mode_patch__";
+const BROWSER_ANNOTATION_DEFAULT_MODE_TARGET = "defaultCreateSubmitMode:`direct`,session:";
+const BROWSER_ANNOTATION_DEFAULT_MODE_REPLACEMENT = "defaultCreateSubmitMode:`saved`,session:";
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
   start(api) {
     if (api.process === "main") {
+      this._mainDisposes = [
+        startMainLegacyBrandUiScrubber(api),
+        startMainBrowserAnnotationComposerModePatch(api),
+      ].filter(Boolean);
       startMainMetricsProvider(api);
       startMainUsageProvider(api);
       startMainProjectLabelProvider(api);
@@ -128,16 +156,17 @@ module.exports = {
     };
     this._state = state;
     state.bridgeDispose = installShadcnBridge(state);
+    state.legacyBrandDispose = startLegacyBrandUiScrubber(api);
 
     // ── settings page ──────────────────────────────────────────────────
     // We require `registerPage`. The older `register()` API would render
-    // these toggles as a *nested section* inside Codex++'s built-in
+    // these toggles as a *nested section* inside ShadGPT's built-in
     // "Tweaks" page — that's misleading, since this tweak is supposed to
     // own its own sidebar entry. If the runtime is too old we just log
     // and skip the UI; the features themselves still activate below.
     if (typeof api.settings?.registerPage !== "function") {
       api.log.warn(
-        "registerPage unavailable - Codex++ runtime is too old. " +
+        "registerPage unavailable - ShadGPT runtime is too old. " +
           "Restart Codex to pick up the latest preload. Settings UI not mounted.",
       );
     } else {
@@ -162,6 +191,15 @@ module.exports = {
   },
 
   stop() {
+    for (const dispose of this._mainDisposes || []) {
+      try {
+        dispose?.();
+      } catch {
+        // Best-effort cleanup for main-process hot reload hooks.
+      }
+    }
+    this._mainDisposes = null;
+
     const s = this._state;
     if (!s) return;
     for (const [, f] of s.features) {
@@ -174,6 +212,8 @@ module.exports = {
     s.features.clear();
     s.bridgeDispose?.();
     s.bridgeDispose = null;
+    s.legacyBrandDispose?.();
+    s.legacyBrandDispose = null;
     this._pageHandle?.unregister();
   },
 };
@@ -429,6 +469,130 @@ function normalizeProjectColorKey(value) {
 
 const FEATURES = {
   /**
+   * Codex sidebar hover cards can show the branch that a chat last used.
+   * When the PR branch has since been merged/deleted, the native copy reads
+   * like the branch is still active. We cannot change Codex's chat metadata
+   * from a renderer tweak, but we can make the hover card label truthful.
+   */
+  "clarify-stale-chat-branch-label"(api) {
+    const ORIGINAL =
+      "Chat branch reflects active branch when last used; sending a message will update chat branch";
+    const REPLACEMENT =
+      "Last used chat branch; opening or sending in the chat refreshes it from the current repo branch";
+    const MARK_ATTR = "data-codexpp-stale-branch-label-clarified";
+    const touched = new Set();
+    // Fingerprint guard: skip repeated element attr checks until aria/title
+    // changes. This keeps the initial full scan cheap on later scoped passes.
+    const processed = new WeakMap();
+
+    const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim();
+
+    const clarifyTextNode = (node) => {
+      if (!node || node.nodeType !== Node.TEXT_NODE) return;
+      const text = normalize(node.nodeValue);
+      if (text !== ORIGINAL) return;
+      node.nodeValue = REPLACEMENT;
+      touched.add(node);
+    };
+
+    const clarifyElement = (node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const fingerprint = `${node.getAttribute("aria-label") || ""}\n${node.getAttribute("title") || ""}`;
+      if (processed.get(node) === fingerprint) return;
+      let didTouchAttr = false;
+      for (const attr of ["aria-label", "title"]) {
+        const value = node.getAttribute(attr);
+        if (normalize(value) === ORIGINAL) {
+          node.setAttribute(attr, REPLACEMENT);
+          node.setAttribute(MARK_ATTR, attr);
+          touched.add(node);
+          didTouchAttr = true;
+        }
+      }
+      processed.set(node, fingerprint);
+      for (const child of node.childNodes) clarifyTextNode(child);
+    };
+
+    const scanRoot = (root) => {
+      if (!root) return;
+      if (root.nodeType === Node.TEXT_NODE) {
+        clarifyTextNode(root);
+        return;
+      }
+      if (!(root instanceof HTMLElement)) return;
+      clarifyElement(root);
+      const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      );
+      let node = walker.nextNode();
+      while (node) {
+        if (node.nodeType === Node.TEXT_NODE) clarifyTextNode(node);
+        else clarifyElement(node);
+        node = walker.nextNode();
+      }
+    };
+
+    const pendingRoots = new Set();
+    let scheduled = false;
+    const scheduleScan = (root) => {
+      if (root) pendingRoots.add(root);
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const roots = Array.from(pendingRoots);
+        pendingRoots.clear();
+        for (const item of roots) scanRoot(item);
+      });
+    };
+    const onMutate = (mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "attributes") {
+          scheduleScan(mutation.target);
+          continue;
+        }
+        if (mutation.type === "characterData") {
+          scheduleScan(mutation.target);
+          continue;
+        }
+        if (mutation.type === "childList") {
+          for (const node of mutation.addedNodes) scheduleScan(node);
+        }
+      }
+    };
+
+    const obs = new MutationObserver(onMutate);
+    scanRoot(document.body || document.documentElement);
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["aria-label", "title"],
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    api.log.info("stale chat branch label clarification active");
+
+    return () => {
+      obs.disconnect();
+      for (const node of touched) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (normalize(node.nodeValue) === REPLACEMENT) {
+            node.nodeValue = String(node.nodeValue).replace(REPLACEMENT, ORIGINAL);
+          }
+          continue;
+        }
+        if (node instanceof HTMLElement) {
+          const attr = node.getAttribute(MARK_ATTR);
+          if (attr && normalize(node.getAttribute(attr)) === REPLACEMENT) node.setAttribute(attr, ORIGINAL);
+          node.removeAttribute(MARK_ATTR);
+        }
+      }
+      touched.clear();
+    };
+  },
+
+  /**
    * Hide the "Upgrade" / "Get Plus" buttons. We match by visible text
    * across the document, skipping anything inside Codex's settings shell
    * or our own injected panels. Hidden via inline `display:none` so we
@@ -449,6 +613,10 @@ const FEATURES = {
     ]);
     const CONTAINS = ["upgrade for higher limits"];
     const hidden = new Set(/* HTMLElement */);
+    // Fingerprint guard: remember the short label last inspected for each
+    // candidate. If text/aria/title changes later, the candidate is eligible
+    // again without rescanning the whole document synchronously.
+    const processed = new WeakMap();
 
     const isInsideOurShell = (el) => {
       let n = el;
@@ -471,16 +639,31 @@ const FEATURES = {
       return false;
     };
 
-    const scan = () => {
-      const candidates = document.querySelectorAll(
+    const scanRoot = (root) => {
+      if (!(root instanceof Element)) return;
+      const candidates = [];
+      if (root.matches?.('button, a, [role="button"], [role="menuitem"]')) {
+        candidates.push(root);
+      }
+      candidates.push(...root.querySelectorAll(
         'button, a, [role="button"], [role="menuitem"]',
-      );
+      ));
       for (const el of candidates) {
         if (hidden.has(el)) continue;
         if (isInsideOurShell(el)) continue;
         const t = normText(el);
-        if (t.length === 0 || t.length > 80) continue;
-        if (!matches(t)) continue;
+        if (processed.get(el) === t) continue;
+        if (t.length === 0) {
+          processed.set(el, t);
+          continue;
+        }
+        if (t.length > 80) {
+          continue;
+        }
+        if (!matches(t)) {
+          processed.set(el, t);
+          continue;
+        }
         const host = el.closest('[class*="rounded"], [class*="badge"]') || el;
         if (!(host instanceof HTMLElement)) continue;
         host.dataset.codexppPrevDisplay = host.style.display || "";
@@ -490,9 +673,44 @@ const FEATURES = {
       }
     };
 
-    scan();
-    const obs = new MutationObserver(scan);
-    obs.observe(document.documentElement, { childList: true, subtree: true });
+    const pendingRoots = new Set();
+    let scheduled = false;
+    const scheduleScan = (root) => {
+      if (root instanceof Element) {
+        pendingRoots.add(root.closest?.('button, a, [role="button"], [role="menuitem"]') || root);
+      } else if (root?.parentElement) {
+        pendingRoots.add(root.parentElement);
+      }
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const roots = Array.from(pendingRoots);
+        pendingRoots.clear();
+        for (const item of roots) scanRoot(item);
+      });
+    };
+    const onMutate = (mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "childList") {
+          for (const node of mutation.addedNodes) scheduleScan(node);
+        } else if (mutation.type === "characterData") {
+          scheduleScan(mutation.target.parentElement);
+        } else if (mutation.type === "attributes") {
+          scheduleScan(mutation.target);
+        }
+      }
+    };
+
+    scanRoot(document.body || document.documentElement);
+    const obs = new MutationObserver(onMutate);
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["aria-label", "title"],
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
 
     return () => {
       obs.disconnect();
@@ -1007,13 +1225,31 @@ const FEATURES = {
         : { weekly: { label, ...value } };
     };
 
+    // WeakSet fingerprint guard (Phase 5.4): nodes whose textContent we've
+    // already parsed and rejected. The selector below picks up every span,
+    // button, aria-labelled, and title-bearing node in the doc — typically
+    // thousands during a token stream. Most never have a `%` and never will,
+    // so we cache the negative result here.
+    const compactUsageProcessed = new WeakSet();
     const scanCompactUsage = () => {
       const candidates = document.querySelectorAll(
         'button, [role="button"], [role="status"], [aria-label], [title], span',
       );
       for (const node of candidates) {
+        if (compactUsageProcessed.has(node)) continue;
         const partial = parseCompactUsageNode(node);
-        if (partial) applySnapshot(partial, "compact");
+        if (partial) {
+          applySnapshot(partial, "compact");
+        } else if (node instanceof HTMLElement) {
+          // Only mark elements whose text we definitively examined and
+          // rejected. parseCompactUsageNode returns null both for "not
+          // applicable" (no %) and "applicable but invalid" cases; either
+          // way, until the node's text mutates we can skip re-checking it.
+          // Codex DOES mutate the percentage text of the actual indicator,
+          // but those nodes have a `%` and would have parsed successfully.
+          const text = (node.textContent || "");
+          if (!/%/.test(text)) compactUsageProcessed.add(node);
+        }
       }
     };
 
@@ -1151,6 +1387,166 @@ const FEATURES = {
   },
 
   /**
+   * Add a lightweight filter box to Codex Settings' sidebar. This deliberately
+   * stays inside the sidebar/nav surface and marks itself with
+   * `data-codexpp-settings-search` so the runtime Settings injector can ignore
+   * search clicks instead of treating them as navigation.
+   */
+  "settings-search"(api) {
+    const STYLE_ID = "codexpp-settings-search-style";
+    const ATTR = "data-codexpp-settings-search";
+    const SETTINGS_SIDEBAR_SELECTOR = [
+      '[role="dialog"] .window-fx-sidebar-surface',
+      ".settings-dialog .window-fx-sidebar-surface",
+      ".window-fx-sidebar-surface.w-token-sidebar",
+    ].join(", ");
+    let root = null;
+    let input = null;
+    let disposed = false;
+
+    document.getElementById(STYLE_ID)?.remove();
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      [${ATTR}="root"] {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: var(--spacing-1, 0.25rem) !important;
+        padding: 0 var(--spacing-row-x, var(--spacing-3, 0.75rem)) var(--spacing-2, 0.5rem) !important;
+      }
+
+      [${ATTR}="box"] {
+        align-items: center !important;
+        background: var(--color-token-bg-primary, var(--color-background-panel, transparent)) !important;
+        border: 1px solid var(--color-token-border, var(--color-border, currentColor)) !important;
+        border-radius: var(--radius-md, 0.375rem) !important;
+        display: flex !important;
+        min-height: var(--spacing-token-button-composer, 2rem) !important;
+        padding: 0 var(--spacing-2, 0.5rem) !important;
+      }
+
+      [${ATTR}="input"] {
+        background: transparent !important;
+        border: 0 !important;
+        color: var(--color-token-text-primary, currentColor) !important;
+        flex: 1 1 auto !important;
+        font: inherit !important;
+        min-width: 0 !important;
+        outline: 0 !important;
+      }
+
+      [${ATTR}="input"]::placeholder {
+        color: var(--color-token-text-secondary, currentColor) !important;
+      }
+    `;
+    document.head.appendChild(style);
+
+    const settingsSidebar = () => {
+      const sidebar = document.querySelector(SETTINGS_SIDEBAR_SELECTOR);
+      return sidebar instanceof HTMLElement ? sidebar : null;
+    };
+
+    const navButtons = (sidebar) =>
+      Array.from(sidebar?.querySelectorAll?.("nav button, nav [role='button']") || [])
+        .filter((node) => node instanceof HTMLElement && !node.closest(`[${ATTR}]`));
+
+    const restoreButtons = () => {
+      document.querySelectorAll(`[data-codexpp-settings-search-hidden]`).forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        node.style.display = node.dataset.codexppSettingsSearchPrevDisplay || "";
+        delete node.dataset.codexppSettingsSearchHidden;
+        delete node.dataset.codexppSettingsSearchPrevDisplay;
+      });
+    };
+
+    const applyFilter = () => {
+      const sidebar = settingsSidebar();
+      if (!sidebar || !input) return;
+      const query = compactText(input.value).toLowerCase();
+      for (const button of navButtons(sidebar)) {
+        const text = compactText(button.textContent).toLowerCase();
+        const hidden = Boolean(query && !text.includes(query));
+        if (hidden) {
+          if (button.dataset.codexppSettingsSearchHidden !== "true") {
+            button.dataset.codexppSettingsSearchPrevDisplay = button.style.display || "";
+            button.dataset.codexppSettingsSearchHidden = "true";
+          }
+          button.style.display = "none";
+        } else if (button.dataset.codexppSettingsSearchHidden === "true") {
+          button.style.display = button.dataset.codexppSettingsSearchPrevDisplay || "";
+          delete button.dataset.codexppSettingsSearchHidden;
+          delete button.dataset.codexppSettingsSearchPrevDisplay;
+        }
+      }
+    };
+
+    const mount = () => {
+      if (disposed) return;
+      const sidebar = settingsSidebar();
+      if (!sidebar) return;
+      if (root?.isConnected && sidebar.contains(root)) {
+        applyFilter();
+        return;
+      }
+      sidebar.querySelectorAll(`[${ATTR}="root"]`).forEach((node) => node.remove());
+
+      root = document.createElement("div");
+      root.setAttribute(ATTR, "root");
+      const box = document.createElement("label");
+      box.setAttribute(ATTR, "box");
+      input = document.createElement("input");
+      input.type = "search";
+      input.placeholder = "Search settings";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.setAttribute(ATTR, "input");
+      input.setAttribute("aria-label", "Search settings");
+      input.addEventListener("input", applyFilter);
+      box.appendChild(input);
+      root.appendChild(box);
+
+      const nav = sidebar.querySelector("nav");
+      sidebar.insertBefore(root, nav || sidebar.firstChild);
+      applyFilter();
+      api.log.info("settings search mounted");
+    };
+
+    let scheduled = false;
+    const scheduleMount = () => {
+      if (scheduled || disposed) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        mount();
+      });
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      if (root?.isConnected) return;
+      for (const mutation of mutations) {
+        if (mutation.type === "childList" && mutation.addedNodes.length) {
+          scheduleMount();
+          return;
+        }
+      }
+    });
+
+    mount();
+    observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    api.log.info("settings search active");
+
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      restoreButtons();
+      root?.remove();
+      root = null;
+      input = null;
+      style.remove();
+    };
+  },
+
+  /**
    * Match settings sidebar width to the main UI sidebar.
    *
    * Codex's main UI sidebar is `<aside class="pointer-events-auto relative
@@ -1232,10 +1628,27 @@ const FEATURES = {
     // Settings and main UI are mutually exclusive — when navigating
     // between them, the aside is mounted/unmounted. Watch the body for
     // structural changes and re-bind whenever a new aside appears.
-    track(document.querySelector(ASIDE_SELECTOR));
-    const mut = new MutationObserver(() => {
+    const rebind = () => {
       const a = document.querySelector(ASIDE_SELECTOR);
       if (a !== observed) track(a);
+    };
+    let rebindScheduled = false;
+    const scheduleRebind = () => {
+      if (rebindScheduled) return;
+      rebindScheduled = true;
+      requestAnimationFrame(() => {
+        rebindScheduled = false;
+        rebind();
+      });
+    };
+    track(document.querySelector(ASIDE_SELECTOR));
+    const mut = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "childList" && mutation.addedNodes.length) {
+          scheduleRebind();
+          return;
+        }
+      }
     });
     mut.observe(document.body, { childList: true, subtree: true });
 
@@ -1707,6 +2120,140 @@ const FEATURES = {
   },
 
   /**
+   * Apply visual-only polish to the currently open slash command menu. The
+   * feature marks menu roots for CSS and never intercepts item events, so Codex
+   * keeps owning slash command selection and composer behavior.
+   */
+  "slash-menu-polish"(api) {
+    const STYLE_ID = "codexpp-slash-menu-polish";
+    const ATTR = "data-codexpp-slash-menu";
+    let disposed = false;
+    const marked = new Set();
+
+    document.getElementById(STYLE_ID)?.remove();
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      [${ATTR}="true"] {
+        border: 1px solid var(--color-token-border, var(--color-border, currentColor)) !important;
+        border-radius: var(--radius-lg, 0.5rem) !important;
+        box-shadow: 0 12px 36px rgb(9 9 11 / 0.16) !important;
+        overflow: hidden !important;
+      }
+
+      [${ATTR}="true"] [role="option"],
+      [${ATTR}="true"] [role="menuitem"],
+      [${ATTR}="true"] button {
+        border-radius: var(--radius-md, 0.375rem) !important;
+        min-height: 2rem !important;
+      }
+
+      [${ATTR}="true"] [role="option"]:hover,
+      [${ATTR}="true"] [role="menuitem"]:hover,
+      [${ATTR}="true"] button:hover {
+        background: var(--color-token-list-hover-background, var(--color-token-bg-fog, transparent)) !important;
+      }
+
+      [${ATTR}="true"] [aria-selected="true"],
+      [${ATTR}="true"] [data-highlighted],
+      [${ATTR}="true"] [data-state="checked"] {
+        background: var(--color-token-list-selected-background, var(--color-token-bg-fog, transparent)) !important;
+      }
+    `;
+    document.head.appendChild(style);
+
+    const isVisible = (node) => {
+      if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+      if (node.closest("[hidden], [inert], [aria-hidden='true']")) return false;
+      const computed = window.getComputedStyle(node);
+      if (computed.display === "none" || computed.visibility === "hidden" || computed.opacity === "0") {
+        return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
+    const hasMenuItems = (node) =>
+      Boolean(node.querySelector("[role='option'], [role='menuitem'], button"));
+
+    const isLikelySlashMenu = (node) => {
+      if (!isVisible(node) || node.closest("[data-codexpp-settings-search]")) return false;
+      const role = node.getAttribute("role");
+      if (role !== "listbox" && role !== "menu") return false;
+      if (!hasMenuItems(node)) return false;
+      const active = document.activeElement;
+      const composerActive = Boolean(
+        active?.matches?.("textarea, [contenteditable='true'], [data-testid*='composer' i], [aria-label*='prompt' i]") ||
+          active?.closest?.("form, [data-testid*='composer' i]"),
+      );
+      if (!composerActive) {
+        const rect = node.getBoundingClientRect();
+        if (rect.bottom < window.innerHeight * 0.35) return false;
+      }
+      return true;
+    };
+
+    const apply = () => {
+      if (disposed) return;
+      const active = new Set();
+      const candidates = document.querySelectorAll("[role='listbox'], [role='menu']");
+      for (const node of candidates) {
+        if (!(node instanceof HTMLElement) || !isLikelySlashMenu(node)) continue;
+        active.add(node);
+        marked.add(node);
+        if (node.getAttribute(ATTR) !== "true") node.setAttribute(ATTR, "true");
+      }
+      for (const node of Array.from(marked)) {
+        if (!node.isConnected || !active.has(node)) {
+          node.removeAttribute?.(ATTR);
+          marked.delete(node);
+        }
+      }
+    };
+
+    let scheduled = false;
+    const scheduleApply = () => {
+      if (scheduled || disposed) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        apply();
+      });
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (
+          mutation.type === "childList" ||
+          (mutation.type === "attributes" && mutation.attributeName === "data-state")
+        ) {
+          scheduleApply();
+          return;
+        }
+      }
+    });
+
+    apply();
+    observer.observe(document.body || document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-state"],
+      childList: true,
+      subtree: true,
+    });
+    document.addEventListener("focusin", scheduleApply, true);
+    api.log.info("slash menu polish active");
+
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      document.removeEventListener("focusin", scheduleApply, true);
+      for (const node of marked) node.removeAttribute?.(ATTR);
+      marked.clear();
+      style.remove();
+    };
+  },
+
+  /**
    * Let sidebar chat rows be multi-selected with Cmd/Ctrl-click, then expose
    * batch actions from a right-click menu. We deliberately call Codex's native
    * controls for the actual actions so the app owns persistence and side
@@ -1872,10 +2419,10 @@ const FEATURES = {
         .filter(Boolean);
     };
 
-    const clearSelection = () => {
+    const clearSelection = ({ closeMenu = true } = {}) => {
       selectedIds.clear();
       lastAnchorId = null;
-      closeNativeMenu();
+      if (closeMenu) closeNativeMenu();
       applySelection();
     };
 
@@ -1899,12 +2446,23 @@ const FEATURES = {
       applySelection();
     };
 
+    // Fingerprint cache (Phase 5.4): the heavy DOM rewrite below is skipped
+    // when both the row-id set and the selection set are unchanged from the
+    // last apply. During token streaming the sidebar contents don't shift,
+    // so this is the common case.
+    let lastApplyFingerprint = null;
     const applySelection = () => {
       const rows = threadRows();
       const visibleIds = new Set(rows.map((row) => row.id));
       for (const id of Array.from(selectedIds)) {
         if (!visibleIds.has(id)) selectedIds.delete(id);
       }
+      const fingerprint =
+        rows.map((row) => row.id).sort().join("|") +
+        "::" +
+        Array.from(selectedIds).sort().join("|");
+      if (fingerprint === lastApplyFingerprint) return;
+      lastApplyFingerprint = fingerprint;
       document
         .querySelectorAll(`[${ROW_ATTR}], [${SELECTED_ATTR}], [${TARGET_ATTR}]`)
         .forEach((node) => {
@@ -1923,11 +2481,70 @@ const FEATURES = {
     const isNativeActionClick = (target) =>
       Boolean(target?.closest?.("button, input, textarea, select, [contenteditable='true']"));
 
+    const shouldLetNativeNavigationProceed = (event, record) =>
+      Boolean(
+        record &&
+          !isNativeActionClick(event.target) &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.shiftKey &&
+          (event.button == null || event.button === 0),
+      );
+
+    const clearSelectionBeforeNativeNavigation = (event, record) => {
+      if (!selectedIds.size || !shouldLetNativeNavigationProceed(event, record)) return false;
+      clearSelection({ closeMenu: false });
+      return true;
+    };
+
+    const normalizeMenuText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+
+    const isVisibleElement = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect?.() || { width: 0, height: 0 };
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = window.getComputedStyle?.(node);
+      return !style || (style.display !== "none" && style.visibility !== "hidden");
+    };
+
+    const isBoundedMenuPopover = (node) => {
+      if (!(node instanceof HTMLElement) || !isVisibleElement(node)) return false;
+      if (node === document.body || node === document.documentElement) return false;
+      const rect = node.getBoundingClientRect?.() || { width: 0, height: 0 };
+      const maxWidth = Math.max(360, Math.min(window.innerWidth || 1280, 900));
+      const maxHeight = Math.max(220, Math.min(window.innerHeight || 800, 720));
+      return rect.width >= 120 && rect.height >= 48 && rect.width <= maxWidth && rect.height <= maxHeight;
+    };
+
+    const menuText = (node) => normalizeMenuText(node?.textContent || "");
+
+    const isKnownNativeMenuText = (text) =>
+      /open in mini window/i.test(text) ||
+      /\b(remove|delete|archive|pin)\b/i.test(text);
+
+    const closestNativeMenu = (target) => {
+      if (!(target instanceof HTMLElement)) return null;
+      const semantic = target.closest('[role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]');
+      if (semantic instanceof HTMLElement) return semantic;
+      let node = target.parentElement;
+      let best = null;
+      while (node instanceof HTMLElement && node !== document.body && node !== document.documentElement) {
+        const text = menuText(node);
+        if (isBoundedMenuPopover(node) && isKnownNativeMenuText(text)) best = node;
+        node = node.parentElement;
+      }
+      return best;
+    };
+
+    const nativeMenuItems = (root) =>
+      Array.from(root.querySelectorAll('[role="menuitem"], [data-radix-collection-item], button, div'))
+        .filter((item) => item instanceof HTMLElement && isVisibleElement(item));
+
     const onClick = (event) => {
       if (disposed || actionInProgress) return;
       const record = rowRecordFromTarget(event.target);
       if (!record) {
-        if (selectedIds.size && !event.target?.closest?.('[role="menu"]')) clearSelection();
+        if (selectedIds.size && !closestNativeMenu(event.target)) clearSelection();
         return;
       }
       if (isNativeActionClick(event.target)) return;
@@ -1939,9 +2556,7 @@ const FEATURES = {
         else toggleSelection(record.id);
         return;
       }
-      if (selectedIds.size) {
-        clearSelection();
-      }
+      clearSelectionBeforeNativeNavigation(event, record);
     };
 
     const onContextMenu = (event) => {
@@ -1957,8 +2572,13 @@ const FEATURES = {
     };
 
     const onPointerDown = (event) => {
-      if (disposed || actionInProgress || event.button !== 2) return;
+      if (disposed || actionInProgress) return;
       const record = rowRecordFromTarget(event.target);
+      if (event.button === 0) {
+        clearSelectionBeforeNativeNavigation(event, record);
+        return;
+      }
+      if (event.button !== 2) return;
       if (selectedIds.size <= 1) return;
       if (record && !selectedIds.has(record.id)) return;
       if (!record && !mainSidebar()?.contains?.(event.target)) return;
@@ -2032,9 +2652,24 @@ const FEATURES = {
       Array.from(document.querySelectorAll("button, [role='button']"))
         .find((node) => node instanceof HTMLElement && node.getAttribute("aria-label") === "Chat actions") || null;
 
-    const findOpenMiniWindowItem = () =>
-      Array.from(document.querySelectorAll('[role="menu"][data-state="open"] [role="menuitem"], [role="menu"] [role="menuitem"]'))
-        .find((item) => item instanceof HTMLElement && item.textContent?.trim().includes("Open in mini window")) || null;
+    const openMenuRoots = () => {
+      const roots = Array.from(document.querySelectorAll('[role="menu"][data-state="open"], [role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]'))
+        .filter((node) => node instanceof HTMLElement && isVisibleElement(node));
+      for (const item of Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [data-radix-collection-item], div'))) {
+        if (!(item instanceof HTMLElement) || !/open in mini window/i.test(menuText(item))) continue;
+        const root = closestNativeMenu(item);
+        if (root && !roots.includes(root)) roots.push(root);
+      }
+      return roots;
+    };
+
+    const findOpenMiniWindowItem = () => {
+      for (const root of openMenuRoots()) {
+        const item = nativeMenuItems(root).find((node) => /open in mini window/i.test(menuText(node)));
+        if (item) return item;
+      }
+      return null;
+    };
 
     const openHeaderActionsMenu = async () => {
       const button = findChatActionsButton();
@@ -3492,14 +4127,15 @@ const FEATURES = {
     };
 
     const findRemoveMenuItem = (nativeMenu) =>
-      Array.from(nativeMenu.querySelectorAll('[role="menuitem"]')).find((item) => {
+      nativeMenuItems(nativeMenu).find((item) => {
         const text = normalize(item.textContent || "");
         return text === "remove" || text === "delete" || text.includes("remove from");
       }) || null;
 
     const findNativeContextMenu = (x, y) => {
-      const menus = Array.from(document.querySelectorAll('[role="menu"][data-state="open"]'))
-        .filter((node) => node instanceof HTMLElement && !node.hasAttribute(MENU_ATTR));
+      const menus = openMenuRoots()
+        .filter((node) => node instanceof HTMLElement && !node.hasAttribute(MENU_ATTR))
+        .filter((node) => findRemoveMenuItem(node) || isKnownNativeMenuText(menuText(node)));
       return menus
         .map((node) => ({ node, rect: node.getBoundingClientRect() }))
         .filter(({ rect }) => rect.width > 0 && rect.height > 0)
@@ -3707,6 +4343,11 @@ const FEATURES = {
       });
     };
 
+    // Inert short-circuit (Phase 5.4): cache the markdown text length we last
+    // processed per node. If the streamed content hasn't grown since the last
+    // scan, skip the cleanMetricText + findMetricForText work. We still call
+    // trackVisibleStream because it owns its own internal idempotency.
+    const lastTextLen = new WeakMap();
     const scanMessages = () => {
       if (disposed || metrics.length === 0) return;
       const nodes = document.querySelectorAll("div.group.flex.min-w-0.flex-col");
@@ -3716,7 +4357,10 @@ const FEATURES = {
         if (!markdown) continue;
         const rawText = markdown.textContent || "";
         trackVisibleStream(streamStats, markdown, rawText);
-        const text = cleanMetricText(markdown.textContent || "");
+        const prevLen = lastTextLen.get(markdown);
+        if (prevLen === rawText.length) continue;
+        lastTextLen.set(markdown, rawText.length);
+        const text = cleanMetricText(rawText);
         if (text.length < 12) continue;
         const match = findMetricForText(metrics, text);
         if (!match) continue;
@@ -3752,11 +4396,67 @@ const FEATURES = {
 // ─────────────────────────────────────────────────────────────── helpers ──
 
 const LEGACY_BRAND_TOKEN = ["Code", "MAXXER"].join("");
-const LEGACY_BRAND_RE = new RegExp(LEGACY_BRAND_TOKEN, "gi");
+const LEGACY_BRAND_RE = new RegExp(`${LEGACY_BRAND_TOKEN}|Codex\\+\\+`, "gi");
 
 function normalizeLegacyBrandText(value) {
-  return String(value || "").replace(LEGACY_BRAND_RE, "Codex++");
+  return String(value || "").replace(LEGACY_BRAND_RE, "ShadGPT");
 }
+
+function startLegacyBrandUiScrubber(api) {
+  if (typeof document === "undefined" || !document.documentElement) return null;
+  let disposed = false;
+  let scheduled = false;
+
+  const schedule = () => {
+    if (disposed || scheduled) return;
+    scheduled = true;
+    window.requestAnimationFrame(() => {
+      scheduled = false;
+      scrubLegacyBrandUi(api);
+    });
+  };
+
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["aria-label", "title", "placeholder", "value"],
+  });
+  schedule();
+  api.log.info("legacy ShadGPT UI branding scrubber active");
+
+  return () => {
+    disposed = true;
+    observer.disconnect();
+  };
+}
+
+function scrubLegacyBrandUi(api) {
+  try {
+    const roots = Array.from(document.querySelectorAll(LEGACY_BRAND_UI_SELECTOR));
+    for (const root of roots) renameLegacyBrandInElement(root);
+  } catch (e) {
+    api.log.warn("legacy ShadGPT UI branding scrub failed", e);
+  }
+}
+
+const LEGACY_BRAND_UI_SELECTOR = [
+  "button",
+  "a",
+  "[role='button']",
+  "[role='link']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[aria-label]",
+  "[title]",
+  "[data-testid]",
+  "[data-codexpp]",
+  "[data-codexpp-store-grid]",
+  "[data-codexpp-store-source]",
+  "[data-codexpp-store-card-message]",
+].join(",");
 
 function renameLegacyBrandInElement(root) {
   if (!(root instanceof HTMLElement)) return;
@@ -3794,6 +4494,9 @@ function renameLegacyBrandInElement(root) {
     collectTextNodes(root);
   }
   for (const node of nodes) {
+    if (node.parentElement?.closest("input, textarea, [contenteditable='true'], [contenteditable='plaintext-only']")) {
+      continue;
+    }
     const value = node.nodeValue || "";
     if (LEGACY_BRAND_RE.test(value)) node.nodeValue = normalizeLegacyBrandText(value);
     LEGACY_BRAND_RE.lastIndex = 0;
@@ -3801,21 +4504,225 @@ function renameLegacyBrandInElement(root) {
 }
 
 // ── message metrics ───────────────────────────────────────────────────────
-const METRICS_GLOBAL_KEY = "__codexplusplusUiImprovementsMessageMetrics";
-const METRICS_HANDLER_KEY = "__codexplusplusUiImprovementsMessageMetricsHandler";
-const USAGE_GLOBAL_KEY = "__codexplusplusUiImprovementsUsageService";
-const USAGE_HANDLER_KEY = "__codexplusplusUiImprovementsUsageHandler";
-const PROJECT_LABEL_GLOBAL_KEY = "__codexplusplusUiImprovementsProjectLabels";
-const PROJECT_LABEL_HANDLER_KEY = "__codexplusplusUiImprovementsProjectLabelsHandler";
-const SIDEBAR_BATCH_MENU_GLOBAL_KEY = "__codexplusplusUiImprovementsSidebarBatchMenu";
+const MAIN_LEGACY_BRAND_SCRUBBER_KEY = "__shadgptUiImprovementsMainLegacyBrandScrubber";
+const METRICS_GLOBAL_KEY = "__shadgptUiImprovementsMessageMetrics";
+const METRICS_HANDLER_KEY = "__shadgptUiImprovementsMessageMetricsHandler";
+const USAGE_GLOBAL_KEY = "__shadgptUiImprovementsUsageService";
+const USAGE_HANDLER_KEY = "__shadgptUiImprovementsUsageHandler";
+const PROJECT_LABEL_GLOBAL_KEY = "__shadgptUiImprovementsProjectLabels";
+const PROJECT_LABEL_HANDLER_KEY = "__shadgptUiImprovementsProjectLabelsHandler";
+const SIDEBAR_BATCH_MENU_GLOBAL_KEY = "__shadgptUiImprovementsSidebarBatchMenu";
 const SIDEBAR_BATCH_MENU_HANDLER_KEY =
-  "__codexplusplusUiImprovementsSidebarBatchMenuHandler";
+  "__shadgptUiImprovementsSidebarBatchMenuHandler";
+
+function startMainLegacyBrandUiScrubber(api) {
+  let electron;
+  try {
+    electron = require("electron");
+  } catch (e) {
+    api.log.warn("[legacy-branding] electron unavailable", e);
+    return null;
+  }
+
+  const { app, webContents } = electron;
+  const script = legacyBrandMainInjectionScript();
+
+  const inject = (wc) => {
+    try {
+      if (!wc || wc.isDestroyed?.()) return;
+      const url = typeof wc.getURL === "function" ? wc.getURL() : "";
+      if (url && !url.startsWith("app://")) return;
+      wc.executeJavaScript(script, true).catch((e) => {
+        api.log.warn("[legacy-branding] renderer scrub injection failed", String(e?.message || e));
+      });
+    } catch (e) {
+      api.log.warn("[legacy-branding] renderer scrub injection failed", String(e?.message || e));
+    }
+  };
+
+  const scan = () => {
+    try {
+      for (const wc of webContents.getAllWebContents()) inject(wc);
+    } catch (e) {
+      api.log.warn("[legacy-branding] webContents scan failed", String(e?.message || e));
+    }
+  };
+
+  const onCreated = (_event, wc) => inject(wc);
+  app?.on?.("web-contents-created", onCreated);
+  scan();
+
+  const previous = globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY];
+  previous?.dispose?.();
+  const dispose = () => {
+    try {
+      app?.off?.("web-contents-created", onCreated);
+    } catch {
+      // Ignore cleanup errors during hot reload.
+    }
+  };
+  globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY] = { dispose };
+  api.log.info("[legacy-branding] main renderer scrubber active");
+  return dispose;
+}
+
+function startMainBrowserAnnotationComposerModePatch(api) {
+  let electron;
+  try {
+    electron = require("electron");
+  } catch (e) {
+    api.log.warn("[browser-annotation] electron unavailable", e);
+    return null;
+  }
+
+  const { protocol } = electron;
+  if (!protocol || typeof protocol.handle !== "function") return null;
+
+  const previous = globalThis[MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY];
+  try {
+    previous?.dispose?.();
+  } catch (e) {
+    api.log.warn("[browser-annotation] previous renderer patch dispose failed", String(e?.message || e));
+    delete globalThis[MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY];
+  }
+
+  const originalHandle = protocol.handle;
+  const patchedHandle = function shadgptBrowserAnnotationProtocolHandle(scheme, handler) {
+    if (scheme !== "app" || typeof handler !== "function") {
+      return originalHandle.apply(this, arguments);
+    }
+
+    const wrappedHandler = async (request) => {
+      const response = await handler(request);
+      if (!isBrowserAnnotationRendererAsset(request?.url)) return response;
+
+      try {
+        if (!response || typeof response.text !== "function") return response;
+        const readableResponse = typeof response.clone === "function" ? response.clone() : response;
+        const originalText = await readableResponse.text();
+        const patchedText = patchBrowserAnnotationDefaultMode(originalText);
+        if (patchedText === originalText && readableResponse !== response) {
+          return response;
+        }
+        const headers = new Headers(response.headers);
+        headers.delete("content-length");
+        headers.set("content-type", "text/javascript; charset=utf-8");
+        if (patchedText !== originalText) {
+          api.log.info("[browser-annotation] patched browser comment Enter behavior");
+        }
+        return new Response(patchedText, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      } catch (e) {
+        api.log.warn("[browser-annotation] renderer patch failed", String(e?.message || e));
+        return response;
+      }
+    };
+
+    return originalHandle.call(this, scheme, wrappedHandler);
+  };
+  protocol.handle = patchedHandle;
+
+  const dispose = () => {
+    if (protocol.handle === patchedHandle) {
+      protocol.handle = originalHandle;
+    }
+    if (globalThis[MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY]?.dispose === dispose) {
+      delete globalThis[MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY];
+    }
+  };
+  globalThis[MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY] = { dispose };
+  api.log.info("[browser-annotation] composer mode renderer patch active");
+  return dispose;
+}
+
+function isBrowserAnnotationRendererAsset(rawUrl) {
+  if (typeof rawUrl !== "string") return false;
+  try {
+    const basename = new URL(rawUrl).pathname.split("/").pop() || "";
+    return /^(composer|annotation-comment-editor-card)-[A-Za-z0-9_-]+\.js$/.test(basename);
+  } catch {
+    return false;
+  }
+}
+
+function patchBrowserAnnotationDefaultMode(source) {
+  if (typeof source !== "string" || !source.includes(BROWSER_ANNOTATION_DEFAULT_MODE_TARGET)) {
+    return source;
+  }
+  return source.replace(
+    BROWSER_ANNOTATION_DEFAULT_MODE_TARGET,
+    BROWSER_ANNOTATION_DEFAULT_MODE_REPLACEMENT,
+  );
+}
+
+function responseInitFrom(response) {
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  };
+}
+
+function legacyBrandMainInjectionScript() {
+  return `(() => {
+    const KEY = "__shadgptLegacyVisibleBrandScrubber";
+    const pattern = /${LEGACY_BRAND_TOKEN}|Codex\\+\\+/gi;
+    const normalize = (value) => String(value || "").replace(pattern, "ShadGPT");
+    const scrubNode = (root) => {
+      if (!root) return;
+      const attrs = ["aria-label", "title", "placeholder"];
+      const elements = root.querySelectorAll ? [root, ...root.querySelectorAll("*")] : [root];
+      for (const el of elements) {
+        if (!el || typeof el.getAttribute !== "function") continue;
+        for (const attr of attrs) {
+          const value = el.getAttribute(attr);
+          if (value && pattern.test(value)) el.setAttribute(attr, normalize(value));
+          pattern.lastIndex = 0;
+        }
+      }
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (node.parentElement?.closest("input, textarea, [contenteditable='true'], [contenteditable='plaintext-only']")) continue;
+        const value = node.nodeValue || "";
+        if (pattern.test(value)) node.nodeValue = normalize(value);
+        pattern.lastIndex = 0;
+      }
+    };
+    if (!window[KEY]) {
+      let scheduled = false;
+      const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          scrubNode(document.documentElement);
+        });
+      };
+      const observer = new MutationObserver(schedule);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["aria-label", "title", "placeholder"]
+      });
+      window[KEY] = { observer };
+    }
+    scrubNode(document.documentElement);
+  })();`;
+}
 
 function startMainMetricsProvider(api) {
   const service = createMetricsService(api);
   globalThis[METRICS_GLOBAL_KEY] = service;
 
-  // Codex++ currently exposes `handle()` without a matching removeHandler().
+  // ShadGPT currently exposes `handle()` without a matching removeHandler().
   // Keep the registered IPC handler stable across hot reloads and swap the
   // service behind it instead.
   if (!globalThis[METRICS_HANDLER_KEY]) {

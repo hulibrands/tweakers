@@ -3,11 +3,23 @@
   "name": "GitHub Accounts",
   "version": "0.1.0",
   "githubRepo": "hulibrands/tweakers",
-  "description": "Assign Codex projects to GitHub accounts and keep project-local Git identity aligned.",
+  "description": "ShadGPT-owned GitHub Accounts fork for project-local Git identity assignment.",
   "forkOf": {
     "upstreamId": "co.Arconte112.github-accounts",
     "upstreamGithubRepo": "hulibrands/codex-plusplus",
     "upstreamPath": "tweaks/github-accounts",
+    "watchUpstreams": [
+      {
+        "upstreamGithubRepo": "hulibrands/codex-plusplus",
+        "upstreamPath": "tweaks/github-accounts",
+        "purpose": "ShadGPT source mirror that currently carries this fork base"
+      },
+      {
+        "upstreamGithubRepo": "b-nnett/codex-plusplus",
+        "upstreamPath": "tweaks/github-accounts",
+        "purpose": "Codex++ upstream monorepo to check separately from ShadGPT"
+      }
+    ],
     "upstreamVersion": "0.1.0",
     "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
     "forkedAt": "2026-05-17T22:00:00.000Z"

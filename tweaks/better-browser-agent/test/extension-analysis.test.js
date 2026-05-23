@@ -142,7 +142,7 @@ test("generates concise clean-room report artifacts", () => {
   assert.match(reports.extensionBehaviorMarkdown, /DOM writes/);
   assert.match(reports.implementationBriefMarkdown, /# Clean-Room Implementation Brief/);
   assert.match(reports.implementationBriefMarkdown, /Do not copy extension source code/);
-  assert.match(reports.implementationBriefMarkdown, /fresh Codex\+\+ tweak implementation/);
+  assert.match(reports.implementationBriefMarkdown, /fresh ShadGPT tweak implementation/);
   assert.doesNotMatch(reports.implementationBriefMarkdown, /Fixture price reviewed/);
   assert.doesNotMatch(reports.implementationBriefMarkdown, /insertAdjacentHTML\("beforeend"/);
 });

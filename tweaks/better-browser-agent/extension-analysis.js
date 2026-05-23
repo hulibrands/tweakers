@@ -910,7 +910,7 @@ function summarizeRisks(profile) {
       level: "high",
       title: "Broad host access",
       evidence: capabilities.hostAccess.filter(isBroadHostPattern),
-      cleanRoomNote: "Preserve least-privilege host matching in any Codex++ tweak.",
+      cleanRoomNote: "Preserve least-privilege host matching in any ShadGPT tweak.",
     });
   } else if (capabilities.hostAccess.length > 0) {
     risks.push({
@@ -1000,7 +1000,7 @@ function buildCleanRoomSummary(profile) {
       "Static analysis only; no extension source was executed.",
       "License terms are not inferred. Confirm the extension license before using any non-behavioral material.",
       "Selectors, permissions, and API names are behavior evidence. Do not copy source files, bundled logic, assets, or expression structure.",
-      "Use the generated brief as a fresh implementation target for Codex++ behavior, not as a clone recipe.",
+      "Use the generated brief as a fresh implementation target for ShadGPT behavior, not as a clone recipe.",
     ],
     implementationGuidance: generateImplementationGuidance(profile),
   };
@@ -1105,7 +1105,7 @@ function generateImplementationBriefMarkdown(profile) {
     "",
     "## Boundary",
     "- Do not copy extension source code, bundled logic, assets, minified code, comments, file structure, or private endpoints.",
-    "- Use this brief as behavior evidence for a fresh Codex++ tweak implementation.",
+    "- Use this brief as behavior evidence for a fresh ShadGPT tweak implementation.",
     "- Verify licensing separately before using names, images, styles, or text from the original extension.",
     "",
     "## Behavior To Recreate",
@@ -1114,10 +1114,10 @@ function generateImplementationBriefMarkdown(profile) {
     `- Page surfaces to inspect: ${formatList(unique(selectors), "No static selectors found.")}`,
     ...guidance.map((item) => `- ${item}`),
     "",
-    "## Codex++ Tweak Guidance",
+    "## ShadGPT Tweak Guidance",
     "- Start with least-privilege page matching and a small, documented message contract.",
     "- Rebuild DOM and style changes from user-visible behavior instead of mirroring source structure.",
-    "- Keep network and storage behavior opt-in unless the Codex++ use case requires it.",
+    "- Keep network and storage behavior opt-in unless the ShadGPT use case requires it.",
     "- Record static evidence separately from any dynamic observation so the implementation trail remains auditable.",
     "",
     "## Avoid",
@@ -1135,7 +1135,7 @@ function generateImplementationGuidance(profile) {
     guidance.push("Recreate visible DOM augmentation with fresh component structure and minimal page mutation.");
   }
   if (profile.capabilities.cssInjection) {
-    guidance.push("Plan a new style layer for the Codex++ tweak; use selectors only as page-surface evidence.");
+    guidance.push("Plan a new style layer for the ShadGPT tweak; use selectors only as page-surface evidence.");
   }
   if (profile.capabilities.networkActivity) {
     guidance.push("Review whether any remote calls are necessary; replace vendor endpoints with owned services or omit them.");
@@ -1150,7 +1150,7 @@ function generateImplementationGuidance(profile) {
     guidance.push("Translate request-rule intent into documented allow/block behavior before implementation.");
   }
   if (profile.capabilities.contentScriptsRunInAllFrames) {
-    guidance.push("Decide whether all-frame behavior is actually needed in Codex++ before enabling it.");
+    guidance.push("Decide whether all-frame behavior is actually needed in ShadGPT before enabling it.");
   }
 
   if (guidance.length === 0) {

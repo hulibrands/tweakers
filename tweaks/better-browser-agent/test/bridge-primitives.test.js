@@ -14,10 +14,15 @@ const createBetterBrowserBridgeApi =
   exported.createBetterBrowserBridgeApi ?? exported.createBrowserAgentBridge;
 const createBridgeEventBuffers =
   exported.createBridgeEventBuffers ?? exported.createBridgeRingBuffer;
+const classifyBetterBrowserAgentStatus = exported.classifyBetterBrowserAgentStatus;
+const classifyDevToolsCopilotStatus = exported.classifyDevToolsCopilotStatus;
+const getBridgeBufferCounts = exported.getBridgeBufferCounts;
+const getBrowserHealth = exported.getBrowserHealth;
 const redactBridgeValue = exported.redactBridgeValue ?? exported.redactBridgePayload;
 const refuseUnsupportedBridgeMethod =
   exported.refuseUnsupportedBridgeMethod ?? exported.isUnsafeBridgeRequest;
 const selectBrowserTabForBridge = exported.selectBrowserTabForBridge;
+const summarizeObservedPerformance = exported.summarizeObservedPerformance;
 const truncateBridgeValue = exported.truncateBridgeValue;
 
 function makeFakeState() {
@@ -199,6 +204,40 @@ test("tab selection is deterministic and explains the selected target", (t) => {
   assert.match(tied.reason, /deterministic|visible|tie/i);
 });
 
+test("Better Browser Agent status classifier separates source, disabled, active, and blocked states", (t) => {
+  const classify = requireExport(t, "classifyBetterBrowserAgentStatus", classifyBetterBrowserAgentStatus);
+  if (!classify) return;
+
+  assert.equal(classify({ sourcePresent: true }).code, "source-only");
+  assert.equal(
+    classify({ configEnabled: false, installed: true, sourcePresent: true }).code,
+    "installed-disabled",
+  );
+  assert.equal(
+    classify({ configEnabled: true, installed: true, sourcePresent: true }).code,
+    "installed-enabled-pending-reload",
+  );
+  assert.equal(classify({ runtimeActive: true, status: "active" }).code, "active");
+  assert.equal(classify({ originalBetterBrowserActive: true }).code, "blocked-by-original");
+});
+
+test("DevTools Copilot status classifier reports off, ready, degraded, blocked, and error states", (t) => {
+  const classify = requireExport(t, "classifyDevToolsCopilotStatus", classifyDevToolsCopilotStatus);
+  if (!classify) return;
+
+  assert.equal(classify({ bridgeEnabled: false }).status, "off");
+  assert.equal(classify({ inspectableTabCount: 1 }).status, "ready");
+  assert.equal(classify({ inspectableTabCount: 0 }).status, "degraded");
+  assert.equal(
+    classify({
+      cdpSnapshots: [{ lastError: "Debugger is already attached by DevTools" }],
+      inspectableTabCount: 1,
+    }).code,
+    "blocked-by-devtools-client",
+  );
+  assert.equal(classify({ lastError: "boom" }).status, "error");
+});
+
 test("console and network buffers truncate, redact, and mark partial history", (t) => {
   const makeBuffers = requireExport(t, "createBridgeEventBuffers", createBridgeEventBuffers);
   const redact = requireExport(t, "redactBridgeValue", redactBridgeValue);
@@ -260,6 +299,69 @@ test("console and network buffers truncate, redact, and mark partial history", (
   assert.equal(networkSnapshot.partialHistory, true);
   assert.equal(networkSnapshot.truncated, true);
   assertNoSecrets(networkSnapshot);
+});
+
+test("performance and health summaries are bounded and preserve partial evidence markers", (t) => {
+  const makeBuffers = requireExport(t, "createBridgeEventBuffers", createBridgeEventBuffers);
+  const summarizePerformance = requireExport(t, "summarizeObservedPerformance", summarizeObservedPerformance);
+  const bufferCounts = requireExport(t, "getBridgeBufferCounts", getBridgeBufferCounts);
+  const health = requireExport(t, "getBrowserHealth", getBrowserHealth);
+  if (!makeBuffers || !summarizePerformance || !bufferCounts || !health) return;
+
+  const bridgeEventBuffers = makeBuffers({ limits: { network: 1, navigation: 2 } });
+  const tabBuffer = bridgeEventBuffers.forWebContentsId(101);
+  pushBufferEntry(tabBuffer.navigation, { url: "https://example.test/start", timestamp: 1 });
+  pushBufferEntry(tabBuffer.network, {
+    status: 200,
+    timing: { receiveHeadersEnd: 75 },
+    url: "https://example.test/fast",
+  });
+  pushBufferEntry(tabBuffer.network, {
+    failed: true,
+    status: 504,
+    statusText: "Gateway Timeout",
+    timing: { receiveHeadersEnd: 1450 },
+    type: "xhr",
+    url: "https://example.test/slow?token=raw-token-secret",
+  });
+
+  const state = {
+    bridgeEnabled: true,
+    bridgeEventBuffers,
+    bridgeMode: "read-only",
+    browserTabRegistry: new Map([
+      [
+        101,
+        {
+          cdpStatus: "attached",
+          rendererPatchNames: ["app-shell"],
+          title: "Fixture",
+          url: "https://example.test",
+          webContentsId: 101,
+        },
+      ],
+    ]),
+    devToolsSessionManager: { listSnapshots: () => [] },
+    patchedAssets: new Set(["app-shell.js"]),
+    patchOverrideWarnings: new Set(),
+    status: "active",
+    webContentsEntries: new Map(),
+  };
+
+  const summary = summarizePerformance(state, 101, { slowRequestThresholdMs: 1000 });
+  assert.equal(summary.slowRequests.length, 1);
+  assert.equal(summary.nonSuccessResponses.length, 1);
+  assert.equal(summary.partialHistory.network, true);
+  assertNoSecrets(summary);
+
+  const counts = bufferCounts(state, 101);
+  assert.equal(counts.network, 1);
+  assert.equal(counts.truncated.network, true);
+
+  const snapshot = health(state);
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.status.agent.code, "active");
+  assert.equal(snapshot.tabs.length, 1);
 });
 
 test("redaction removes sensitive headers, body-like fields, and URL parameters", (t) => {

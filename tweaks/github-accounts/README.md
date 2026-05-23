@@ -1,6 +1,6 @@
 # GitHub Accounts
 
-GitHub Accounts adds a dedicated Codex++ settings tab for assigning projects to
+GitHub Accounts adds a dedicated ShadGPT settings tab for assigning projects to
 GitHub identities.
 
 ## What it does

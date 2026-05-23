@@ -62,6 +62,11 @@ function createProjectSidebarFixture() {
   const window = createEventTarget({
     innerWidth: 1280,
     innerHeight: 800,
+    requestAnimationFrame(fn) {
+      timers.push(fn);
+      return timers.length;
+    },
+    cancelAnimationFrame() {},
     setTimeout(fn) {
       timers.push(fn);
       return timers.length;

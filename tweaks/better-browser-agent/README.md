@@ -1,24 +1,24 @@
-# Better Browser Agent
+# ShadGPT Better Browser Agent
 
-Built for Codex++, a tweak system for the Codex desktop app.
+Built for ShadGPT, a tweak system for the Codex desktop app.
 
 <img width="2944" height="2196" alt="image" src="https://github.com/user-attachments/assets/afc31248-af43-435f-86fc-2f5ad7c3752c" />
 
-Better Browser Agent is a custom Better Browser fork for agent inspection and extension analysis. It improves the Codex desktop in-app browser side panel as a main-process Codex++ tweak that patches Electron `webContents` behavior and selected Codex renderer bundles at runtime.
+ShadGPT Better Browser Agent is a custom Better Browser fork for agent inspection and extension analysis. It improves the Codex desktop in-app browser side panel as a main-process ShadGPT tweak that patches Electron `webContents` behavior and selected Codex renderer bundles at runtime.
 
 ## Custom Fork Identity
 
 This fork is intentionally isolated from the store-managed original Better Browser package.
 
 - Tweak id: `co.thomashulihan.better-browser-agent`
-- Display name: `Better Browser Agent`
-- Repository: `hulibrands/tweakers`
+- Display name: `ShadGPT Better Browser Agent`
+- Repository: `hulibrands/codex-tweaks`
 - Main-process state key: `__codexpp_better_browser_agent_state__`
 
 Install this checkout as a local or dev tweak under the custom id path:
 
 ```sh
-codexplusplus dev ./tweaks/better-browser-agent --replace
+codexplusplus dev /Users/thomashulihan/Applications/codex-tweaks/better-browser-agent --replace
 ```
 
 If a manual install path is needed, keep it separate from the original package:
@@ -27,7 +27,7 @@ If a manual install path is needed, keep it separate from the original package:
 ~/Library/Application Support/codex-plusplus/tweaks/co.thomashulihan.better-browser-agent
 ```
 
-Codex++ store installs are keyed by tweak id. As long as this fork is installed under `co.thomashulihan.better-browser-agent`, original Better Browser store installs or updates land in their own package directory and cannot overwrite this custom checkout.
+ShadGPT store installs are keyed by tweak id. As long as this fork is installed under `co.thomashulihan.better-browser-agent`, original Better Browser store installs or updates land in their own package directory and cannot overwrite this custom checkout.
 
 ## Original Better Browser Conflict
 
@@ -89,13 +89,13 @@ Sensitive-data boundary:
 
 Diagnostics boundary:
 
-- `http://127.0.0.1:9222/json/list` is diagnostic only and requires Codex++ to be launched with remote debugging enabled.
+- `http://127.0.0.1:9222/json/list` is diagnostic only and requires ShadGPT to be launched with remote debugging enabled.
 - A failed `127.0.0.1:9222` check does not mean Better Browser Agent is unhealthy.
 - The implemented bridge foundation should be validated against the in-process `webContents.debugger` state and tab health snapshots, because that path is the source of truth.
 
 ## Extension Analysis Lab
 
-Better Browser Agent includes local, dependency-free analysis helpers for studying how a Chrome extension affects a page before building a clean-room Codex++ version of the behavior.
+Better Browser Agent includes local, dependency-free analysis helpers for studying how a Chrome extension affects a page before building a clean-room ShadGPT version of the behavior.
 
 Static analysis parses an unpacked extension without executing it:
 
@@ -177,14 +177,14 @@ BETTER_BROWSER_TEST=1 node index.js
 node --test test/*.test.js
 ```
 
-Run the Codex++ tweak checks from the Codex++ checkout when the CLI is available:
+Run the ShadGPT tweak checks from the ShadGPT checkout when the CLI is available:
 
 ```sh
 codexplusplus validate-tweak tweaks/base/better-browser-agent
 codexplusplus status
 ```
 
-For diagnostic comparison only, launch Codex++ with remote debugging enabled, then query the external CDP endpoint:
+For diagnostic comparison only, launch ShadGPT with remote debugging enabled, then query the external CDP endpoint:
 
 ```sh
 curl -s http://127.0.0.1:9222/json/list
