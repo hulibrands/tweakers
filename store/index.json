@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-19T12:22:50.306Z",
+  "generatedAt": "2026-05-23T21:41:23.515Z",
   "entries": [
     {
       "id": "co.thomashulihan.account-switcher",
@@ -47,7 +47,7 @@
           "upstreamCommitSha": "dfcc75ec0d8e980698974a3a2b80531cd553af77",
           "forkedAt": "2026-05-17T22:00:00.000Z"
         },
-        "description": "Browser-side-panel diagnostics and agent inspection helpers for Codex++.",
+        "description": "ShadGPT-owned Better Browser fork with agent inspection and extension analysis for Codex's browser side panel.",
         "author": {
           "name": "Thomas Hulihan"
         },
@@ -62,47 +62,54 @@
         ],
         "scope": "main",
         "main": "index.js",
+        "mcp": {
+          "command": "node",
+          "args": [
+            "./mcp-server.js"
+          ],
+          "enabledByDefault": false
+        },
         "patches": [
           {
             "id": "review-runtime-bridge-browser-plus-menu-cap",
-            "asset": "review-runtime-bridge-*.js",
-            "anchor": "M=u&&!l.some(Dr)",
-            "replacement": "M=u&&l.filter(Dr).length<25",
+            "asset": "thread-app-shell-chrome-*.js",
+            "anchor": "Le=k&&!D.some(st)",
+            "replacement": "Le=k&&D.filter(st).length<25",
             "description": "Allow multiple browser right-panel tabs before hiding the browser plus-menu entry."
           },
           {
             "id": "review-runtime-bridge-browser-tab-detector",
-            "asset": "review-runtime-bridge-*.js",
-            "anchor": "function Dr(e){return e.tabId===g.BROWSER}",
-            "replacement": "function Dr(e){return e.tabId===g.BROWSER||typeof e.tabId===\"string\"&&e.tabId.startsWith(g.BROWSER+\":\")}",
+            "asset": "thread-app-shell-chrome-*.js",
+            "anchor": "function st(e){return e.tabId===se.BROWSER}",
+            "replacement": "function st(e){return e.tabId===se.BROWSER||typeof e.tabId===\"string\"&&e.tabId.startsWith(se.BROWSER+\":\")}",
             "description": "Treat browser tab ids with BROWSER-prefixed suffixes as browser tabs."
           },
           {
             "id": "review-runtime-bridge-find-shortcut-detector",
             "asset": "review-runtime-bridge-*.js",
-            "anchor": "if(!n||e!==g.BROWSER)return!1;",
-            "replacement": "if(!n||!(e===g.BROWSER||typeof e===\"string\"&&e.startsWith(g.BROWSER+\":\")))return!1;",
+            "anchor": "if(!n||e!==T.BROWSER)return!1;",
+            "replacement": "if(!n||!(e===T.BROWSER||typeof e===\"string\"&&e.startsWith(T.BROWSER+\":\")))return!1;",
             "description": "Keep browser find-shortcut routing active for suffixed browser tab ids."
           },
           {
             "id": "review-runtime-bridge-browser-overlay-condition",
             "asset": "review-runtime-bridge-*.js",
-            "anchor": "p=i?.tabId!==g.BROWSER||!a||o",
-            "replacement": "p=!(i?.tabId===g.BROWSER||typeof i?.tabId===\"string\"&&i.tabId.startsWith(g.BROWSER+\":\"))||!a||o",
+            "anchor": "h=i?.tabId!==T.BROWSER||!a||o",
+            "replacement": "h=!(i?.tabId===T.BROWSER||typeof i?.tabId===\"string\"&&i.tabId.startsWith(T.BROWSER+\":\"))||!a||o",
             "description": "Apply browser overlay behavior to suffixed browser tab ids."
           },
           {
             "id": "app-shell-browser-shortcut-active-tab",
             "asset": "app-shell-*.js",
-            "anchor": "m=s?.tabId===h.BROWSER?l:null",
-            "replacement": "m=(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))?l:null",
+            "anchor": "d=s?.tabId===Be.BROWSER?c:null",
+            "replacement": "d=(s?.tabId===Be.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(Be.BROWSER+\":\"))?c:null",
             "description": "Report right-panel browser shortcut state for suffixed browser tab ids."
           },
           {
             "id": "app-shell-browser-close-active-tab",
             "asset": "app-shell-*.js",
-            "anchor": "s?.tabId===h.BROWSER&&c.closeTab(t,s.tabId)",
-            "replacement": "(s?.tabId===h.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(h.BROWSER+\":\"))&&c.closeTab(t,s.tabId)",
+            "anchor": "s?.tabId===Be.BROWSER&&Ve.closeTab(t,s.tabId)",
+            "replacement": "(s?.tabId===Be.BROWSER||typeof s?.tabId===\"string\"&&s.tabId.startsWith(Be.BROWSER+\":\"))&&Ve.closeTab(t,s.tabId)",
             "description": "Close the active suffixed browser tab from app-shell close commands."
           }
         ]
@@ -145,11 +152,23 @@
         "name": "GitHub Accounts",
         "version": "0.1.0",
         "githubRepo": "hulibrands/tweakers",
-        "description": "Assign Codex projects to GitHub accounts and keep project-local Git identity aligned.",
+        "description": "ShadGPT-owned GitHub Accounts fork for project-local Git identity assignment.",
         "forkOf": {
           "upstreamId": "co.Arconte112.github-accounts",
           "upstreamGithubRepo": "hulibrands/codex-plusplus",
           "upstreamPath": "tweaks/github-accounts",
+          "watchUpstreams": [
+            {
+              "upstreamGithubRepo": "hulibrands/codex-plusplus",
+              "upstreamPath": "tweaks/github-accounts",
+              "purpose": "ShadGPT source mirror that currently carries this fork base"
+            },
+            {
+              "upstreamGithubRepo": "b-nnett/codex-plusplus",
+              "upstreamPath": "tweaks/github-accounts",
+              "purpose": "Codex++ upstream monorepo to check separately from ShadGPT"
+            }
+          ],
           "upstreamVersion": "0.1.0",
           "upstreamCommitSha": "e75155dd9581ee57bb49744616b1d44a4e3e9460",
           "forkedAt": "2026-05-17T22:00:00.000Z"
@@ -339,17 +358,18 @@
       "path": "tweaks/ui-improvements",
       "manifest": {
         "id": "co.thomashulihan.ui-improvements",
-        "name": "Bennett's UI Improvements",
-        "version": "0.1.0",
+        "name": "UI Improvements",
+        "version": "0.2.0",
         "githubRepo": "hulibrands/tweakers",
         "forkOf": {
           "upstreamId": "co.bennett.ui-improvements",
           "upstreamGithubRepo": "b-nnett/codex-plusplus-bennett-ui",
-          "upstreamVersion": "0.1.6",
+          "upstreamVersion": "1.0.3",
           "upstreamCommitSha": "cc34f6d1dc6e8f624ee4d0152938efccca268d4a",
-          "forkedAt": "2026-05-17T22:00:00.000Z"
+          "forkedAt": "2026-05-17T22:00:00.000Z",
+          "notes": "ShadGPT-styled fork. Ported upstream settings-search and slash-menu-polish on 2026-05-19, plus local clarify-stale-chat-branch-label."
         },
-        "description": "UI Improvements fork with local sidebar, usage, and message metric behavior.",
+        "description": "ShadGPT quality-of-life UI tweaks: 12 individually toggleable improvements for sidebar layout, project labels, chat multi-select, settings search, slash-menu polish, and message metrics.",
         "author": {
           "name": "Thomas Hulihan",
           "url": "https://github.com/hulibrands"
@@ -361,7 +381,12 @@
         ],
         "scope": "both",
         "main": "index.js",
-        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/ui-improvements"
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/ui-improvements",
+        "permissions": [
+          "ipc",
+          "settings",
+          "filesystem"
+        ]
       }
     }
   ]

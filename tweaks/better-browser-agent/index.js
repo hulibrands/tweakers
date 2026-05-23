@@ -1,7 +1,7 @@
 /**
  * Better Browser Agent
  *
- * Custom main-only Codex++ tweak. Main hooks apply immediately; renderer bundle
+ * Custom main-only ShadGPT tweak. Main hooks apply immediately; renderer bundle
  * patches apply to the next app-shell load, so enabling or updating the tweak
  * during a running session waits for the user's next app restart.
  */
@@ -58,6 +58,8 @@ const BRIDGE_OUTPUT_LIMITS = Object.freeze({
 });
 const BRIDGE_SCREENSHOT_BYTES_LIMIT = 4 * 1024 * 1024;
 const BRIDGE_SCREENSHOT_DIR = "better-browser-agent";
+const MCP_BRIDGE_SOCKET_DIR = "better-browser-agent";
+const MCP_BRIDGE_SOCKET_FILE = "devtools-copilot.sock";
 const BRIDGE_REFUSED_METHODS = new Set([
   "getCookies",
   "getStorage",
@@ -71,7 +73,21 @@ const BROWSER_RENDERER_PATCH_NAMES = Object.freeze([
   "use-model-settings",
   "review-runtime-bridge",
   "app-shell",
+  "thread-app-shell-chrome",
+  "thread-side-panel-tabs",
 ]);
+const MCP_BRIDGE_ALLOWED_METHODS = Object.freeze({
+  captureBrowserScreenshot: true,
+  createEvidenceBundle: true,
+  getAccessibilitySummary: true,
+  getActiveBrowserTab: true,
+  getBrowserHealth: true,
+  getConsoleMessages: true,
+  getDomSummary: true,
+  getNetworkFailures: true,
+  getPerformanceSummary: true,
+  listBrowserTabs: true,
+});
 const PATCHED_IPC_HANDLER = Symbol.for("codexpp.better-browser-agent.ipcHandler");
 const PATCHED_WEB_CONTENTS = Symbol.for("codexpp.better-browser-agent.webContents");
 
@@ -136,6 +152,7 @@ const tweak = {
     installDevToolsControlIpc(api, state);
     installWebContentsPatch(api, state);
     installGlobalTabShortcuts(api, state);
+    startMcpBridgeServer(api, state);
   },
 
   stop() {
@@ -152,20 +169,30 @@ if (typeof process !== "undefined" && process.env?.BETTER_BROWSER_TEST === "1") 
     createDevToolsSessionManager,
     createBetterBrowserBridgeApi,
     createBridgeEventBuffers,
+    classifyBetterBrowserAgentStatus,
+    classifyDevToolsCopilotStatus,
+    createMcpBridgeServer,
     ensureBrowserTabRegistryEntry,
+    getBetterBrowserAgentStatusSnapshot,
+    getBridgeBufferCounts,
     getBrowserTabHealthSnapshot,
+    getBrowserHealth,
     listBrowserTabHealthSnapshots,
     loadPatchOverrides,
     patchRendererAsset,
     patchUseModelSettings,
     patchReviewRuntimeBridge,
     patchAppShell,
+    patchThreadAppShellChrome,
+    patchThreadSidePanelTabs,
     rememberBrowserDirectCommentAlias,
+    mirrorBrowserCommentOverlaySessionToBaseConversation,
     redactBridgeValue,
     refreshBrowserTabRegistryEntry,
     refuseUnsupportedBridgeMethod,
     routeBrowserDirectCommentAlias,
     selectBrowserTabForBridge,
+    summarizeObservedPerformance,
     truncateBridgeValue,
   };
 }
@@ -176,6 +203,7 @@ function createMainState(api, overrides = {}) {
     bridgeApi: null,
     bridgeAuditLog: createRingBuffer(BRIDGE_BUFFER_LIMITS.bridgeCalls),
     bridgeEventBuffers: createBridgeEventBuffers(),
+    bridgeEnabled: true,
     bridgeMode: "read-only",
     browserTabRegistry: new Map(),
     browserThemeByOwnerWebContentsId: new Map(),
@@ -189,6 +217,10 @@ function createMainState(api, overrides = {}) {
       name: TWEAK_NAME,
       stateKey: GLOBAL_STATE_KEY,
     },
+    lastError: null,
+    mcpBridgeListening: false,
+    mcpBridgeServer: null,
+    mcpBridgeSocketPath: null,
     patchOverrideWarnings: new Set(),
     patchOverrides: loadPatchOverrides(api),
     patchedAssets: new Set(),
@@ -224,6 +256,9 @@ function stopMain(state) {
   state.devToolsControlOwners.clear();
   state.devToolsSessionManager?.dispose?.();
   state.devToolsSessionManager = null;
+  state.mcpBridgeListening = false;
+  state.mcpBridgeServer = null;
+  state.mcpBridgeSocketPath = null;
   state.shortcutStateByWebContentsId.clear();
 
   for (const dispose of state.disposers.splice(0).reverse()) {
@@ -2081,6 +2116,432 @@ function listBrowserTabHealthSnapshots(state) {
   }));
 }
 
+function getBetterBrowserAgentStatusSnapshot(state, options = {}) {
+  const cdpSnapshots = state?.devToolsSessionManager?.listSnapshots?.() ?? [];
+  const tabs = listBrowserTabHealthSnapshots(state);
+  const patchStatus = getRendererPatchStatus(state);
+  const installed = options.installed ?? Boolean(options.installedPath);
+  const sourcePresent = options.sourcePresent ?? true;
+  const agent = classifyBetterBrowserAgentStatus({
+    bridgeEnabled: state?.bridgeEnabled,
+    configEnabled: options.configEnabled,
+    conflictActive: !!state?.conflict?.active,
+    installed,
+    lastError: state?.lastError,
+    originalBetterBrowserActive: !!state?.conflict?.active,
+    patchDrift: patchStatus.missedPatchCount > 0,
+    patchingEnabled: state?.patchingEnabled,
+    runtimeActive: state?.status === "active",
+    sourcePresent,
+    status: state?.status,
+  });
+  const copilot = classifyDevToolsCopilotStatus({
+    bridgeEnabled: state?.bridgeEnabled,
+    bridgeMode: state?.bridgeMode,
+    cdpSnapshots,
+    conflictActive: !!state?.conflict?.active,
+    inspectableTabCount: tabs.filter((tab) => tab && !tab.isAppShellContent).length,
+    lastError: state?.lastError,
+    patchDrift: patchStatus.missedPatchCount > 0,
+    status: state?.status,
+  });
+  return redactBridgeValue({
+    agent,
+    bridgeMode: state?.bridgeMode ?? "read-only",
+    copilot,
+    fork: {
+      id: TWEAK_ID,
+      name: TWEAK_NAME,
+      stateKey: GLOBAL_STATE_KEY,
+    },
+    generatedAt: new Date().toISOString(),
+    mcp: {
+      listening: !!state?.mcpBridgeListening,
+      socketPath: state?.mcpBridgeSocketPath ?? null,
+    },
+    patchStatus,
+    startedAt: state?.startedAt ?? null,
+  });
+}
+
+function classifyBetterBrowserAgentStatus(input = {}) {
+  if (input.originalBetterBrowserActive || input.conflictActive) {
+    return {
+      code: "blocked-by-original",
+      label: "Blocked",
+      reason: "Original Better Browser is active.",
+      status: "blocked",
+    };
+  }
+  if (input.lastError || input.status === "error") {
+    return {
+      code: "error",
+      label: "Error",
+      reason: String(input.lastError ?? "Better Browser Agent reported an error."),
+      status: "error",
+    };
+  }
+  if (input.sourcePresent && !input.installed && input.runtimeActive !== true) {
+    return {
+      code: "source-only",
+      label: "Source only",
+      reason: "Better Browser Agent exists in source but is not installed or active.",
+      status: "inactive",
+    };
+  }
+  if (input.installed && input.configEnabled === false) {
+    return {
+      code: "installed-disabled",
+      label: "Installed disabled",
+      reason: "Better Browser Agent is installed but disabled in user config.",
+      status: "inactive",
+    };
+  }
+  if (input.installed && input.configEnabled === true && input.runtimeActive !== true) {
+    return {
+      code: "installed-enabled-pending-reload",
+      label: "Pending reload",
+      reason: "Better Browser Agent is enabled in config but no active runtime state is present.",
+      status: "inactive",
+    };
+  }
+  if (input.patchDrift) {
+    return {
+      code: "patch-drift",
+      label: "Patch drift",
+      reason: "One or more renderer patch anchors missed the current Codex bundle.",
+      status: "degraded",
+    };
+  }
+  if (input.bridgeEnabled === false) {
+    return {
+      code: "copilot-off",
+      label: "Copilot off",
+      reason: "Better Browser Agent is active, but DevTools Copilot is disabled.",
+      status: "active",
+    };
+  }
+  if (input.runtimeActive || input.status === "active") {
+    return {
+      code: "active",
+      label: "Active",
+      reason: "Better Browser Agent runtime state is active.",
+      status: "active",
+    };
+  }
+  return {
+    code: "source-only",
+    label: "Source only",
+    reason: "No active Better Browser Agent runtime state was found.",
+    status: "inactive",
+  };
+}
+
+function classifyDevToolsCopilotStatus(input = {}) {
+  if (input.conflictActive) {
+    return {
+      code: "blocked-by-original",
+      label: "Blocked",
+      reason: "Original Better Browser is active.",
+      status: "blocked",
+    };
+  }
+  if (input.lastError || input.status === "error") {
+    return {
+      code: "error",
+      label: "Error",
+      reason: String(input.lastError ?? "DevTools Copilot reported an error."),
+      status: "error",
+    };
+  }
+  if (input.bridgeEnabled === false || input.bridgeMode === "off") {
+    return {
+      code: "copilot-off",
+      label: "Off",
+      reason: "DevTools Copilot is disabled.",
+      status: "off",
+    };
+  }
+
+  const cdpSnapshots = Array.isArray(input.cdpSnapshots) ? input.cdpSnapshots : [];
+  const blockedSnapshot = cdpSnapshots.find((snapshot) =>
+    /another debugger|devtools|already attached|detached/i.test(String(snapshot?.lastError ?? "")),
+  );
+  if (blockedSnapshot) {
+    return {
+      code: "blocked-by-devtools-client",
+      label: "Blocked",
+      reason: blockedSnapshot.lastError,
+      status: "blocked",
+    };
+  }
+  if (input.patchDrift) {
+    return {
+      code: "patch-drift",
+      label: "Degraded",
+      reason: "Renderer patch drift may prevent Copilot UI controls from appearing.",
+      status: "degraded",
+    };
+  }
+  if (Number(input.inspectableTabCount ?? 0) <= 0) {
+    return {
+      code: "copilot-degraded",
+      label: "Degraded",
+      reason: "No inspectable Better Browser tab is currently available.",
+      status: "degraded",
+    };
+  }
+  return {
+    code: "copilot-ready",
+    label: "Ready",
+    reason: "Read-only DevTools Copilot bridge is available.",
+    status: "ready",
+  };
+}
+
+function getRendererPatchStatus(state) {
+  const patchedAssets = [...(state?.patchedAssets ?? [])].sort();
+  const missedWarnings = [...(state?.patchOverrideWarnings ?? [])].sort();
+  return {
+    expectedPatchNames: BROWSER_RENDERER_PATCH_NAMES.slice(),
+    missedPatchCount: missedWarnings.length,
+    missedWarnings,
+    patchedAssetCount: patchedAssets.length,
+    patchedAssets,
+  };
+}
+
+function getBrowserHealth(state, options = {}) {
+  if (!state) return unavailableBridgeResult("bridge-unavailable", "Better Browser Agent state is unavailable.");
+  if (state && !state.webContentsEntries) state.webContentsEntries = new Map();
+  const selected = selectBridgeBrowserEntry(state, options);
+  const tabs = listBrowserTabHealthSnapshots(state).map((tab) => ({
+    ...tab,
+    buffers: getBridgeBufferCounts(state, tab.webContentsId),
+  }));
+  return {
+    ok: true,
+    activeSelection: {
+      reason: selected.reason,
+      tab: selected.entry ? getBridgeTabMetadata(state, selected.entry) : null,
+    },
+    bridgeStatus: getBridgeStatus(state),
+    capturedAt: new Date().toISOString(),
+    status: getBetterBrowserAgentStatusSnapshot(state, options),
+    tabs,
+  };
+}
+
+function getBridgeBufferCounts(state, webContentsId) {
+  const buffer = getBridgeBufferForWebContents(state, webContentsId, false);
+  if (!buffer) {
+    return {
+      bridgeCalls: 0,
+      bufferingStartedAt: null,
+      console: 0,
+      navigation: 0,
+      network: 0,
+      runtime: 0,
+      screenshots: 0,
+      truncated: {},
+    };
+  }
+  const count = (name) => getRingBufferItems(buffer[name]).length;
+  return {
+    bridgeCalls: count("bridgeCalls"),
+    bufferingStartedAt: buffer.createdAt ?? null,
+    console: count("console"),
+    navigation: count("navigation"),
+    network: count("network"),
+    runtime: count("runtime"),
+    screenshots: count("screenshots"),
+    truncated: {
+      bridgeCalls: !!buffer.bridgeCalls?.truncated,
+      console: !!buffer.console?.truncated,
+      navigation: !!buffer.navigation?.truncated,
+      network: !!buffer.network?.truncated,
+      runtime: !!buffer.runtime?.truncated,
+      screenshots: !!buffer.screenshots?.truncated,
+    },
+  };
+}
+
+function startMcpBridgeServer(api, state) {
+  const result = createMcpBridgeServer(state, {
+    onError(error) {
+      const message = stringifyError(error);
+      state.lastError = message;
+      api.log.warn("Better Browser Agent MCP bridge failed", message);
+    },
+  });
+  if (!result.ok) {
+    state.lastError = result.error;
+    api.log.warn("Better Browser Agent MCP bridge unavailable", result.error);
+    return result;
+  }
+  state.mcpBridgeServer = result.server;
+  state.mcpBridgeSocketPath = result.socketPath;
+  state.disposers.push(result.dispose);
+  return result;
+}
+
+function createMcpBridgeServer(state, options = {}) {
+  let net;
+  let fs;
+  let path;
+  let os;
+  try {
+    net = require("net");
+    fs = require("fs");
+    path = require("path");
+    os = require("os");
+  } catch (error) {
+    return {
+      ok: false,
+      error: stringifyError(error),
+    };
+  }
+
+  const socketPath = options.socketPath ?? process.env.BETTER_BROWSER_AGENT_MCP_SOCKET
+    ?? path.join(os.tmpdir(), MCP_BRIDGE_SOCKET_DIR, MCP_BRIDGE_SOCKET_FILE);
+  const socketDir = path.dirname(socketPath);
+  try {
+    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+    if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
+  } catch (error) {
+    return {
+      ok: false,
+      error: stringifyError(error),
+      socketPath,
+    };
+  }
+
+  const server = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        handleMcpBridgeLine(state, socket, line);
+      }
+    });
+  });
+
+  server.on("error", (error) => {
+    state.mcpBridgeListening = false;
+    state.lastError = stringifyError(error);
+    if (typeof options.onError === "function") options.onError(error);
+  });
+  server.listen(socketPath, () => {
+    state.mcpBridgeListening = true;
+    state.mcpBridgeSocketPath = socketPath;
+    try {
+      fs.chmodSync(socketPath, 0o600);
+    } catch {
+      // Best-effort only; the socket is already under a user-local temp dir.
+    }
+  });
+
+  const dispose = () => {
+    state.mcpBridgeListening = false;
+    state.mcpBridgeServer = null;
+    state.mcpBridgeSocketPath = null;
+    try {
+      server.close();
+    } catch {
+      // The server may already be closed during app shutdown.
+    }
+    try {
+      if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
+    } catch {
+      // Best-effort cleanup.
+    }
+  };
+
+  return {
+    dispose,
+    ok: true,
+    server,
+    socketPath,
+  };
+}
+
+function handleMcpBridgeLine(state, socket, line) {
+  let request;
+  try {
+    request = JSON.parse(line);
+  } catch (error) {
+    writeMcpBridgeResponse(socket, null, {
+      ok: false,
+      error: {
+        code: "invalid-json",
+        message: stringifyError(error),
+      },
+    });
+    return;
+  }
+
+  const id = request?.id ?? null;
+  const method = typeof request?.method === "string" ? request.method : "";
+  const options = request?.params && typeof request.params === "object" ? request.params : {};
+  if (!MCP_BRIDGE_ALLOWED_METHODS[method]) {
+    writeMcpBridgeResponse(socket, id, {
+      ok: false,
+      error: {
+        code: "method-refused",
+        message: "Better Browser Agent MCP bridge is read-only and does not expose this method.",
+        method,
+      },
+    });
+    return;
+  }
+
+  const bridge = state?.bridgeApi;
+  const handler = bridge?.[method];
+  if (typeof handler !== "function") {
+    writeMcpBridgeResponse(socket, id, {
+      ok: false,
+      error: {
+        code: "bridge-method-unavailable",
+        message: "Better Browser Agent bridge method is unavailable.",
+        method,
+      },
+    });
+    return;
+  }
+
+  Promise.resolve()
+    .then(() => handler(options))
+    .then((result) => {
+      writeMcpBridgeResponse(socket, id, {
+        ok: result?.ok !== false,
+        result,
+      });
+    })
+    .catch((error) => {
+      writeMcpBridgeResponse(socket, id, {
+        ok: false,
+        error: {
+          code: "bridge-call-failed",
+          message: stringifyError(error),
+          method,
+        },
+      });
+    });
+}
+
+function writeMcpBridgeResponse(socket, id, response) {
+  const payload = redactBridgeValue({
+    id,
+    ...response,
+  });
+  socket.write(`${JSON.stringify(truncateBridgeValue(payload))}\n`);
+}
+
 function createBetterBrowserBridgeApi(state) {
   if (!state.bridgeAuditLog) state.bridgeAuditLog = createRingBuffer(BRIDGE_BUFFER_LIMITS.bridgeCalls);
   if (!state.bridgeEventBuffers) state.bridgeEventBuffers = createBridgeEventBuffers();
@@ -2268,6 +2729,22 @@ function createBetterBrowserBridgeApi(state) {
       });
     },
 
+    async getPerformanceSummary(options = {}) {
+      return call("getPerformanceSummary", options, async () => {
+        const selected = selectBridgeBrowserEntry(state, options);
+        if (!selected.entry) return unavailableBridgeResult("missing-browser-target", "No Better Browser tab is available.");
+        const result = await getBridgePerformanceSummary(state, selected.entry, options);
+        return {
+          ...result,
+          tab: getBridgeTabMetadata(state, selected.entry),
+        };
+      });
+    },
+
+    getBrowserHealth(options = {}) {
+      return call("getBrowserHealth", options, () => getBrowserHealth(state, options));
+    },
+
     async createEvidenceBundle(options = {}) {
       return call("createEvidenceBundle", options, async () => {
         const selected = selectBridgeBrowserEntry(state, options);
@@ -2279,7 +2756,7 @@ function createBetterBrowserBridgeApi(state) {
         const networkFailures = getRingBufferItems(buffer?.network)
           .filter((entry) => entry.failed || (Number.isInteger(entry.status) && (entry.status < 200 || entry.status >= 400)))
           .slice(-50);
-        const [screenshot, dom, accessibility] = await Promise.all([
+        const [screenshot, dom, accessibility, performance] = await Promise.all([
           captureBridgeScreenshot(state, selected.entry, options),
           evaluateBridgeScript(state, selected.entry.wc, bridgeDomSummaryScript(options), {
             reason: "bridge-evidence-dom",
@@ -2287,6 +2764,7 @@ function createBetterBrowserBridgeApi(state) {
           state.devToolsSessionManager.executeCommand(selected.entry.wc, "Accessibility.getFullAXTree", { depth: 4 }, {
             reason: "bridge-evidence-accessibility",
           }),
+          getBridgePerformanceSummary(state, selected.entry, options),
         ]);
         return {
           ok: true,
@@ -2305,6 +2783,8 @@ function createBetterBrowserBridgeApi(state) {
           accessibility: accessibility.ok
             ? summarizeAccessibilityTree(accessibility.value?.nodes ?? [])
             : unavailableBridgeResult("accessibility-unavailable", accessibility.error),
+          performance,
+          health: getBrowserHealth(state, { ...options, webContentsId: selected.entry.wc.id }),
           audit: getRingBufferItems(state.bridgeAuditLog).slice(-20),
           buffersStartedAt: buffer?.createdAt ?? null,
         };
@@ -2559,15 +3039,13 @@ function numberOrNull(value) {
 
 function getBridgeStatus(state) {
   if (!state) return { mode: "unavailable", status: "unavailable" };
-  if (state.conflict?.active) {
-    return {
-      mode: "blocked",
-      reason: state.conflict.message,
-      status: "blocked",
-    };
-  }
+  const status = getBetterBrowserAgentStatusSnapshot(state);
   return {
     mode: state.bridgeMode ?? "read-only",
+    agentStatus: status.agent.code,
+    copilotCode: status.copilot.code,
+    copilotStatus: status.copilot.status,
+    reason: state.conflict?.active ? state.conflict.message : status.copilot.reason,
     status: state.status ?? "initializing",
   };
 }
@@ -2764,6 +3242,118 @@ async function captureBridgeScreenshot(state, entry, options = {}) {
   } catch (error) {
     return unavailableBridgeResult("screenshot-write-failed", stringifyError(error));
   }
+}
+
+async function getBridgePerformanceSummary(state, entry, options = {}) {
+  const wc = entry?.wc;
+  if (!wc || wc.isDestroyed?.()) {
+    return unavailableBridgeResult("performance-unavailable", "webContents unavailable");
+  }
+
+  const observed = summarizeObservedPerformance(state, wc.id, options);
+  const runtime = await evaluateBridgeScript(state, wc, bridgePerformanceSummaryScript(options), {
+    reason: "bridge-performance-summary",
+  });
+
+  return {
+    ok: true,
+    bufferingStartedAt: observed.bufferingStartedAt,
+    observed,
+    runtime: runtime.ok
+      ? runtime.value?.result?.value ?? runtime.value?.result ?? null
+      : unavailableBridgeResult("performance-runtime-unavailable", runtime.error),
+    runtimeAvailable: !!runtime.ok,
+  };
+}
+
+function summarizeObservedPerformance(state, webContentsId, options = {}) {
+  const buffer = getBridgeBufferForWebContents(state, webContentsId, false);
+  const network = getRingBufferItems(buffer?.network);
+  const navigation = getRingBufferItems(buffer?.navigation);
+  const slowThresholdMs = Math.max(100, Math.min(10000, Number(options.slowRequestThresholdMs) || 1000));
+  const slowRequests = network
+    .filter((entry) => Number(entry?.timing?.receiveHeadersEnd) >= slowThresholdMs)
+    .slice(-20)
+    .map((entry) => ({
+      receiveHeadersEnd: entry.timing?.receiveHeadersEnd ?? null,
+      status: entry.status ?? null,
+      type: entry.type ?? null,
+      url: entry.url ?? "",
+    }));
+  const nonSuccessResponses = network
+    .filter((entry) => Number.isInteger(entry?.status) && (entry.status < 200 || entry.status >= 400))
+    .slice(-20)
+    .map((entry) => ({
+      failed: !!entry.failed,
+      status: entry.status,
+      statusText: entry.statusText ?? null,
+      type: entry.type ?? null,
+      url: entry.url ?? "",
+    }));
+
+  return {
+    bufferingStartedAt: buffer?.createdAt ?? null,
+    latestNavigation: navigation.at?.(-1) ?? navigation[navigation.length - 1] ?? null,
+    nonSuccessResponses,
+    partialHistory: {
+      navigation: !!buffer?.navigation?.truncated,
+      network: !!buffer?.network?.truncated,
+    },
+    slowRequestThresholdMs: slowThresholdMs,
+    slowRequests,
+  };
+}
+
+function bridgePerformanceSummaryScript(options = {}) {
+  const maxEntries = Math.max(1, Math.min(25, Number(options.maxPerformanceEntries) || 10));
+  const slowThresholdMs = Math.max(100, Math.min(10000, Number(options.slowRequestThresholdMs) || 1000));
+  return `(() => {
+    const maxEntries = ${JSON.stringify(maxEntries)};
+    const slowThresholdMs = ${JSON.stringify(slowThresholdMs)};
+    const round = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) * 100) / 100 : null;
+    const text = (value) => String(value || "").slice(0, 500);
+    const navigation = performance.getEntriesByType("navigation").slice(-1).map((entry) => ({
+      domContentLoadedEventEnd: round(entry.domContentLoadedEventEnd),
+      duration: round(entry.duration),
+      loadEventEnd: round(entry.loadEventEnd),
+      name: text(entry.name),
+      responseEnd: round(entry.responseEnd),
+      startTime: round(entry.startTime),
+      type: entry.type || null,
+    }))[0] || null;
+    const slowResources = performance.getEntriesByType("resource")
+      .filter((entry) => entry.duration >= slowThresholdMs)
+      .sort((a, b) => b.duration - a.duration)
+      .slice(0, maxEntries)
+      .map((entry) => ({
+        duration: round(entry.duration),
+        initiatorType: entry.initiatorType || null,
+        name: text(entry.name),
+        responseEnd: round(entry.responseEnd),
+        startTime: round(entry.startTime),
+        transferSize: Number.isFinite(Number(entry.transferSize)) ? Number(entry.transferSize) : null,
+      }));
+    const longTasks = performance.getEntriesByType("longtask")
+      .slice(-maxEntries)
+      .map((entry) => ({
+        duration: round(entry.duration),
+        name: text(entry.name),
+        startTime: round(entry.startTime),
+      }));
+    const paints = performance.getEntriesByType("paint").map((entry) => ({
+      name: text(entry.name),
+      startTime: round(entry.startTime),
+    }));
+    return {
+      generatedAt: new Date().toISOString(),
+      longTasks,
+      navigation,
+      paints,
+      slowRequestThresholdMs,
+      slowResources,
+      timeOrigin: round(performance.timeOrigin),
+    };
+  })()`;
 }
 
 function bridgeDomSummaryScript(options = {}) {
@@ -3010,6 +3600,46 @@ function routeBrowserDirectCommentAlias(state, event, message) {
   if (keys.length === 0) return message;
   const key = keys.find((candidate) => state.directCommentAliases.has(candidate));
   if (!key) {
+    const browserConversationId = getBrowserConversationIdFromOverlayMessage(message);
+    if (browserConversationId) {
+      const baseConversationId = getBaseConversationIdForBrowserTab(browserConversationId);
+      if (baseConversationId) {
+        rememberBrowserDirectCommentAlias(
+          state,
+          event.sender.id,
+          baseConversationId,
+          browserConversationId,
+          message.sessionId,
+        );
+      }
+      return browserConversationId === message.conversationId
+        ? message
+        : {
+            ...message,
+            conversationId: browserConversationId,
+          };
+    }
+
+    const fallbackConversationId = resolveBrowserDirectCommentAliasFallback(state, event, message);
+    if (fallbackConversationId) {
+      rememberBrowserDirectCommentAlias(
+        state,
+        event.sender.id,
+        message.conversationId,
+        fallbackConversationId,
+        message.sessionId,
+      );
+      const alias = state.directCommentAliases.get(
+        browserDirectCommentAliasKeys(event.sender.id, message.conversationId, message.sessionId)[0],
+      );
+      if (alias && BROWSER_COMMENT_OVERLAY_ALIAS_CONSUMING_MESSAGE_TYPES.has(message.type)) {
+        deleteBrowserDirectCommentAlias(state, alias);
+      }
+      return {
+        ...message,
+        conversationId: fallbackConversationId,
+      };
+    }
     logBrowserDirectCommentAliasMiss(state, event, message, "missing-alias");
     return message;
   }
@@ -3030,6 +3660,90 @@ function routeBrowserDirectCommentAlias(state, event, message) {
   };
 }
 
+function resolveBrowserDirectCommentAliasFallback(state, event, message) {
+  if (!state || !event?.sender || !message || typeof message !== "object") return null;
+  if (typeof message.conversationId !== "string" || message.conversationId.length === 0) return null;
+  if (message.sessionId == null) return null;
+  if (getBaseConversationIdForBrowserTab(message.conversationId)) return null;
+
+  const candidates = new Map();
+  const addCandidate = (conversationId, score = 0) => {
+    if (!browserConversationMatchesBase(conversationId, message.conversationId)) return;
+    if (conversationId === message.conversationId) score -= 30;
+    const existing = candidates.get(conversationId);
+    if (!existing || existing.score < score) {
+      candidates.set(conversationId, { conversationId, score });
+    }
+  };
+  const shortcutState = state.shortcutStateByWebContentsId?.get?.(event.sender.id);
+  if (typeof shortcutState?.rightPanelBrowserConversationId === "string") {
+    addCandidate(shortcutState.rightPanelBrowserConversationId, 90);
+  }
+
+  const activeConversationId = getActiveBrowserConversationIdForOwner(event.sender);
+  addCandidate(activeConversationId, 80);
+
+  if (state.webContentsEntries && typeof state.webContentsEntries.values === "function") {
+    const activeEntry = findActiveBrowserEntryForOwnerWebContents(state, event.sender);
+    const activeEntryConversationId = getPageStateConversationId(
+      activeEntry?.wc ? findBrowserPageForWebContentsId(activeEntry.wc.id, event.sender) : null,
+    );
+    addCandidate(activeEntryConversationId, 75);
+
+    for (const entry of state.webContentsEntries.values()) {
+      const wc = entry?.wc;
+      if (!wc || wc.isDestroyed?.()) continue;
+      const pageState = findBrowserPageForWebContentsId(wc.id, event.sender);
+      let score = 40;
+      if (!pageStateBelongsToOwner(pageState, event.sender)) score -= 18;
+      if (wc.isFocused?.()) score += 12;
+      if (entry.inlineDevTools && !entry.inlineDevTools.disposed) score += 6;
+      addCandidate(getPageStateConversationId(pageState), score);
+    }
+  }
+
+  if (state.browserTabRegistry && typeof state.browserTabRegistry.values === "function") {
+    for (const record of state.browserTabRegistry.values()) {
+      const webContentsId = Number(record?.webContentsId);
+      if (!Number.isInteger(webContentsId) || webContentsId <= 0) continue;
+      const pageState = findBrowserPageForWebContentsId(webContentsId, event.sender);
+      let score = 35;
+      if (!pageStateBelongsToOwner(pageState, event.sender)) score -= 18;
+      if (record.isFocused) score += 12;
+      if (record.activeish) score += 8;
+      if (record.isVisible) score += 4;
+      addCandidate(getPageStateConversationId(pageState), score);
+    }
+  }
+
+  const fallback = [...candidates.values()]
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const aIsBrowserTab = getBaseConversationIdForBrowserTab(a.conversationId) != null;
+      const bIsBrowserTab = getBaseConversationIdForBrowserTab(b.conversationId) != null;
+      return Number(bIsBrowserTab) - Number(aIsBrowserTab);
+    })[0]?.conversationId ?? null;
+
+  if (fallback) return fallback;
+  if (message.type === "browser-sidebar-comment-overlay-mounted") return message.conversationId;
+  return null;
+}
+
+function browserConversationMatchesBase(conversationId, baseConversationId) {
+  if (typeof conversationId !== "string" || typeof baseConversationId !== "string") return false;
+  return conversationId === baseConversationId || getBaseConversationIdForBrowserTab(conversationId) === baseConversationId;
+}
+
+function getBrowserConversationIdFromOverlayMessage(message) {
+  const candidates = [
+    message?.browserConversationId,
+    message?.conversationId,
+    message?.session?.browserConversationId,
+    message?.session?.conversationId,
+  ];
+  return candidates.find((candidate) => getBaseConversationIdForBrowserTab(candidate)) ?? null;
+}
+
 function deleteBrowserDirectCommentAlias(state, alias) {
   for (const [key, candidate] of state.directCommentAliases) {
     if (candidate === alias) state.directCommentAliases.delete(key);
@@ -3037,6 +3751,16 @@ function deleteBrowserDirectCommentAlias(state, alias) {
 }
 
 function logBrowserDirectCommentAliasMiss(state, event, message, reason) {
+  if (
+    reason === "missing-alias" &&
+    !getBaseConversationIdForBrowserTab(message?.conversationId) &&
+    (message?.type === "browser-sidebar-comment-overlay-mounted" ||
+      message?.type === "browser-sidebar-comment-overlay-close" ||
+      message?.type === "browser-sidebar-comment-overlay-delete" ||
+      message?.type === "browser-sidebar-comment-overlay-preview-open-changed")
+  ) {
+    return;
+  }
   const warn = state?.api?.log?.warn;
   if (typeof warn !== "function") return;
   const key = [
@@ -3073,7 +3797,8 @@ function browserDirectCommentAliasKeys(ownerWebContentsId, conversationId, sessi
 }
 
 function mirrorBrowserCommentOverlaySessionToBaseConversation(state, ownerWebContents, entry, message) {
-  const baseConversationId = getBaseConversationIdForBrowserTab(message.conversationId);
+  const browserConversationId = getBrowserConversationIdFromOverlayMessage(message);
+  const baseConversationId = getBaseConversationIdForBrowserTab(browserConversationId);
   if (!baseConversationId) return false;
 
   const sessionId = message.session?.sessionId ?? message.sessionId;
@@ -3081,11 +3806,21 @@ function mirrorBrowserCommentOverlaySessionToBaseConversation(state, ownerWebCon
     state,
     ownerWebContents.id,
     baseConversationId,
-    message.conversationId,
+    browserConversationId,
     sessionId,
   );
 
-  entry.originalSend.call(ownerWebContents, MESSAGE_FOR_VIEW, message);
+  const browserMessage = {
+    ...message,
+    conversationId: browserConversationId,
+    session: message.session
+      ? {
+          ...message.session,
+          conversationId: browserConversationId,
+        }
+      : message.session,
+  };
+  entry.originalSend.call(ownerWebContents, MESSAGE_FOR_VIEW, browserMessage);
   entry.originalSend.call(ownerWebContents, MESSAGE_FOR_VIEW, {
     ...message,
     conversationId: baseConversationId,
@@ -4174,7 +4909,7 @@ const APP_SHELL_DEVTOOLS_DOCK_MENU_SCRIPT = `(() => {
   const marker = "data-codexpp-better-browser-devtools-dock-menu";
   const toggleMarker = "data-codexpp-better-browser-devtools-toggle";
   const toggleSlotMarker = "data-codexpp-better-browser-devtools-toggle-slot";
-  const itemSelector = '[role="menuitem"], [data-radix-collection-item], [cmdk-item], button';
+  const itemSelector = '[role="menuitem"], [data-radix-collection-item], [cmdk-item], button, div';
   const dockOptions = [
     ["left", "Dock left"],
     ["bottom", "Dock bottom"],
@@ -4226,11 +4961,35 @@ const APP_SHELL_DEVTOOLS_DOCK_MENU_SCRIPT = `(() => {
     /clear cache/i.test(text) ||
     /^zoom\\b/i.test(text);
 
+  const hasBrowserToolsMenuText = (text) =>
+    /hard reload/i.test(text) &&
+    (/show device toolbar/i.test(text) || /clear cache/i.test(text) || /clear cookies/i.test(text));
+
+  const isBoundedMenuLikeRoot = (element) => {
+    if (!(element instanceof HTMLElement) || !isVisible(element)) return false;
+    if (element === document.body || element === document.documentElement) return false;
+    const rect = element.getBoundingClientRect();
+    const maxWidth = Math.max(420, Math.min(window.innerWidth || 1280, 900));
+    const maxHeight = Math.max(260, Math.min(window.innerHeight || 800, 720));
+    if (rect.width < 120 || rect.height < 80 || rect.width > maxWidth || rect.height > maxHeight) return false;
+    return hasBrowserToolsMenuText(textOf(element));
+  };
+
+  const fallbackRootForPlainPopover = (item) => {
+    let node = item instanceof HTMLElement ? item.parentElement : null;
+    let best = null;
+    while (node instanceof HTMLElement && node !== document.body && node !== document.documentElement) {
+      if (isBoundedMenuLikeRoot(node)) best = node;
+      node = node.parentElement;
+    }
+    return best;
+  };
+
   const rootFor = (item) => {
     const menu = item.closest('[role="menu"], [data-radix-menu-content]');
     if (menu) return menu;
     const wrapper = item.closest('[data-radix-popper-content-wrapper]');
-    return wrapper?.querySelector?.('[role="menu"], [data-radix-menu-content]') ?? null;
+    return wrapper?.querySelector?.('[role="menu"], [data-radix-menu-content]') ?? fallbackRootForPlainPopover(item);
   };
 
   const sendMessage = (type, payload = {}) => {
@@ -4763,11 +5522,17 @@ function assetPatchKind(rawUrl) {
   if (/^app-shell-[A-Za-z0-9_]+\.js$/.test(basename)) {
     return "app-shell";
   }
+  if (/^thread-app-shell-chrome-[A-Za-z0-9_]+\.js$/.test(basename)) {
+    return "thread-app-shell-chrome";
+  }
+  if (/^thread-side-panel-tabs-[A-Za-z0-9_]+\.js$/.test(basename)) {
+    return "thread-side-panel-tabs";
+  }
   return null;
 }
 
 function loadPatchOverrides(api) {
-  const userRoot = resolveCodexPlusPlusUserRoot();
+  const userRoot = resolveShadGPTUserRoot();
   if (!userRoot) return { path: null, patchesById: new Map() };
 
   const path = require("node:path");
@@ -4798,7 +5563,7 @@ function loadPatchOverrides(api) {
   }
 }
 
-function resolveCodexPlusPlusUserRoot() {
+function resolveShadGPTUserRoot() {
   if (typeof process === "undefined") return null;
   if (process.env?.CODEX_PLUSPLUS_USER_ROOT) return process.env.CODEX_PLUSPLUS_USER_ROOT;
   if (process.env?.CODEX_PLUSPLUS_HOME) return process.env.CODEX_PLUSPLUS_HOME;
@@ -4828,6 +5593,10 @@ function patchRendererAsset(rawUrl, source, state = null) {
       return patchReviewRuntimeBridge(source, state);
     case "app-shell":
       return patchAppShell(source, state);
+    case "thread-app-shell-chrome":
+      return patchThreadAppShellChrome(source, state);
+    case "thread-side-panel-tabs":
+      return patchThreadSidePanelTabs(source, state);
     default:
       return source;
   }
@@ -4835,6 +5604,13 @@ function patchRendererAsset(rawUrl, source, state = null) {
 
 function patchUseModelSettings(source) {
   let out = source;
+
+  if (
+    !out.includes("l=t=>{r(n=>{let r={...n},i=r[e]??[],a=typeof t==`function`?t(i):t;") &&
+    !out.includes("function V3(e,t=!0,n={}){")
+  ) {
+    return out;
+  }
 
   out = replaceRequired(
     out,
@@ -4888,7 +5664,7 @@ function patchReviewRuntimeBridge(source, state = null) {
   );
   out = override.source;
   if (!override.applied) {
-    out = replaceFirstAvailable(
+    out = replaceFirstAvailableOptional(
       out,
       [
         ["E=c&&!s.some(yr)", `E=c&&s.filter(yr).length<${MAX_BROWSER_TABS}`],
@@ -4909,7 +5685,7 @@ function patchReviewRuntimeBridge(source, state = null) {
   );
   out = override.source;
   if (!override.applied) {
-    out = replaceFirstAvailable(
+    out = replaceFirstAvailableOptional(
       out,
       [
         [
@@ -4953,6 +5729,10 @@ function patchReviewRuntimeBridge(source, state = null) {
           "if(!n||e!==g.BROWSER)return!1;",
           'if(!n||!(e===g.BROWSER||typeof e==="string"&&e.startsWith(g.BROWSER+":")))return!1;',
         ],
+        [
+          "if(!n||e!==T.BROWSER)return!1;",
+          'if(!n||!(e===T.BROWSER||typeof e==="string"&&e.startsWith(T.BROWSER+":")))return!1;',
+        ],
       ],
       "browser find shortcut detector",
     );
@@ -4978,6 +5758,10 @@ function patchReviewRuntimeBridge(source, state = null) {
     out = out.replace(
       "p=i?.tabId!==g.BROWSER||!a||o",
       'p=!(i?.tabId===g.BROWSER||typeof i?.tabId==="string"&&i.tabId.startsWith(g.BROWSER+":"))||!a||o',
+    );
+    out = out.replace(
+      "h=i?.tabId!==T.BROWSER||!a||o",
+      'h=!(i?.tabId===T.BROWSER||typeof i?.tabId==="string"&&i.tabId.startsWith(T.BROWSER+":"))||!a||o',
     );
   }
   return out;
@@ -5009,6 +5793,10 @@ function patchAppShell(source, state = null) {
         [
           "m=s?.tabId===h.BROWSER?l:null",
           'm=(s?.tabId===h.BROWSER||typeof s?.tabId==="string"&&s.tabId.startsWith(h.BROWSER+":"))?l:null',
+        ],
+        [
+          "d=s?.tabId===Be.BROWSER?c:null",
+          'd=(s?.tabId===Be.BROWSER||typeof s?.tabId==="string"&&s.tabId.startsWith(Be.BROWSER+":"))?c:null',
         ],
       ],
       "browser shortcut state active tab",
@@ -5043,12 +5831,153 @@ function patchAppShell(source, state = null) {
           "s?.tabId===h.BROWSER&&c.closeTab(t,s.tabId)",
           '(s?.tabId===h.BROWSER||typeof s?.tabId==="string"&&s.tabId.startsWith(h.BROWSER+":"))&&c.closeTab(t,s.tabId)',
         ],
+        [
+          "s?.tabId===Be.BROWSER&&Ve.closeTab(t,s.tabId)",
+          '(s?.tabId===Be.BROWSER||typeof s?.tabId==="string"&&s.tabId.startsWith(Be.BROWSER+":"))&&Ve.closeTab(t,s.tabId)',
+        ],
       ],
       "browser close-active-tab detector",
     );
   }
 
   out = patchRightPanelTabShortcuts(out);
+
+  return out;
+}
+
+function patchThreadAppShellChrome(source, state = null) {
+  let out = source;
+  if (
+    !out.includes("Le=k&&!D.some(st)") &&
+    !out.includes("function st(e){return e.tabId===se.BROWSER}")
+  ) {
+    return out;
+  }
+
+  let override = applyPatchOverride(
+    out,
+    state,
+    "thread-app-shell-chrome",
+    "review-runtime-bridge-browser-plus-menu-cap",
+    "browser plus-menu cap",
+  );
+  out = override.source;
+  if (!override.applied) {
+    out = replaceFirstAvailable(
+      out,
+      [
+        ["Le=k&&!D.some(st)", `Le=k&&D.filter(st).length<${MAX_BROWSER_TABS}`],
+      ],
+      "browser plus-menu cap",
+    );
+  }
+
+  override = applyPatchOverride(
+    out,
+    state,
+    "thread-app-shell-chrome",
+    "review-runtime-bridge-browser-tab-detector",
+    "browser tab detector",
+  );
+  out = override.source;
+  if (!override.applied) {
+    out = replaceFirstAvailable(
+      out,
+      [
+        [
+          "function st(e){return e.tabId===se.BROWSER}",
+          'function st(e){return e.tabId===se.BROWSER||typeof e.tabId==="string"&&e.tabId.startsWith(se.BROWSER+":")}',
+        ],
+      ],
+      "browser tab detector",
+    );
+  }
+
+  return out;
+}
+
+function patchThreadSidePanelTabs(source, state = null) {
+  let out = source;
+  if (
+    !out.includes("{browserConversationId:n,browserHostDisplayName:r,browserTransferSourceConversationId:i,cwd:a,isAgentWorking:o}=e,s=ye(He)") &&
+    !out.includes("{browserConversationId:n,browserTabFallbackTitle:r,isAgentWorking:i,transferSourceConversationId:a}=e,o=ye(He)") &&
+    !out.includes("function Rg(e,t=!0,n={},r=`right`){")
+  ) {
+    return out;
+  }
+
+  let override = applyPatchOverride(
+    out,
+    state,
+    "thread-side-panel-tabs",
+    "thread-side-panel-browser-active-visibility",
+    "browser active-tab visibility",
+  );
+  out = override.source;
+  if (!override.applied) {
+    out = replaceRequired(
+      out,
+      "{browserConversationId:n,browserHostDisplayName:r,browserTransferSourceConversationId:i,cwd:a,isAgentWorking:o}=e,s=ye(He)",
+      "{browserConversationId:n,browserHostDisplayName:r,browserTransferSourceConversationId:i,cwd:a,isAgentWorking:o,browserTabId:bt=Tt.BROWSER,browserTabFallbackTitle:xt=`Browser`}=e,s=ye(He)",
+      "browser active-tab visibility props",
+    );
+    out = replaceRequired(
+      out,
+      "C=l&&c?.tabId===Tt.BROWSER,w=C&&u,T;",
+      "C=l&&c?.tabId===bt,w=C&&u,T;",
+      "browser active-tab visibility",
+    );
+    out = replaceRequired(
+      out,
+      "children:(0,Y.jsx)(Yf,{autoFocusOnOpen:!0,conversationId:n,conversationUpdatedAt:v,cwd:a,hostDisplayName:r,rolloutPath:_,agentBrowserControlLabel:b,agentBrowserControlTurnId:S,isAgentControllingBrowser:h,isDeviceToolbarMenuItemVisible:d,isFloatingComposerMenuItemVisible:w,isFloatingComposerVisible:m,isTweaksEnabled:f,isVisible:C,onToggleFloatingComposer:T,transferSourceConversationId:i})",
+      "children:(0,Y.jsxs)(Y.Fragment,{children:[(0,Y.jsx)(Pg,{browserConversationId:n,browserTabFallbackTitle:xt,isAgentWorking:o,transferSourceConversationId:i,browserTabId:bt}),(0,Y.jsx)(Yf,{autoFocusOnOpen:!0,conversationId:n,conversationUpdatedAt:v,cwd:a,hostDisplayName:r,rolloutPath:_,agentBrowserControlLabel:b,agentBrowserControlTurnId:S,isAgentControllingBrowser:h,isDeviceToolbarMenuItemVisible:d,isFloatingComposerMenuItemVisible:w,isFloatingComposerVisible:m,isTweaksEnabled:f,isVisible:C,onToggleFloatingComposer:T,transferSourceConversationId:i})]})",
+      "browser metadata watcher mount",
+    );
+  }
+
+  override = applyPatchOverride(
+    out,
+    state,
+    "thread-side-panel-tabs",
+    "thread-side-panel-browser-metadata-tab-id",
+    "browser metadata tab id",
+  );
+  out = override.source;
+  if (!override.applied) {
+    out = replaceRequired(
+      out,
+      "{browserConversationId:n,browserTabFallbackTitle:r,isAgentWorking:i,transferSourceConversationId:a}=e,o=ye(He)",
+      "{browserConversationId:n,browserTabFallbackTitle:r,isAgentWorking:i,transferSourceConversationId:a,browserTabId:b=Tt.BROWSER}=e,o=ye(He)",
+      "browser metadata tab id props",
+    );
+    out = replaceRequired(
+      out,
+      "Dt.updateTab(o,Tt.BROWSER,{",
+      "Dt.updateTab(o,b,{",
+      "browser metadata tab id",
+    );
+  }
+
+  override = applyPatchOverride(
+    out,
+    state,
+    "thread-side-panel-tabs",
+    "thread-side-panel-browser-open-helper",
+    "browser open helper block",
+  );
+  out = override.source;
+  if (!override.applied) {
+    const start = out.indexOf("function Rg(e,t=!0,n={},r=`right`){");
+    const end = out.indexOf("function zg(", start);
+    if (start === -1 || end === -1) {
+      throw new Error("missing patch target: browser open helper block");
+    }
+
+    const replacement =
+      'function Rg(e,t=!0,n={},r=`right`){let i=e.value,a=Ve(i),o=n.browserConversationId??a;if(o==null)return!1;let s=e.get(Mn).formatMessage({id:`thread.sidePanel.browserTab`,defaultMessage:`Browser`,description:`Title for the browser tab in the thread side panel`}),c=Rn(r),l=e.get(c.tabs$),u=e=>e.tabId===Tt.BROWSER||typeof e.tabId==="string"&&e.tabId.startsWith(Tt.BROWSER+":"),d=l.filter(u);if(n.browserTabId==null&&d.length>=25)return!1;let f=()=>typeof crypto<`u`&&typeof crypto.randomUUID==`function`?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`,p=n.browserTabId??(d.length===0?Tt.BROWSER:`${Tt.BROWSER}:${f()}`),m=p===Tt.BROWSER?o:`${o}:browser:${p.slice(Tt.BROWSER.length+1)}`,h=n.isAgentWorking??Oe(e,M,m)??!1,g=al({browserSnapshot:Ct.getSnapshot(m,n.browserTransferSourceConversationId),browserTabFallbackTitle:s,browserUseActiveState:Ct.getBrowserUseActiveState(m),conversationTurns:Oe(e,H,m)??il,isResponseInProgress:h});return e.set(ar,{conversationId:m,...n.browserTransferSourceConversationId==null?{}:{transferSourceConversationId:n.browserTransferSourceConversationId}}),c.openTab(e,Ng,{highlightedIcon:(0,J.createElement)(Na,{className:`size-[13px]`}),icon:(0,J.createElement)(Le,{alt:``,className:`icon-xs shrink-0 rounded-2xs`,logoUrl:g.faviconUrl,fallback:(0,J.createElement)(pr,{className:`size-full`})}),isHighlighted:g.isHighlighted,isShimmering:g.isShimmering,props:{browserConversationId:m,browserTabId:p,browserTabFallbackTitle:s,browserHostDisplayName:n.browserHostDisplayName??e.get(Tn).display_name,...n.browserTransferSourceConversationId==null?{}:{browserTransferSourceConversationId:n.browserTransferSourceConversationId},cwd:n.cwd??e.get(wn),isAgentWorking:h},id:p,activate:t,onClose:()=>{e.get(ar)?.conversationId===m&&e.set(ar,null),Ae.dispatchMessage(`browser-sidebar-command`,{conversationId:m,command:{type:`reset`}})},title:g.title}),t&&zn(e,r),!0}';
+
+    out = out.slice(0, start) + replacement + out.slice(end);
+  }
 
   return out;
 }
@@ -5100,6 +6029,8 @@ function assetPatternMatchesKind(pattern, assetKind) {
   const samples = {
     "app-shell": "app-shell-fixture.js",
     "review-runtime-bridge": "review-runtime-bridge-fixture.js",
+    "thread-app-shell-chrome": "thread-app-shell-chrome-fixture.js",
+    "thread-side-panel-tabs": "thread-side-panel-tabs-fixture.js",
     "use-model-settings": "use-model-settings-fixture.js",
   };
   const sample = samples[assetKind];
@@ -5137,6 +6068,16 @@ function replaceRequired(source, from, to, label) {
     throw new Error(`missing patch target: ${label}`);
   }
   return source.replace(from, to);
+}
+
+function replaceFirstAvailableOptional(source, replacements) {
+  for (const [from, to] of replacements) {
+    if (source.includes(from)) {
+      return source.replace(from, to);
+    }
+    if (source.includes(to)) return source;
+  }
+  return source;
 }
 
 function replaceFirstAvailable(source, replacements, label) {

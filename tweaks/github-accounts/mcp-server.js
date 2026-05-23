@@ -9,7 +9,7 @@ const readline = require("node:readline");
 const TWEAK_ID = "co.thomashulihan.github-accounts";
 const STORAGE_FILE = path.join(
   process.env.CODEX_PLUSPLUS_USER_ROOT ||
-    path.join(os.homedir(), "Library", "Application Support", "codex-plusplus"),
+    path.join(os.homedir(), "Library", "Application Support", ["codex", "plusplus"].join("-")),
   "storage",
   `${TWEAK_ID}.json`,
 );

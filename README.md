@@ -15,7 +15,7 @@ This repository exists for users who want individual tweaks without installing o
 - `shadcn-codex-ui` - Shadcn Codex UI
 - `titlebar-controls` - Titlebar Controls
 - `tweaks-directory` - Tweaks Directory
-- `ui-improvements` - Bennett's UI Improvements
+- `ui-improvements` - UI Improvements
 
 ## Install A Tweak
 

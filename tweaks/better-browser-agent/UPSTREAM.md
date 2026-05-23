@@ -8,7 +8,7 @@ Keep these values unchanged during every sync:
 
 - Manifest id: `co.thomashulihan.better-browser-agent`
 - Manifest name: `Better Browser Agent`
-- Repository: `hulibrands/tweakers`
+- Repository: `hulibrands/codex-tweaks`
 - Main-process state key: `__codexpp_better_browser_agent_state__`
 - Renderer patch function key: `__codexpp_better_browser_agent_patch_renderer_asset__`
 - Reload token key: `__codexpp_better_browser_agent_reload_token__`
@@ -47,7 +47,7 @@ BETTER_BROWSER_TEST=1 node index.js
 rg -n "co[.]bennett[.]better-browser|b[-]nnett/codex-plusplus-better-browser" manifest.json index.js README.md UPSTREAM.md
 ```
 
-The `rg` command should return no matches. Original store updates remain isolated from this fork because Codex++ installs packages by tweak id, and this fork's id is `co.thomashulihan.better-browser-agent`.
+The `rg` command should return no matches. Original store updates remain isolated from this fork because ShadGPT installs packages by tweak id, and this fork's id is `co.thomashulihan.better-browser-agent`.
 
 ## Conflict Guard
 

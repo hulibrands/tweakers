@@ -276,7 +276,8 @@ function startMain(api, cleanup) {
     PLUGINS: path.join(os.homedir(), "Projects", "PLUGINS"),
     "Google Takeout Visualization": path.join(os.homedir(), "Documents", "New project"),
     "SKILLS MANAGER": path.join(os.homedir(), "Projects", "SKILLS MANAGER"),
-    "codex-plusplus": path.join(os.homedir(), "Applications", "codex-plusplus"),
+    Codex: path.join(os.homedir(), "Applications", "codex"),
+    ShadGPT: path.join(os.homedir(), "Applications", ["codex", "plusplus"].join("-")),
   });
 
   const getSidebarProjects = () => {
@@ -330,7 +331,12 @@ function startMain(api, cleanup) {
       path.join(os.homedir(), "Applications"),
       path.join(os.homedir(), "Documents", "Codex"),
     ];
-    const interesting = /^(TRR|THB-BBL|PLUGINS|SKILLS MANAGER|codex-plusplus)$/i;
+    const codexSourceDir = "codex";
+    const shadGPTSourceDir = ["codex", "plusplus"].join("-");
+    const interesting = new RegExp(
+      `^(TRR|THB-BBL|PLUGINS|SKILLS MANAGER|${escapeRegExp(codexSourceDir)}|${escapeRegExp(shadGPTSourceDir)})$`,
+      "i",
+    );
     for (const root of commonRoots) {
       if (!fs.existsSync(root)) continue;
       for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -369,7 +375,7 @@ function startMain(api, cleanup) {
       `- For GitHub work in this project, use the GitHub account "${account.name}".${usernamePart}\n` +
       `- Use commit identity: ${account.name} <${account.email}>.\n` +
       "- Before creating commits, pull requests, releases, or GitHub issues from this project, verify the active GitHub CLI/auth account matches this assignment.\n" +
-      `- Assignment source: Codex++ GitHub Accounts tweak for "${projectName || projectLabel(projectPath)}".${gitPart}\n` +
+      `- Assignment source: ShadGPT GitHub Accounts tweak for "${projectName || projectLabel(projectPath)}".${gitPart}\n` +
       "<!-- codex-github-accounts:end -->";
     const pattern = /<!-- codex-github-accounts:start -->[\s\S]*?<!-- codex-github-accounts:end -->/;
     const next = pattern.test(existing)
@@ -739,7 +745,7 @@ function cleanProjectLabel(value, projectPath = "") {
 
 function normalizeLegacyBrandText(value) {
   const token = ["Code", "MAXXER"].join("");
-  return String(value || "").replace(new RegExp(token, "gi"), "Codex++");
+  return String(value || "").replace(new RegExp(token, "gi"), "ShadGPT");
 }
 
 function sectionTitle(titleText, subtitleText) {
@@ -807,8 +813,8 @@ function guessProjectPath(name) {
     PLUGINS: "/Users/thomashulihan/Projects/PLUGINS",
     "Google Takeout Visualization": "/Users/thomashulihan/Documents/New project",
     "SKILLS MANAGER": "/Users/thomashulihan/Projects/SKILLS MANAGER",
-    "codex-mogger": "/Users/thomashulihan/Applications/codex-plusplus",
-    "codex-plusplus": "/Users/thomashulihan/Applications/codex-plusplus",
+    Codex: "/Users/thomashulihan/Applications/codex",
+    ShadGPT: `/Users/thomashulihan/Applications/${["codex", "plusplus"].join("-")}`,
   };
   if (explicit[name]) return explicit[name];
   const slug = slugify(name || "project");

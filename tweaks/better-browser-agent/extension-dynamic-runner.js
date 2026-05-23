@@ -401,7 +401,7 @@ function shapeDynamicAnalysisReport(options = {}) {
       allowed: [
         "Describe observable page behavior.",
         "Reference redacted network, console, DOM, screenshot, and target evidence.",
-        "Use the behavior profile as implementation guidance for a new Codex++ tweak.",
+        "Use the behavior profile as implementation guidance for a new ShadGPT tweak.",
       ],
       avoid: [
         "Do not copy extension source, proprietary assets, private tokens, or distinctive implementation details.",
