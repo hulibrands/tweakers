@@ -4,6 +4,8 @@ Standalone Codex++ tweaks maintained by Hulibrands.
 
 This repository exists for users who want individual tweaks without installing or following the full Codex++ source tree. Each tweak lives in `tweaks/<name>` and includes its own `manifest.json`.
 
+This line verifies that the exhaustive PR review workflow runs on opened pull requests.
+
 ## Tweaks
 
 - `account-switcher` - Easy Account Switcher
@@ -31,4 +33,3 @@ Then reload Codex++ or use Force Reload from the Tweaks page.
 ## Compatibility
 
 These folders are copied from the Codex++ project and kept usable as ordinary Codex++ tweaks. The public repository metadata points back to `hulibrands/tweakers`, while individual manifests retain their tweak ids so existing Codex++ installs can continue to recognize them.
-
