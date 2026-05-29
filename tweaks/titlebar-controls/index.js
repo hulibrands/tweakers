@@ -7,9 +7,12 @@
  */
 
 const SAFE_HEADER_LEFT_PROPERTY = "--spacing-token-safe-header-left";
+const SAFE_HEADER_RIGHT_PROPERTY = "--spacing-token-safe-header-right";
 const MAC_TITLEBAR_SAFE_LEFT_MIN_PX = 118;
+const MAC_TITLEBAR_SAFE_RIGHT_MIN_PX = 66;
 const NO_SAFE_AREA_MAX_PX = 16;
 const ADJUSTABLE_SAFE_LEFT_MIN_PX = 60;
+const ADJUSTABLE_SAFE_RIGHT_MIN_PX = 24;
 const STYLE_ID = "codexpp-titlebar-controls-style";
 const TITLEBAR_ATTRIBUTE = "data-codexpp-titlebar-controls";
 const SPACING_ATTRIBUTE = "data-codexpp-titlebar-spacing";
@@ -96,10 +99,12 @@ module.exports = {
     }
     restoreOriginalSpacing(state);
     document.getElementById(STYLE_ID)?.remove();
-    document.querySelectorAll(`[${TITLEBAR_ATTRIBUTE}], [${SPACING_ATTRIBUTE}]`).forEach((element) => {
-      element.removeAttribute(TITLEBAR_ATTRIBUTE);
-      element.removeAttribute(SPACING_ATTRIBUTE);
-    });
+    document
+      .querySelectorAll(`[${TITLEBAR_ATTRIBUTE}], [${SPACING_ATTRIBUTE}]`)
+      .forEach((element) => {
+        element.removeAttribute(TITLEBAR_ATTRIBUTE);
+        element.removeAttribute(SPACING_ATTRIBUTE);
+      });
     this._state = null;
   },
 };
@@ -117,39 +122,54 @@ function applyTitlebarControls(state) {
 
   for (const candidate of candidates) {
     if (!(candidate instanceof HTMLElement)) continue;
-    const currentPx = parsePx(candidate.style.getPropertyValue(SAFE_HEADER_LEFT_PROPERTY));
+    const currentLeftPx = parsePx(candidate.style.getPropertyValue(SAFE_HEADER_LEFT_PROPERTY));
+    const currentRightPx = parsePx(candidate.style.getPropertyValue(SAFE_HEADER_RIGHT_PROPERTY));
 
-    if (currentPx == null || currentPx <= NO_SAFE_AREA_MAX_PX) {
+    if (currentLeftPx == null || currentLeftPx <= NO_SAFE_AREA_MAX_PX) {
       candidate.removeAttribute(TITLEBAR_ATTRIBUTE);
       candidate.removeAttribute(SPACING_ATTRIBUTE);
       continue;
     }
 
     candidate.setAttribute(TITLEBAR_ATTRIBUTE, "active");
-    const adjustedPx = adjustSafeLeft(currentPx);
-    if (adjustedPx == null) continue;
 
-    rememberOriginal(state, candidate);
-    candidate.style.setProperty(SAFE_HEADER_LEFT_PROPERTY, `${adjustedPx}px`, "important");
+    const adjustedLeftPx = adjustSafeLeft(currentLeftPx);
+    const adjustedRightPx = adjustSafeRight(currentRightPx);
+
+    if (adjustedLeftPx == null && adjustedRightPx == null) continue;
+    if (adjustedLeftPx != null) setSafeHeaderProperty(state, candidate, SAFE_HEADER_LEFT_PROPERTY, adjustedLeftPx);
+    if (adjustedRightPx != null) setSafeHeaderProperty(state, candidate, SAFE_HEADER_RIGHT_PROPERTY, adjustedRightPx);
     candidate.setAttribute(SPACING_ATTRIBUTE, "applied");
   }
 }
 
-function rememberOriginal(state, element) {
-  if (state.originals.has(element)) return;
-  state.originals.set(element, {
-    value: element.style.getPropertyValue(SAFE_HEADER_LEFT_PROPERTY),
-    priority: element.style.getPropertyPriority(SAFE_HEADER_LEFT_PROPERTY),
+function setSafeHeaderProperty(state, element, property, valuePx) {
+  rememberOriginal(state, element, property);
+  element.style.setProperty(property, `${valuePx}px`, "important");
+}
+
+function rememberOriginal(state, element, property) {
+  let originals = state.originals.get(element);
+  if (!originals) {
+    originals = new Map();
+    state.originals.set(element, originals);
+  }
+  if (originals.has(property)) return;
+  originals.set(property, {
+    value: element.style.getPropertyValue(property),
+    priority: element.style.getPropertyPriority(property),
   });
 }
 
 function restoreOriginalSpacing(state) {
-  for (const [element, original] of state.originals) {
+  for (const [element, originals] of state.originals) {
     if (!element.isConnected) continue;
-    if (original.value) {
-      element.style.setProperty(SAFE_HEADER_LEFT_PROPERTY, original.value, original.priority);
-    } else {
-      element.style.removeProperty(SAFE_HEADER_LEFT_PROPERTY);
+    for (const [property, original] of originals) {
+      if (original.value) {
+        element.style.setProperty(property, original.value, original.priority);
+      } else {
+        element.style.removeProperty(property);
+      }
     }
   }
   state.originals.clear();
@@ -168,6 +188,14 @@ function adjustSafeLeft(currentPx) {
   if (currentPx <= NO_SAFE_AREA_MAX_PX) return null;
   if (currentPx >= MAC_TITLEBAR_SAFE_LEFT_MIN_PX) return null;
   if (currentPx >= ADJUSTABLE_SAFE_LEFT_MIN_PX) return MAC_TITLEBAR_SAFE_LEFT_MIN_PX;
+  return null;
+}
+
+function adjustSafeRight(currentPx) {
+  if (!Number.isFinite(currentPx)) return MAC_TITLEBAR_SAFE_RIGHT_MIN_PX;
+  if (currentPx <= NO_SAFE_AREA_MAX_PX) return null;
+  if (currentPx >= MAC_TITLEBAR_SAFE_RIGHT_MIN_PX) return null;
+  if (currentPx >= ADJUSTABLE_SAFE_RIGHT_MIN_PX) return MAC_TITLEBAR_SAFE_RIGHT_MIN_PX;
   return null;
 }
 
