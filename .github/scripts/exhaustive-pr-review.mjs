@@ -7,6 +7,7 @@ const model = process.env.OPENAI_REVIEW_MODEL || "gpt-5.4";
 const maxBatchChars = Number(process.env.REVIEW_MAX_BATCH_CHARS || 60000);
 const maxTotalChars = Number(process.env.REVIEW_MAX_TOTAL_CHARS || 300000);
 const maxFileChars = Number(process.env.REVIEW_MAX_FILE_CHARS || 20000);
+const BINARY_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf"]);
 
 if (!githubToken) {
   throw new Error("Missing GITHUB_TOKEN.");
@@ -59,8 +60,12 @@ function isProbablyText(value) {
   return !value.includes("\u0000");
 }
 
+function isBinaryLikePath(filename) {
+  return BINARY_EXTENSIONS.has(filename.slice(filename.lastIndexOf(".")).toLowerCase());
+}
+
 async function getFileContent(filename) {
-  if (!filename || filename.endsWith(".png") || filename.endsWith(".jpg") || filename.endsWith(".jpeg") || filename.endsWith(".gif") || filename.endsWith(".webp") || filename.endsWith(".ico") || filename.endsWith(".pdf")) {
+  if (!filename || isBinaryLikePath(filename)) {
     return { text: "", note: "Skipped binary-looking file." };
   }
 
