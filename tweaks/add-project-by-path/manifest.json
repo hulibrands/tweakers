@@ -1,6 +1,6 @@
 {
   "id": "co.thomashulihan.add-project-by-path",
-  "name": "ShadGPT Add Project by Path",
+  "name": "Add Project by Path",
   "version": "0.1.0",
   "githubRepo": "hulibrands/tweakers",
   "description": "ShadGPT-owned Add Project by Path fork with cleanup hardening for the injected project-menu action.",
