@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, "..", "index.js"), "utf8");
+const manifest = JSON.parse(readFileSync(join(__dirname, "..", "manifest.json"), "utf8"));
 
 test("usage request bridge dispatches through the injected page bridge before fallback", () => {
   assert.match(source, /let usageBridgeReady = false;/);
@@ -51,6 +52,21 @@ test("project context menu restores Bennett copy path action", () => {
   assert.match(source, /nativeMenu\.insertBefore\(copyPathItem, removeItem\)/);
 });
 
+test("project context menu exposes color and settings shortcuts", () => {
+  assert.ok(manifest.permissions.includes("codex.views"));
+  assert.match(source, /label: "Project settings"/);
+  assert.match(source, /label\.textContent = "Project color"/);
+  assert.match(source, /co\.thomashulihan\.projects:project-\$\{slugifyProjectSettingsId/);
+  assert.match(source, /api\.codex\?\.openRegisteredTweakPage\?\.\(pageId\)/);
+  assert.match(source, /const showProjectMenuToast =/);
+  assert.match(source, /Could not open Project settings for/);
+  assert.match(source, /nativeMenu\.insertBefore\(settingsItem, removeItem\)/);
+  assert.match(source, /nativeMenu\.insertBefore\(trigger, removeItem\)/);
+  assert.match(source, /window\.setTimeout\(injectColorMenuIntoNativeMenu, delay\)/);
+  assert.match(source, /const openMenuRoots = \(\) =>/);
+  assert.match(source, /const nativeMenuItems = \(root\) =>/);
+});
+
 test("sidebar project rows do not render expanded projects as cards", () => {
   const rowRule = source.match(
     /\[\$\{ATTR\}="row"\] \{([\s\S]*?)\n\s+\}/,
@@ -58,12 +74,36 @@ test("sidebar project rows do not render expanded projects as cards", () => {
   const listRule = source.match(
     /\[\$\{ATTR\}="project-list"\] \{([\s\S]*?)\n\s+\}/,
   )?.[1] ?? "";
+  const childRule = source.match(
+    /\[\$\{ATTR\}="project-child"\] \{([\s\S]*?)\n\s+\}/,
+  )?.[1] ?? "";
 
   assert.match(rowRule, /background-color: transparent !important/);
   assert.match(rowRule, /box-shadow: none !important/);
   assert.match(listRule, /gap: 0 !important/);
+  assert.match(source, /\[\$\{ATTR\}="row"\] \+ \[\$\{ATTR\}="row"\]/);
+  assert.match(source, /\[\$\{ATTR\}="project-child"\] \+ \[\$\{ATTR\}="row"\]/);
+  assert.match(childRule, /margin-block: 1px !important/);
   assert.doesNotMatch(rowRule, /border-radius/);
+  assert.doesNotMatch(rowRule, /margin-top/);
   assert.doesNotMatch(rowRule, /inset 0 0 0 1px/);
+});
+
+test("sidebar project show more control uses title styling without overlay", () => {
+  const expanderRule = source.match(
+    /\[\$\{ATTR\}="project-expander"\],[\s\S]*?\[\$\{ATTR\}="project-expander"\]:focus-visible \{([\s\S]*?)\n\s+\}/,
+  )?.[1] ?? "";
+
+  assert.match(source, /const isProjectExpanderControl = \(node\) =>/);
+  assert.match(source, /\^show \(more\|less\)\\b/);
+  assert.match(source, /isProjectExpanderControl\(target\) \? "project-expander" : "project-child-target"/);
+  assert.match(expanderRule, /background: transparent !important/);
+  assert.match(expanderRule, /background-color: transparent !important/);
+  assert.match(expanderRule, /box-shadow: none !important/);
+  assert.match(expanderRule, /font-weight: 700 !important/);
+  assert.match(expanderRule, /color-mix/);
+  assert.match(expanderRule, /-webkit-text-fill-color/);
+  assert.match(source, /\[\$\{ATTR\}="project-expander"\] :where\(\*\)/);
 });
 
 test("sidebar project row detection supports Codex sidebar overflow variants", () => {

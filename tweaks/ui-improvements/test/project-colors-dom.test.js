@@ -36,6 +36,15 @@ test("DOM fixture marks sidebar project rows and applies bridge color changes", 
     fixture.title.getAttribute("data-codexpp-sidebar-project-backgrounds"),
     "title",
   );
+  assert.equal(
+    fixture.childRow.getAttribute("data-codexpp-sidebar-project-backgrounds"),
+    "project-child",
+  );
+  assert.equal(
+    fixture.childButton.getAttribute("data-codexpp-sidebar-project-backgrounds"),
+    "project-child-target",
+  );
+  assert.equal(fixture.childButton.style.getPropertyValue("--codexpp-project-child-light"), "10%");
   assert.equal(fixture.row.style.getPropertyValue("--codexpp-project-tint"), "#be123c");
   assert.equal(
     fixture.row.style.getPropertyValue("--codexpp-project-text-color"),
@@ -51,6 +60,12 @@ test("DOM fixture marks sidebar project rows and applies bridge color changes", 
     fixture.row.style.getPropertyValue("--codexpp-project-text-color"),
     "#1d4ed8",
   );
+
+  fixture.context.window.__codexppUiImprovements.setProjectOverlay("Alpha", "strong");
+  fixture.flushTimers();
+
+  assert.equal(fixture.storage.get("sidebar-project-backgrounds:overlays").alpha, "strong");
+  assert.equal(fixture.childButton.style.getPropertyValue("--codexpp-project-child-light"), "15%");
 });
 
 function createProjectSidebarFixture() {
@@ -104,6 +119,20 @@ function createProjectSidebarFixture() {
   button.append(icon, title);
   row.appendChild(button);
   list.appendChild(row);
+
+  const childRow = document.createElement("div");
+  childRow.setAttribute("role", "listitem");
+  childRow.setAttribute("aria-label", "Review requests");
+  childRow.setRect({ left: 8, top: 76, width: 260, height: 32, right: 268, bottom: 108 });
+  const childButton = document.createElement("button");
+  childButton.setAttribute("role", "button");
+  childButton.setAttribute("data-app-action-sidebar-thread-id", "thread-alpha");
+  childButton.setAttribute("data-app-action-sidebar-thread-title", "Review requests");
+  childButton.setRect({ left: 40, top: 78, width: 212, height: 28, right: 252, bottom: 106 });
+  childButton.textContent = "Review requests";
+  childRow.appendChild(childButton);
+  list.appendChild(childRow);
+
   aside.appendChild(list);
   document.body.appendChild(aside);
 
@@ -153,6 +182,8 @@ function createProjectSidebarFixture() {
     api,
     context,
     icon,
+    childButton,
+    childRow,
     list,
     row,
     storage,
@@ -276,6 +307,16 @@ class FakeElement {
     this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
     this.parentElement = null;
     this.setConnected(false);
+  }
+
+  get nextElementSibling() {
+    if (!this.parentElement) return null;
+    const siblings = this.parentElement.children;
+    return siblings[siblings.indexOf(this) + 1] || null;
+  }
+
+  matches(selector) {
+    return selector.split(",").some((part) => matchesSelector(this, part.trim()));
   }
 
   setConnected(value) {

@@ -1,0 +1,23 @@
+{
+  "id": "co.thomashulihan.codex-chat-ui",
+  "name": "ShadGPT Codex Chat UI",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Renders safe, shadcn-style Codex UI blocks inside chat messages.",
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/codex-chat-ui",
+  "tags": [
+    "ui",
+    "chat",
+    "shadcn"
+  ],
+  "scope": "both",
+  "permissions": [
+    "ipc",
+    "settings"
+  ],
+  "main": "index.js"
+}

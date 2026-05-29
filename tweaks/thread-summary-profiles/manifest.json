@@ -1,0 +1,24 @@
+{
+  "id": "co.thomashulihan.thread-summary-profiles",
+  "name": "ShadGPT Thread Summary Profiles",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Adds a read-only Profiles section to the Codex thread summary panel using existing project connection assignments.",
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/thread-summary-profiles",
+  "tags": [
+    "profiles",
+    "projects",
+    "summary"
+  ],
+  "scope": "both",
+  "permissions": [
+    "ipc",
+    "filesystem",
+    "settings"
+  ],
+  "main": "index.js"
+}

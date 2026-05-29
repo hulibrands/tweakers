@@ -14,6 +14,7 @@ const CANONICAL_FEATURE_IDS = [
   "show-usage-in-sidebar",
   "show-message-metrics-on-hover",
   "square-sidebar",
+  "browser-annotation-transparent-card",
   "match-sidebar-width",
   "sidebar-action-grid",
   "sidebar-project-backgrounds",
@@ -22,9 +23,10 @@ const CANONICAL_FEATURE_IDS = [
   "clarify-stale-chat-branch-label",
   "settings-search",
   "slash-menu-polish",
+  "tweak-mention-menu",
 ];
 
-test("canonical 12 feature ids are consistent across tweak registries", () => {
+test("canonical feature ids are consistent across tweak registries", () => {
   const registries = {
     FEATURE_DEFS: extractFeatureDefIds(source),
     DEFAULT_FEATURE_FLAGS: extractDefaultFlagIds(source),
@@ -85,7 +87,7 @@ function assertCanonicalRegistry(name, ids) {
   assert.deepEqual(
     { missing, extra },
     { missing: [], extra: [] },
-    `${name} should contain exactly the canonical 12 feature ids`,
+    `${name} should contain exactly the canonical feature ids`,
   );
 }
 

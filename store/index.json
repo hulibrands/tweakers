@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-23T21:41:23.515Z",
+  "generatedAt": "2026-05-29T04:21:46.895Z",
   "entries": [
     {
       "id": "co.thomashulihan.account-switcher",
@@ -30,6 +30,41 @@
         "scope": "both",
         "main": "index.bundled.js",
         "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/account-switcher"
+      }
+    },
+    {
+      "id": "co.thomashulihan.add-project-by-path",
+      "path": "tweaks/add-project-by-path",
+      "manifest": {
+        "id": "co.thomashulihan.add-project-by-path",
+        "name": "ShadGPT Add Project by Path",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "ShadGPT-owned Add Project by Path fork with cleanup hardening for the injected project-menu action.",
+        "forkOf": {
+          "upstreamId": "co.sakushi.add-project-by-path",
+          "upstreamGithubRepo": "ImSakushi/codex-plusplus-add-project-path",
+          "upstreamVersion": "0.1.0",
+          "upstreamCommitSha": "aef5ebff965cb3c95df2a82f3f087b161e36c2ec",
+          "forkedAt": "2026-05-20T03:20:00.000Z",
+          "notes": "ShadGPT fork preserves the local cleanup fix that removes injected styles on renderer cleanup."
+        },
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "tags": [
+          "project",
+          "workspace",
+          "ui"
+        ],
+        "scope": "both",
+        "main": "index.cjs",
+        "iconUrl": "https://raw.githubusercontent.com/ImSakushi/codex-plusplus-add-project-path/main/icon.png",
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/add-project-by-path",
+        "permissions": [
+          "ipc"
+        ]
       }
     },
     {
@@ -113,6 +148,33 @@
             "description": "Close the active suffixed browser tab from app-shell close commands."
           }
         ]
+      }
+    },
+    {
+      "id": "co.thomashulihan.codex-chat-ui",
+      "path": "tweaks/codex-chat-ui",
+      "manifest": {
+        "id": "co.thomashulihan.codex-chat-ui",
+        "name": "ShadGPT Codex Chat UI",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Renders safe, shadcn-style Codex UI blocks inside chat messages.",
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/codex-chat-ui",
+        "tags": [
+          "ui",
+          "chat",
+          "shadcn"
+        ],
+        "scope": "both",
+        "permissions": [
+          "ipc",
+          "settings"
+        ],
+        "main": "index.js"
       }
     },
     {
@@ -270,6 +332,41 @@
       }
     },
     {
+      "id": "co.thomashulihan.projects",
+      "path": "tweaks/projects",
+      "manifest": {
+        "id": "co.thomashulihan.projects",
+        "name": "ShadGPT Projects",
+        "version": "1.0.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Adds a Projects settings page that coordinates project Chrome, Google Workspace, Supabase, and environment inventory.",
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/projects",
+        "tags": [
+          "projects",
+          "chrome",
+          "supabase",
+          "env"
+        ],
+        "scope": "both",
+        "permissions": [
+          "ipc",
+          "filesystem",
+          "settings"
+        ],
+        "mcp": {
+          "command": "node",
+          "args": [
+            "./mcp-server.js"
+          ],
+          "enabledByDefault": true
+        }
+      }
+    },
+    {
       "id": "co.thomashulihan.shadcn-codex-ui",
       "path": "tweaks/shadcn-codex-ui",
       "manifest": {
@@ -302,6 +399,34 @@
         "permissions": [
           "settings"
         ]
+      }
+    },
+    {
+      "id": "co.thomashulihan.thread-summary-profiles",
+      "path": "tweaks/thread-summary-profiles",
+      "manifest": {
+        "id": "co.thomashulihan.thread-summary-profiles",
+        "name": "ShadGPT Thread Summary Profiles",
+        "version": "0.1.0",
+        "githubRepo": "hulibrands/tweakers",
+        "description": "Adds a read-only Profiles section to the Codex thread summary panel using existing project connection assignments.",
+        "author": {
+          "name": "Thomas Hulihan",
+          "url": "https://github.com/hulibrands"
+        },
+        "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/thread-summary-profiles",
+        "tags": [
+          "profiles",
+          "projects",
+          "summary"
+        ],
+        "scope": "both",
+        "permissions": [
+          "ipc",
+          "filesystem",
+          "settings"
+        ],
+        "main": "index.js"
       }
     },
     {
@@ -369,7 +494,7 @@
           "forkedAt": "2026-05-17T22:00:00.000Z",
           "notes": "ShadGPT-styled fork. Ported upstream settings-search and slash-menu-polish on 2026-05-19, plus local clarify-stale-chat-branch-label."
         },
-        "description": "ShadGPT quality-of-life UI tweaks: 12 individually toggleable improvements for sidebar layout, project labels, chat multi-select, settings search, slash-menu polish, and message metrics.",
+        "description": "ShadGPT quality-of-life UI tweaks: 13 individually toggleable improvements for sidebar layout, project labels, chat multi-select, settings search, slash-menu polish, tweak mentions, and message metrics.",
         "author": {
           "name": "Thomas Hulihan",
           "url": "https://github.com/hulibrands"
@@ -385,7 +510,8 @@
         "permissions": [
           "ipc",
           "settings",
-          "filesystem"
+          "filesystem",
+          "codex.views"
         ]
       }
     }

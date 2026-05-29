@@ -1,0 +1,31 @@
+{
+  "id": "co.thomashulihan.projects",
+  "name": "ShadGPT Projects",
+  "version": "1.0.0",
+  "githubRepo": "hulibrands/tweakers",
+  "description": "Adds a Projects settings page that coordinates project Chrome, Google Workspace, Supabase, and environment inventory.",
+  "author": {
+    "name": "Thomas Hulihan",
+    "url": "https://github.com/hulibrands"
+  },
+  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/projects",
+  "tags": [
+    "projects",
+    "chrome",
+    "supabase",
+    "env"
+  ],
+  "scope": "both",
+  "permissions": [
+    "ipc",
+    "filesystem",
+    "settings"
+  ],
+  "mcp": {
+    "command": "node",
+    "args": [
+      "./mcp-server.js"
+    ],
+    "enabledByDefault": true
+  }
+}

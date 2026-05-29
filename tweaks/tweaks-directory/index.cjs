@@ -11,6 +11,9 @@ const CHANNELS = {
   openExternal: "open-external",
   prepareStoreSubmission: "prepare-store-submission",
   getUserPaths: "get-user-paths",
+  getTweakFileTree: "get-tweak-file-tree",
+  getPluginFileTree: "get-plugin-file-tree",
+  getPluginStatuses: "get-plugin-statuses",
 };
 
 const STORE_FILTERS = [
@@ -19,6 +22,18 @@ const STORE_FILTERS = [
   { key: "store", label: "Store" },
   { key: "updates", label: "Updates" },
 ];
+
+const DOM_SCAN_LIMIT = 650;
+const DEBUG_NODE_SAMPLE_LIMIT = 8;
+const DEBUG_NODE_TEXT_LIMIT = 160;
+const PREF_KEYS = {
+  nativePatchesSafeMode: "native-patches-safe-mode",
+  nativePluginStatusBadges: "native-plugin-status-badges",
+};
+const DEFAULT_PREFS = {
+  nativePatchesSafeMode: false,
+  nativePluginStatusBadges: true,
+};
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
@@ -34,6 +49,12 @@ function startMain(api) {
     api.log.warn("codex.tweaks API unavailable; Tweaks Directory renderer will run read-only.");
     return undefined;
   }
+  if (typeof manager.getTweakFileTree !== "function") {
+    api.log.warn("Tweaks Directory Files UI is newer than the loaded ShadGPT runtime; restart Codex to enable installed tweak file trees.");
+  }
+  if (typeof manager.getPluginFileTree !== "function") {
+    api.log.warn("Tweaks Directory native plugin Files insertion is newer than the loaded ShadGPT runtime; restart Codex to enable plugin file trees.");
+  }
 
   const cleanups = [
     api.ipc.handle(CHANNELS.listInstalled, () => manager.listInstalled()),
@@ -46,6 +67,29 @@ function startMain(api) {
     api.ipc.handle(CHANNELS.openExternal, (url) => manager.openExternal(String(url || ""))),
     api.ipc.handle(CHANNELS.prepareStoreSubmission, (repo) => manager.prepareStoreSubmission(String(repo || ""))),
     api.ipc.handle(CHANNELS.getUserPaths, () => manager.getUserPaths()),
+    api.ipc.handle(CHANNELS.getTweakFileTree, (id, options) => {
+      if (typeof manager.getTweakFileTree !== "function") {
+        return {
+          status: "error",
+          rootLabel: String(id || ""),
+          sourceKind: "unavailable",
+          message: "This ShadGPT runtime cannot resolve installed tweak files yet.",
+        };
+      }
+      return manager.getTweakFileTree(String(id || ""), options && typeof options === "object" ? options : {});
+    }),
+    api.ipc.handle(CHANNELS.getPluginFileTree, (id, options) => {
+      if (typeof manager.getPluginFileTree !== "function") {
+        return {
+          status: "error",
+          rootLabel: String(id || ""),
+          sourceKind: "unavailable",
+          message: "This ShadGPT runtime cannot resolve plugin files yet. Restart Codex after updating ShadGPT.",
+        };
+      }
+      return manager.getPluginFileTree(String(id || ""), options && typeof options === "object" ? options : {});
+    }),
+    api.ipc.handle(CHANNELS.getPluginStatuses, () => getRuntimePluginStatuses()),
   ];
 
   return () => cleanups.forEach((cleanup) => cleanup());
@@ -82,6 +126,147 @@ function readInstalledTweakIconAsset(manager, id, relPath) {
   }
 }
 
+function getRuntimePluginStatuses(options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  const os = options.os || require("node:os");
+  const home = options.home || os.homedir();
+  const configPath = path.join(home, ".codex", "config.toml");
+  const config = safeReadText(fs, configPath);
+  const configured = parseConfiguredPlugins(config);
+  const byKey = Object.create(null);
+  const items = [];
+  for (const entry of configured) {
+    const meta = readPluginMetadataForConfigKey(entry.key, { fs, path, home });
+    const item = {
+      key: entry.key,
+      id: meta.id || entry.id,
+      slug: entry.id,
+      source: entry.source,
+      name: meta.name || meta.displayName || titleFromSlug(entry.id),
+      displayName: meta.displayName || meta.name || titleFromSlug(entry.id),
+      enabled: entry.enabled !== false,
+      configured: true,
+      configPath,
+    };
+    items.push(item);
+    for (const key of pluginStatusKeys(item)) byKey[key] = item;
+  }
+  return { status: "ok", configPath, items, byKey };
+}
+
+function parseConfiguredPlugins(config) {
+  const text = String(config || "");
+  const entries = [];
+  const section = /^\[plugins\."([^"]+)"\]([\s\S]*?)(?=^\[|(?![\s\S]))/gm;
+  let match;
+  while ((match = section.exec(text))) {
+    const key = match[1];
+    const body = match[2] || "";
+    const enabledMatch = /^\s*enabled\s*=\s*(true|false)\s*$/im.exec(body);
+    const [id, source = ""] = key.split("@");
+    entries.push({
+      key,
+      id,
+      source,
+      enabled: enabledMatch ? enabledMatch[1] === "true" : true,
+    });
+  }
+  return entries;
+}
+
+function readPluginMetadataForConfigKey(key, deps) {
+  const [id, source = ""] = String(key || "").split("@");
+  const roots = pluginMetadataRoots(id, source, deps);
+  for (const root of roots) {
+    const meta = readPluginMetadata(root, deps);
+    if (meta) return meta;
+  }
+  return {};
+}
+
+function pluginMetadataRoots(id, source, deps) {
+  const { path, home } = deps;
+  const codexRoot = path.join(home, ".codex", "plugins");
+  const roots = [];
+  if (!id) return roots;
+  if (source === "local-plugins") {
+    roots.push(path.join(codexRoot, "cache", "local-plugins", id));
+    roots.push(path.join(codexRoot, id));
+  } else if (source === "openai-curated") {
+    roots.push(path.join(codexRoot, "cache", "openai-curated", id));
+  } else if (source === "openai-bundled") {
+    roots.push(path.join(codexRoot, "cache", "openai-bundled", id));
+  } else if (source === "openai-primary-runtime") {
+    roots.push(path.join(home, ".cache", "codex-runtimes", "codex-primary-runtime", "plugins", "openai-primary-runtime", id));
+  }
+  roots.push(path.join(codexRoot, id));
+  return roots;
+}
+
+function readPluginMetadata(root, deps) {
+  const { fs, path } = deps;
+  try {
+    if (!fs.existsSync(root)) return null;
+    const candidates = [];
+    const entries = fs.statSync(root).isDirectory() ? fs.readdirSync(root, { withFileTypes: true }) : [];
+    candidates.push(root);
+    for (const entry of entries) {
+      if (entry.isDirectory()) candidates.push(path.join(root, entry.name));
+    }
+    for (const dir of candidates) {
+      for (const file of [
+        path.join(dir, ".codex-plugin", "plugin.json"),
+        path.join(dir, "plugin.json"),
+        path.join(dir, ".app.json"),
+        path.join(dir, "package.json"),
+      ]) {
+        const json = safeReadJson(fs, file);
+        if (!json) continue;
+        const nested = json.plugin && typeof json.plugin === "object" ? json.plugin : json;
+        return {
+          id: nested.id || nested.name,
+          name: nested.title || nested.displayName || nested.name,
+          displayName: nested.displayName || nested.title || nested.name,
+        };
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function safeReadText(fs, file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function safeReadJson(fs, file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function titleFromSlug(value) {
+  return String(value || "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function pluginStatusKeys(item) {
+  return [
+    item.key,
+    item.id,
+    item.slug,
+    item.name,
+    item.displayName,
+  ].filter(Boolean).map((value) => compactText(String(value)).toLowerCase());
+}
+
 function startRenderer(api) {
   const state = {
     api,
@@ -110,31 +295,46 @@ function startRenderer(api) {
     tabRowDelegate: null,
     tabRowDelegateRow: null,
     nativeTabRestoreListeners: [],
+    nativeTabVisualRestore: [],
+    scrollRepairs: [],
+    fileTrees: Object.create(null),
+    nativePluginFiles: {
+      key: "",
+      section: null,
+    },
+    preferences: readPreferences(api),
+    pluginStatuses: { status: "idle", items: [], byKey: Object.create(null) },
+    pluginStatusToken: 0,
+    observerTimer: null,
+    loadToken: 0,
+    settingsPageHandle: null,
   };
 
   injectStyles();
+  registerSettingsPage(state);
   installRescueButton(state);
   scanForMount(state);
-  state.observer = new MutationObserver(() => {
-    mountWhenReady(state);
-    // If the directory subtree was torn down (user navigated away via
-    // sidebar / hotkey / pushState), our captured `state.root` becomes
-    // disconnected. Restore any nodes we hid before React recycles them
-    // for the next route's scroll wrappers.
-    if (state.active && shouldAutoDeactivate(state)) {
-      state.api.log.info("Tweaks Directory auto-deactivate: directory subtree gone");
-      deactivate(state);
-    }
+  syncNativePluginIncludesIcons(state);
+  void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
+  state.observer = new MutationObserver((mutations) => {
+    if (mutations && mutations.length > 0 && mutations.every((mutation) => isOwnedPanelMutation(state, mutation))) return;
+    scheduleObserverWork(state);
   });
   state.observer.observe(document.documentElement, { childList: true, subtree: true });
   installMountRescans(state);
   installRouteChangeListeners(state);
+  syncNativePluginFilesSection(state, false);
 
   return () => {
     state.observer && state.observer.disconnect();
+    clearObserverTimer(state);
     clearMountTimers(state);
     for (const cleanup of state.mountListeners) cleanup();
     deactivate(state);
+    removeNativePluginFilesSection(state);
+    removeNativePluginStatusBadges();
+    removeNativePluginInheritedIcons();
+    unregisterSettingsPage(state);
     removeNativeTabRestoreListeners(state);
     state.tab && state.tab.remove();
     if (state.panel) state.panel.remove();
@@ -147,8 +347,13 @@ function startRenderer(api) {
 function installRouteChangeListeners(state) {
   const win = getWindow();
   if (!win) return;
-  const onNav = () => {
+  const onNav = (event) => {
     if (!state.active) return;
+    // Entries we own carry { codexpp: true } in history.state — see
+    // writeDetailToLocation. Skip the auto-deactivate / re-render
+    // round-trip for our own writes so we don't ping-pong with Codex's
+    // routing or the settings injector.
+    if (event && event.state && event.state.codexpp === true) return;
     if (shouldAutoDeactivate(state)) {
       state.api.log.info("Tweaks Directory deactivate on route change");
       deactivate(state);
@@ -156,11 +361,355 @@ function installRouteChangeListeners(state) {
     }
     syncDetailFromLocation(state, true);
     render(state);
+    syncNativePluginFilesSection(state, false);
   };
   for (const eventName of ["popstate", "hashchange", "codexpp-pushState", "codexpp-replaceState"]) {
     win.addEventListener(eventName, onNav);
     state.mountListeners.push(() => win.removeEventListener(eventName, onNav));
   }
+  const onSettingsSurface = (event) => {
+    if (!state.active) return;
+    if (!event || !event.detail || event.detail.visible !== true) return;
+    state.api.log.info("Tweaks Directory deactivate: settings surface opened");
+    deactivate(state);
+  };
+  win.addEventListener("codexpp:settings-surface", onSettingsSurface);
+  state.mountListeners.push(() => win.removeEventListener("codexpp:settings-surface", onSettingsSurface));
+}
+
+function registerSettingsPage(state) {
+  const api = state.api;
+  if (typeof api.settings?.registerPage !== "function") {
+    api.log.warn("Tweaks Directory settings page unavailable: registerPage is missing.");
+    return;
+  }
+  state.settingsPageHandle = api.settings.registerPage({
+    id: "main",
+    title: "Tweaks Directory",
+    description: "Control native Plugins and Skills page patches.",
+    iconSvg:
+      '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
+      '<path d="M4 5.5h12M4 10h12M4 14.5h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
+      '<path d="M14 13l2 2 3-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+      "</svg>",
+    render(root) {
+      renderTweaksDirectorySettings(root, state);
+    },
+  });
+}
+
+function unregisterSettingsPage(state) {
+  try {
+    const handle = state.settingsPageHandle;
+    if (handle && typeof handle.unregister === "function") handle.unregister();
+    else if (handle && typeof handle.dispose === "function") handle.dispose();
+  } catch {}
+  state.settingsPageHandle = null;
+}
+
+function renderTweaksDirectorySettings(root, state) {
+  root.innerHTML = "";
+  root.className = "codexpp-td-settings";
+  const style = document.createElement("style");
+  style.textContent = settingsCss();
+  root.appendChild(style);
+  root.appendChild(tweaksHealthPanel(state));
+  const card = document.createElement("section");
+  card.className = "codexpp-td-settings-card";
+  const safeModeExplanation = settingsNotice("");
+  card.appendChild(settingsToggle(
+    state,
+    "nativePatchesSafeMode",
+    "Native page safe mode",
+    "Use only the standalone Tweaks tab. Disables native Plugins/Skills page patches: status badges, inherited icons, file-tree insertion, and detail-row cleanup.",
+    () => updateSafeModeExplanation(safeModeExplanation, state),
+  ));
+  updateSafeModeExplanation(safeModeExplanation, state);
+  card.appendChild(safeModeExplanation);
+  card.appendChild(settingsToggle(
+    state,
+    "nativePluginStatusBadges",
+    "Plugin detail status badges",
+    "Show disabled plugin status from Codex config on plugin detail pages.",
+  ));
+  root.appendChild(card);
+}
+
+function settingsToggle(state, pref, title, description, onChange) {
+  const row = document.createElement("label");
+  row.className = "codexpp-td-settings-row";
+  const text = document.createElement("span");
+  text.className = "codexpp-td-settings-text";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const small = document.createElement("span");
+  small.textContent = description;
+  text.append(strong, small);
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = readPreference(state, pref);
+  input.addEventListener("change", () => {
+    setPreference(state, pref, input.checked);
+    applyNativePatchPreferences(state);
+    if (typeof onChange === "function") onChange(input.checked);
+  });
+  row.append(text, input);
+  return row;
+}
+
+function settingsNotice(text) {
+  const node = document.createElement("div");
+  node.className = "codexpp-td-settings-notice";
+  node.textContent = text;
+  return node;
+}
+
+function updateSafeModeExplanation(node, state) {
+  if (!node) return;
+  if (nativePatchesSafeMode(state)) {
+    node.textContent = "Safe mode is active. Native Plugins/Skills patches are disabled: detail status badges, inherited plugin icons, plugin file tree insertion, and native detail-page cleanup. The Tweaks tab, installed-tweak files, and Settings pages still work.";
+    node.classList.add("is-warning");
+    return;
+  }
+  node.textContent = "Safe mode is off. Tweaks Directory may patch native Plugins/Skills detail pages to show status badges, inherited icons, and file trees.";
+  node.classList.remove("is-warning");
+}
+
+function tweaksHealthPanel(state) {
+  const card = document.createElement("section");
+  card.className = "codexpp-td-settings-card codexpp-td-health-card";
+  const header = document.createElement("div");
+  header.className = "codexpp-td-health-header";
+  const text = document.createElement("span");
+  text.className = "codexpp-td-settings-text";
+  const title = document.createElement("strong");
+  title.textContent = "Tweaks health";
+  const summary = document.createElement("span");
+  summary.textContent = "Checking loaded, failed, and main-only tweaks...";
+  text.append(title, summary);
+  const repair = document.createElement("button");
+  repair.type = "button";
+  repair.className = "codexpp-td-settings-button";
+  repair.textContent = "Repair missing pages";
+  repair.disabled = true;
+  header.append(text, repair);
+  const list = document.createElement("div");
+  list.className = "codexpp-td-health-list";
+  list.textContent = "Loading tweak health...";
+  card.append(header, list);
+  repair.addEventListener("click", () => repairMissingRegisteredSettingsPages(state, repair, summary));
+  void loadTweaksHealth(state, summary, list, repair);
+  return card;
+}
+
+async function loadTweaksHealth(state, summary, list, repair) {
+  try {
+    const installed = await state.api.ipc.invoke(CHANNELS.listInstalled);
+    state.installed = Array.isArray(installed) ? installed : state.installed;
+    const pages = registeredTweakPages(state);
+    const health = buildTweaksHealth(state.installed, pages);
+    renderTweaksHealth(summary, list, repair, health);
+  } catch (error) {
+    summary.textContent = "Tweak health could not load.";
+    summary.classList.add("is-error");
+    list.textContent = errorMessage(error);
+    repair.disabled = false;
+  }
+}
+
+function registeredTweakPages(state) {
+  try {
+    if (!state.api.codex || typeof state.api.codex.listRegisteredTweakPages !== "function") return [];
+    const pages = state.api.codex.listRegisteredTweakPages();
+    return Array.isArray(pages) ? pages : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildTweaksHealth(installed, pages) {
+  const pageCounts = new Map();
+  for (const page of pages || []) {
+    const tweakId = String(page && page.tweakId || "");
+    if (!tweakId) continue;
+    pageCounts.set(tweakId, (pageCounts.get(tweakId) || 0) + 1);
+  }
+  const rows = [];
+  for (const item of Array.isArray(installed) ? installed : []) {
+    const manifest = item && item.manifest || {};
+    const id = String(manifest.id || "");
+    if (!id) continue;
+    const name = String(manifest.name || id);
+    const scope = String(manifest.scope || "renderer");
+    const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
+    const enabled = item.enabled !== false;
+    const pageCount = pageCounts.get(id) || 0;
+    let status = "loaded";
+    let detail = pageCount ? `${pageCount} registered settings page${pageCount === 1 ? "" : "s"}` : "Renderer/main entry loaded without a settings page.";
+    let repairable = false;
+    if (!enabled) {
+      status = "disabled";
+      detail = "Installed but disabled.";
+    } else if (item.entryExists === false) {
+      status = "failed";
+      detail = "Entry file is missing from disk.";
+    } else if (scope === "main") {
+      status = "main-only";
+      detail = "Runs in the main process and does not register renderer Settings UI.";
+    } else if (permissions.includes("settings") && pageCount === 0) {
+      status = "failed";
+      detail = "Expected a Settings page, but none is registered in the renderer.";
+      repairable = true;
+    }
+    rows.push({ id, name, scope, status, detail, repairable });
+  }
+  const counts = {
+    loaded: rows.filter((row) => row.status === "loaded").length,
+    failed: rows.filter((row) => row.status === "failed").length,
+    mainOnly: rows.filter((row) => row.status === "main-only").length,
+    disabled: rows.filter((row) => row.status === "disabled").length,
+    repairable: rows.filter((row) => row.repairable).length,
+  };
+  return { counts, rows };
+}
+
+function renderTweaksHealth(summary, list, repair, health) {
+  const counts = health.counts;
+  summary.textContent = `${counts.loaded} loaded, ${counts.failed} failed, ${counts.mainOnly} main-only${counts.disabled ? `, ${counts.disabled} disabled` : ""}`;
+  summary.classList.toggle("is-error", counts.failed > 0);
+  repair.disabled = counts.repairable === 0;
+  repair.title = counts.repairable
+    ? "Reload installed tweaks and refresh this window so missing Settings pages can register again."
+    : "No missing registered settings pages were found.";
+  list.innerHTML = "";
+  const groups = [
+    ["failed", "Failed"],
+    ["loaded", "Loaded"],
+    ["main-only", "Main-only"],
+    ["disabled", "Disabled"],
+  ];
+  for (const [status, label] of groups) {
+    const rows = health.rows.filter((row) => row.status === status);
+    if (!rows.length) continue;
+    const group = document.createElement("div");
+    group.className = "codexpp-td-health-group";
+    const heading = document.createElement("strong");
+    heading.textContent = label;
+    group.appendChild(heading);
+    for (const row of rows) group.appendChild(tweaksHealthRow(row));
+    list.appendChild(group);
+  }
+  if (!list.children.length) list.textContent = "No installed tweaks found.";
+}
+
+function tweaksHealthRow(row) {
+  const item = document.createElement("div");
+  item.className = `codexpp-td-health-row is-${row.status}`;
+  const name = document.createElement("span");
+  name.className = "codexpp-td-health-name";
+  name.textContent = row.name;
+  const detail = document.createElement("span");
+  detail.className = "codexpp-td-health-detail";
+  detail.textContent = `${row.id} - ${row.detail}`;
+  item.append(name, detail);
+  return item;
+}
+
+async function repairMissingRegisteredSettingsPages(state, repair, summary) {
+  repair.disabled = true;
+  repair.textContent = "Repairing...";
+  summary.textContent = "Reloading installed tweaks and refreshing this window...";
+  try {
+    await state.api.ipc.invoke(CHANNELS.reload);
+    location.reload();
+  } catch (error) {
+    repair.textContent = "Repair missing pages";
+    repair.disabled = false;
+    summary.textContent = `Could not repair missing pages: ${errorMessage(error)}`;
+    summary.classList.add("is-error");
+  }
+}
+
+function settingsCss() {
+  return `
+    .codexpp-td-settings { display: flex; flex-direction: column; gap: 14px; }
+    .codexpp-td-settings-card { border: 1px solid var(--border-subtle, rgba(128,128,128,.25)); border-radius: 8px; overflow: hidden; }
+    .codexpp-td-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.18)); }
+    .codexpp-td-settings-row:last-child { border-bottom: 0; }
+    .codexpp-td-settings-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .codexpp-td-settings-text strong { font-size: 13px; font-weight: 600; }
+    .codexpp-td-settings-text span { color: var(--text-secondary, rgba(0,0,0,.56)); font-size: 12px; line-height: 1.35; }
+    .codexpp-td-settings-row input { flex: 0 0 auto; }
+    .codexpp-td-settings-notice { padding: 10px 12px; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.18)); color: var(--text-secondary, rgba(0,0,0,.56)); font-size: 12px; line-height: 1.4; }
+    .codexpp-td-settings-notice.is-warning { color: #92400e; background: rgba(146,64,14,.06); }
+    .codexpp-td-health-card { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+    .codexpp-td-health-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .codexpp-td-settings-button { flex: 0 0 auto; min-height: 30px; border: 1px solid var(--border-subtle, rgba(128,128,128,.35)); border-radius: 6px; background: var(--background-primary, #fff); color: inherit; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .codexpp-td-settings-button:disabled { cursor: default; opacity: .55; }
+    .codexpp-td-health-list { display: flex; flex-direction: column; gap: 10px; color: var(--text-secondary, rgba(0,0,0,.56)); font-size: 12px; }
+    .codexpp-td-health-group { display: flex; flex-direction: column; gap: 5px; }
+    .codexpp-td-health-group > strong { color: inherit; font-size: 12px; font-weight: 650; }
+    .codexpp-td-health-row { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr); gap: 8px; align-items: start; min-height: 26px; padding: 6px 8px; border: 1px solid var(--border-subtle, rgba(128,128,128,.18)); border-radius: 6px; }
+    .codexpp-td-health-row.is-failed { color: #b42318; border-color: rgba(180,35,24,.28); }
+    .codexpp-td-health-row.is-main-only { color: #475569; }
+    .codexpp-td-health-name { color: inherit; font-weight: 600; }
+    .codexpp-td-health-detail { min-width: 0; overflow-wrap: anywhere; }
+    .is-error { color: #b42318 !important; }
+    @media (max-width: 720px) {
+      .codexpp-td-health-header { align-items: stretch; flex-direction: column; }
+      .codexpp-td-settings-button { width: 100%; }
+      .codexpp-td-health-row { grid-template-columns: 1fr; }
+    }
+  `;
+}
+
+function readPreferences(api) {
+  return {
+    nativePatchesSafeMode: readStoredBoolean(api, PREF_KEYS.nativePatchesSafeMode, DEFAULT_PREFS.nativePatchesSafeMode),
+    nativePluginStatusBadges: readStoredBoolean(api, PREF_KEYS.nativePluginStatusBadges, DEFAULT_PREFS.nativePluginStatusBadges),
+  };
+}
+
+function readStoredBoolean(api, key, fallback) {
+  try {
+    if (!api.storage || typeof api.storage.get !== "function") return fallback;
+    return Boolean(api.storage.get(key, fallback));
+  } catch {
+    return fallback;
+  }
+}
+
+function readPreference(state, pref) {
+  return Boolean((state.preferences || DEFAULT_PREFS)[pref]);
+}
+
+function setPreference(state, pref, value) {
+  state.preferences = { ...state.preferences, [pref]: Boolean(value) };
+  const key = PREF_KEYS[pref];
+  try {
+    if (key && state.api.storage && typeof state.api.storage.set === "function") {
+      state.api.storage.set(key, Boolean(value));
+    }
+  } catch (error) {
+    state.api.log.warn(`Tweaks Directory could not save setting ${pref}: ${errorMessage(error)}`);
+  }
+}
+
+function nativePatchesSafeMode(state) {
+  return readPreference(state, "nativePatchesSafeMode");
+}
+
+function applyNativePatchPreferences(state) {
+  if (nativePatchesSafeMode(state)) {
+    removeNativePluginFilesSection(state);
+    removeNativePluginStatusBadges();
+    removeNativePluginInheritedIcons();
+    state.api.log.info("Tweaks Directory native page patches disabled by safe mode.");
+    return;
+  }
+  syncNativePluginFilesSection(state, true);
+  syncNativePluginIncludesIcons(state);
+  void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
 }
 
 function shouldAutoDeactivate(state) {
@@ -169,6 +718,301 @@ function shouldAutoDeactivate(state) {
   if (state.tab && !state.tab.isConnected) return true;
   if (!isPluginsDirectorySurface(state.root)) return true;
   return false;
+}
+
+function scheduleObserverWork(state) {
+  if (state.observerTimer) return;
+  const timerHost = getTimerHost();
+  const run = () => {
+    state.observerTimer = null;
+    mountWhenReady(state);
+    syncNativePluginFilesSection(state, false);
+    syncNativePluginIncludesIcons(state);
+    void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
+    // If the directory subtree was torn down (user navigated away via
+    // sidebar / hotkey / pushState), our captured `state.root` becomes
+    // disconnected. Restore any nodes we hid before React recycles them
+    // for the next route's scroll wrappers.
+    if (state.active && shouldAutoDeactivate(state)) {
+      state.api.log.info("Tweaks Directory auto-deactivate: directory subtree gone");
+      deactivate(state);
+    }
+  };
+  if (!timerHost) {
+    run();
+    return;
+  }
+  state.observerTimer = timerHost.setTimeout(run, 40);
+}
+
+function clearObserverTimer(state) {
+  if (!state.observerTimer) return;
+  const timerHost = getTimerHost();
+  if (timerHost) timerHost.clearTimeout(state.observerTimer);
+  state.observerTimer = null;
+}
+
+async function loadPluginStatuses(state) {
+  if (nativePatchesSafeMode(state)) return state.pluginStatuses;
+  const token = state.pluginStatusToken + 1;
+  state.pluginStatusToken = token;
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getPluginStatuses);
+    if (state.pluginStatusToken !== token) return state.pluginStatuses;
+    state.pluginStatuses = normalizePluginStatuses(result);
+    return state.pluginStatuses;
+  } catch (error) {
+    if (state.pluginStatusToken === token) {
+      state.pluginStatuses = { status: "error", items: [], byKey: Object.create(null), message: errorMessage(error) };
+      state.api.log.warn(`Tweaks Directory plugin status load failed: ${errorMessage(error)}`);
+    }
+    return state.pluginStatuses;
+  }
+}
+
+function normalizePluginStatuses(result) {
+  const items = Array.isArray(result && result.items) ? result.items : [];
+  const byKey = Object.create(null);
+  for (const item of items) {
+    const normalized = {
+      key: String(item.key || ""),
+      id: String(item.id || item.slug || ""),
+      slug: String(item.slug || item.id || ""),
+      source: String(item.source || ""),
+      name: String(item.name || item.displayName || item.id || ""),
+      displayName: String(item.displayName || item.name || item.id || ""),
+      enabled: item.enabled !== false,
+      configured: item.configured !== false,
+    };
+    for (const key of pluginStatusKeys(normalized)) byKey[key] = normalized;
+  }
+  return { status: result && result.status || "ok", items, byKey };
+}
+
+function nativePluginStatusForDetail(state, detail) {
+  const map = state.pluginStatuses && state.pluginStatuses.byKey;
+  if (!map || !detail) return null;
+  const candidates = [
+    detail.candidate,
+    detail.title,
+    detail.key && String(detail.key).replace(/^native-plugin:/, ""),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const key = compactText(String(candidate)).toLowerCase();
+    if (map[key]) return map[key];
+  }
+  return null;
+}
+
+function isOwnedPanelMutation(state, mutation) {
+  if (!state.panel || !mutation) return false;
+  if (nodeBelongsToPanel(state.panel, mutation.target)) return true;
+  const nodes = [];
+  if (mutation.addedNodes) nodes.push(...Array.from(mutation.addedNodes));
+  if (mutation.removedNodes) nodes.push(...Array.from(mutation.removedNodes));
+  return nodes.length > 0 && nodes.every((node) => nodeBelongsToPanel(state.panel, node));
+}
+
+function nodeBelongsToPanel(panel, node) {
+  if (!panel || !node) return false;
+  if (node === panel) return true;
+  if (typeof panel.contains === "function" && panel.contains(node)) return true;
+  return Boolean(node.contains && node.contains(panel));
+}
+
+function syncNativePluginFilesSection(state, force) {
+  if (nativePatchesSafeMode(state)) {
+    removeNativePluginFilesSection(state);
+    logNativePluginShape(state, "files-skip-safe-mode", null);
+    return;
+  }
+  if (state.active) {
+    removeNativePluginFilesSection(state);
+    return;
+  }
+  const detail = findNativePluginDetailSurface();
+  if (!detail) {
+    removeNativePluginFilesSection(state);
+    return;
+  }
+  if (!force && state.nativePluginFiles.section && state.nativePluginFiles.section.isConnected && state.nativePluginFiles.key === detail.key) {
+    return;
+  }
+  removeNativePluginFilesSection(state);
+  const section = renderNativePluginFilesSection(state, detail);
+  if (!section) return;
+  detail.anchor.insertAdjacentElement("afterend", section);
+  state.nativePluginFiles.key = detail.key;
+  state.nativePluginFiles.section = section;
+  logNativePluginShape(state, "files-mounted", detail);
+}
+
+function syncNativePluginIncludesIcons(state) {
+  if (nativePatchesSafeMode(state)) {
+    removeNativePluginInheritedIcons();
+    return;
+  }
+  if (state.active) return;
+  const detail = findNativePluginDetailSurface();
+  if (!detail) return;
+  const pluginIcon = findNativePluginHeroImage(detail.container);
+  if (!pluginIcon) return;
+  for (const row of nativePluginSkillIncludeRows(detail.container)) {
+    if (row.querySelector("img")) continue;
+    const iconSlot = nativeIncludeIconSlot(row);
+    if (!iconSlot) continue;
+    if (iconSlot.dataset && iconSlot.dataset.codexppPluginInheritedIconSlotText === undefined) {
+      iconSlot.dataset.codexppPluginInheritedIconSlotText = iconSlot.textContent || "";
+    }
+    iconSlot.textContent = "";
+    const inheritedIcon = pluginIcon.cloneNode(true);
+    inheritedIcon.dataset.codexppPluginInheritedIcon = "true";
+    inheritedIcon.setAttribute("alt", "");
+    iconSlot.appendChild(inheritedIcon);
+    row.dataset.codexppPluginInheritedIcon = "true";
+    row.dataset.codexppPluginInheritedIconRow = "true";
+  }
+}
+
+function syncNativePluginStatusBadges(state) {
+  if (nativePatchesSafeMode(state) || !readPreference(state, "nativePluginStatusBadges")) {
+    removeNativePluginStatusBadges();
+    return;
+  }
+  if (state.active) {
+    removeNativePluginStatusBadges();
+    return;
+  }
+  const detail = findNativePluginDetailSurface();
+  if (!detail) {
+    removeNativePluginStatusBadges();
+    return;
+  }
+  const status = nativePluginStatusForDetail(state, detail);
+  if (!status || status.enabled !== false) {
+    removeNativePluginStatusBadges();
+    return;
+  }
+  const anchor = detail.anchor || detail.container;
+  if (!anchor || typeof anchor.insertAdjacentElement !== "function") return;
+  let badge = document.querySelector("[data-codexpp-native-plugin-status-badge]");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.dataset.codexppNativePluginStatusBadge = "true";
+    badge.className = "codexpp-native-plugin-status-badge";
+    badge.textContent = "Disabled";
+    badge.title = "Plugin disabled in Codex config";
+    anchor.insertAdjacentElement("afterend", badge);
+  }
+  badge.dataset.codexppNativePluginStatusKey = status.key || "";
+  logNativePluginShape(state, "status-badge-mounted", detail, { statusKey: status.key });
+}
+
+function removeNativePluginStatusBadges() {
+  for (const badge of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-status-badge]"))) {
+    badge.remove();
+  }
+}
+
+function removeNativePluginInheritedIcons() {
+  for (const img of Array.from(document.querySelectorAll("[data-codexpp-plugin-inherited-icon]"))) {
+    const slot = img.parentElement;
+    img.remove();
+    if (slot && slot.dataset && slot.dataset.codexppPluginInheritedIconSlotText !== undefined) {
+      slot.textContent = slot.dataset.codexppPluginInheritedIconSlotText;
+      delete slot.dataset.codexppPluginInheritedIconSlotText;
+    }
+  }
+  for (const row of Array.from(document.querySelectorAll("[data-codexpp-plugin-inherited-icon-row]"))) {
+    delete row.dataset.codexppPluginInheritedIconRow;
+    delete row.dataset.codexppPluginInheritedIcon;
+  }
+}
+
+function findNativePluginHeroImage(container) {
+  const title = nativePluginDetailTitle(container);
+  const images = Array.from(container.querySelectorAll("img"));
+  if (images.length === 0) return null;
+  if (!title || typeof title.compareDocumentPosition !== "function") return images[0];
+  const beforeTitle = images.filter((image) => {
+    try {
+      return Boolean(image.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING);
+    } catch {
+      return false;
+    }
+  });
+  return beforeTitle[0] || images[0];
+}
+
+function nativePluginSkillIncludeRows(container) {
+  return Array.from(container.querySelectorAll("div")).filter((node) => {
+    const text = compactText(node.textContent || "");
+    if (!/\bSkill\b/.test(text) || /\bMCP server\b/.test(text)) return false;
+    return Boolean(nativeIncludeIconSlot(node));
+  });
+}
+
+function nativeIncludeIconSlot(row) {
+  const firstChild = row && row.children && row.children[0];
+  if (!firstChild || typeof firstChild.querySelector !== "function") return null;
+  if (firstChild.querySelector("img")) return null;
+  return firstChild.querySelector("svg") ? firstChild : null;
+}
+
+function removeNativePluginFilesSection(state) {
+  if (state.nativePluginFiles && state.nativePluginFiles.section) {
+    state.nativePluginFiles.section.remove();
+  }
+  if (state.nativePluginFiles) {
+    state.nativePluginFiles.key = "";
+    state.nativePluginFiles.section = null;
+  }
+}
+
+function findNativePluginDetailSurface() {
+  const tryInChat = Array.from(document.querySelectorAll("button")).find((button) => compactText(button.textContent) === "Try in chat");
+  if (!tryInChat || !isVisibleTabCandidate(tryInChat)) return null;
+  let container = tryInChat.parentElement;
+  let selected = null;
+  while (container && container !== document.body) {
+    const title = nativePluginDetailTitle(container);
+    if (title) {
+      selected = { container, title };
+      break;
+    }
+    container = container.parentElement;
+  }
+  if (!selected) return null;
+  const candidate = compactText(selected.title.textContent || "");
+  if (!candidate || candidate === "Make Codex work your way" || candidate === "Plugins" || candidate === "Skills") return null;
+  const anchor = nativePluginFilesAnchor(selected.container, tryInChat);
+  if (!anchor || typeof anchor.insertAdjacentElement !== "function") return null;
+  return {
+    container: selected.container,
+    anchor,
+    candidate,
+    title: candidate,
+    key: `native-plugin:${candidate}`,
+  };
+}
+
+function nativePluginDetailTitle(container) {
+  if (!container || typeof container.querySelectorAll !== "function") return null;
+  const titles = Array.from(container.querySelectorAll("h1,h2,h3"));
+  return titles.find((title) => {
+    const text = compactText(title.textContent || "");
+    return text && text !== "Make Codex work your way" && text !== "Plugins" && text !== "Skills";
+  }) || null;
+}
+
+function nativePluginFilesAnchor(container, tryInChat) {
+  let node = tryInChat.parentElement;
+  while (node && node.parentElement && node.parentElement !== container && node !== container) {
+    node = node.parentElement;
+  }
+  if (node && node !== container) return node;
+  const title = nativePluginDetailTitle(container);
+  return title || tryInChat;
 }
 
 function installMountRescans(state) {
@@ -183,7 +1027,12 @@ function installMountRescans(state) {
 
 function scanForMount(state) {
   clearMountTimers(state);
+  // Fast path: once the Tweaks tab is mounted and still connected, we have
+  // nothing to re-scan for. Every pointerdown / keydown was triggering 6
+  // DOM scans (one immediate + a 5-stage timer fan-out) for no benefit.
+  if (state.tab && state.tab.isConnected) return;
   mountWhenReady(state);
+  if (state.tab && state.tab.isConnected) return;
   const timerHost = getTimerHost();
   if (!timerHost) return;
   for (const delay of [80, 200, 500, 1000, 1800]) {
@@ -270,13 +1119,19 @@ function applyTweaksTabShell(tab) {
 }
 
 function findPluginsSkillsTabs() {
+  const pair = findPluginsSkillsTabPair();
+  if (!pair) return null;
+  if (pair.tabRow.querySelector("[data-codexpp-tweaks-directory-tab]")) return null;
+  return pair;
+}
+
+function findPluginsSkillsTabPair() {
   const buttons = tabCandidates();
   const plugins = buttons.find((button) => compactText(button.textContent) === "Plugins");
   const skills = buttons.find((button) => compactText(button.textContent) === "Skills");
   if (!plugins || !skills) return null;
   const parent = commonTabParent(plugins, skills);
   if (!parent) return null;
-  if (parent.querySelector("[data-codexpp-tweaks-directory-tab]")) return null;
   const root = findDirectoryRoot(parent);
   if (!isPluginsDirectorySurface(root)) return null;
   return { plugins, skills, tabRow: parent, root };
@@ -330,6 +1185,7 @@ function isVisibleTabCandidate(node) {
   if (!node || typeof node.getBoundingClientRect !== "function") return true;
   const rect = node.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
+  if (node.hidden || node.style && (node.style.display === "none" || node.style.visibility === "hidden")) return false;
   const win = getWindow();
   if (!win) return true;
   const viewportW = win.innerWidth || 0;
@@ -364,25 +1220,29 @@ function commonTabParent(left, right) {
 
 function activate(state, pair, tab) {
   state.active = true;
+  removeNativePluginFilesSection(state);
   state.tab = tab;
   const livePair = resolveLivePair(pair, tab);
   state.nativeButtons = [livePair.plugins, livePair.skills];
   state.root = livePair.root || findDirectoryRoot(livePair.tabRow);
   ensurePanel(state, livePair.tabRow);
   if (state.floatingPanel) {
+    hideFloatingNativePluginSiblings(state, livePair.tabRow);
     state.api.log.warn("Tweaks Directory using floating fallback because the native Plugins root is unsafe", {
       root: describeForLog(state.root),
       tabRowParent: describeForLog(livePair && livePair.tabRow && livePair.tabRow.parentElement),
     });
   } else {
     hideNativeDirectoryContent(state, livePair.tabRow);
+    hideNativeDirectorySiblingsAroundPanel(state, livePair.tabRow);
   }
+  applyDirectoryScrollRepair(state, livePair.tabRow);
   logHiddenNodes(state);
   logActivationContext(state, livePair);
   setTabVisualState(state, true);
   render(state);
   scrollPanelIntoView(state);
-  loadData(state, false);
+  void loadData(state, false);
 }
 
 function resolveLivePair(pair, tab) {
@@ -436,6 +1296,29 @@ function logActivationContext(state, pair) {
   }
 }
 
+function logNativePluginShape(state, reason, detail, extra) {
+  try {
+    const pair = findPluginsSkillsTabPair();
+    const payload = {
+      reason,
+      safeMode: nativePatchesSafeMode(state),
+      statusBadges: readPreference(state, "nativePluginStatusBadges"),
+      root: describeForLog(pair && pair.root),
+      tabRow: describeForLog(pair && pair.tabRow),
+      detail: detail ? {
+        candidate: detail.candidate,
+        container: describeForLog(detail.container),
+        anchor: describeForLog(detail.anchor),
+      } : null,
+      pluginStatusCount: state.pluginStatuses && Array.isArray(state.pluginStatuses.items) ? state.pluginStatuses.items.length : 0,
+      ...(extra || {}),
+    };
+    state.api.log.info(`Tweaks Directory native plugin shape: ${JSON.stringify(payload)}`);
+  } catch (error) {
+    state.api.log.warn(`Tweaks Directory native plugin shape log failed: ${errorMessage(error)}`);
+  }
+}
+
 function describeForLog(node) {
   if (!node) return null;
   let tag = typeof node.tagName === "string" ? node.tagName.toLowerCase() : "node";
@@ -466,6 +1349,10 @@ function readStyleHints(node) {
 
 function deactivate(state) {
   state.active = false;
+  state.loadToken += 1;
+  state.loading = false;
+  clearObserverTimer(state);
+  restoreDirectoryScrollRepair(state);
   // Restore each hidden node only if it is still connected. When React
   // recycles a node we previously hid into a *different* part of the tree
   // (e.g. a chat scroll wrapper after the user navigates away), leaving
@@ -494,6 +1381,80 @@ function deactivate(state) {
   setTabVisualState(state, false);
   hideRescueButton(state);
   exposeDebugState(state);
+}
+
+function applyDirectoryScrollRepair(state, tabRow) {
+  restoreDirectoryScrollRepair(state);
+  if (!state.panel || state.floatingPanel) return;
+  for (const node of directoryScrollRepairTargets(state, tabRow)) {
+    if (!node || !node.style) continue;
+    state.scrollRepairs.push({
+      node,
+      overflowX: node.style.overflowX || "",
+      overflowY: node.style.overflowY || "",
+      minHeight: node.style.minHeight || "",
+      maxHeight: node.style.maxHeight || "",
+      overscrollBehavior: node.style.overscrollBehavior || "",
+    });
+    if (node.dataset) node.dataset.codexppTweaksDirectoryScrollRepair = "true";
+    node.style.overflowY = "auto";
+    if (!node.style.overflowX || node.style.overflowX === "visible") node.style.overflowX = "hidden";
+    node.style.minHeight = "0";
+    node.style.overscrollBehavior = "contain";
+    const maxHeight = directoryScrollRepairMaxHeight(node);
+    if (maxHeight) node.style.maxHeight = maxHeight;
+  }
+}
+
+function restoreDirectoryScrollRepair(state) {
+  for (const repair of state.scrollRepairs || []) {
+    const node = repair && repair.node;
+    if (!node || !node.style) continue;
+    node.style.overflowX = repair.overflowX;
+    node.style.overflowY = repair.overflowY;
+    node.style.minHeight = repair.minHeight;
+    node.style.maxHeight = repair.maxHeight;
+    node.style.overscrollBehavior = repair.overscrollBehavior;
+    if (node.dataset) delete node.dataset.codexppTweaksDirectoryScrollRepair;
+  }
+  state.scrollRepairs = [];
+}
+
+function directoryScrollRepairTargets(state, tabRow) {
+  const targets = [];
+  const seen = new Set();
+  let node = state.panel && state.panel.parentElement;
+  while (node && node !== document.body && node !== document.documentElement && targets.length < 4) {
+    if (!seen.has(node) && isDirectoryScrollRepairTarget(state, tabRow, node)) {
+      targets.push(node);
+      seen.add(node);
+    }
+    node = node.parentElement;
+  }
+  return targets;
+}
+
+function isDirectoryScrollRepairTarget(state, tabRow, node) {
+  if (!node || node === state.panel || !state.panel) return false;
+  if (looksLikeAppSidebar(node) || hasShellNavigationSibling(node, tabRow)) return false;
+  if (typeof node.contains === "function" && !node.contains(state.panel)) return false;
+  if (!hasUsefulDirectoryContentBox(node)) return false;
+  if (node === state.panel.parentElement) return true;
+  if (isDirectoryContentColumnForTab(node, tabRow)) return true;
+  if (isAppContentColumn(node)) return true;
+  if (!isSafeDirectoryRoot(node) && !isViewportSized(node)) return false;
+  return hasDirectoryLayoutBox(node);
+}
+
+function directoryScrollRepairMaxHeight(node) {
+  if (!node || typeof node.getBoundingClientRect !== "function") return "";
+  const win = getWindow();
+  const viewportH = win && win.innerHeight ? win.innerHeight : 0;
+  if (viewportH <= 0) return "";
+  const rect = node.getBoundingClientRect();
+  if (rect.top < 0 || rect.top >= viewportH) return "";
+  const top = Math.max(0, Math.round(rect.top));
+  return `calc(100vh - ${top}px)`;
 }
 
 function installTabRowDelegate(state) {
@@ -568,10 +1529,49 @@ function findDirectoryRoot(tabRow) {
   }
   const contentRoot = findDirectoryContentRoot(tabRow, firstSurface);
   if (contentRoot) return contentRoot;
+  const layoutRoot = findDirectoryLayoutRoot(tabRow);
+  if (layoutRoot) return layoutRoot;
   // Fallback: prefer the tab row's parent over document.body. If that parent
   // is itself viewport-sized (i.e., we're really stuck), still return it but
   // the activation log will surface the bad rect for diagnosis.
   return tabRow.parentElement || document.body;
+}
+
+function findDirectoryLayoutRoot(tabRow) {
+  let node = tabRow && tabRow.parentElement;
+  while (node && node !== document.body) {
+    if (
+      node.contains &&
+      node.contains(tabRow) &&
+      !isCompactDirectoryHeader(node, tabRow) &&
+      !looksLikeAppSidebar(node) &&
+      !hasShellNavigationSibling(node, tabRow) &&
+      hasDirectoryTabRow(node, tabRow) &&
+      hasDirectoryLayoutBox(node)
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function hasDirectoryTabRow(root, tabRow) {
+  if (!root || !tabRow || !root.contains || !root.contains(tabRow)) return false;
+  const text = compactText(tabRow.textContent || "");
+  return text.includes("Plugins") && text.includes("Skills");
+}
+
+function hasDirectoryLayoutBox(node) {
+  if (!node || typeof node.getBoundingClientRect !== "function") return false;
+  const rect = node.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  const win = getWindow();
+  const viewportW = win && win.innerWidth ? win.innerWidth : 0;
+  const viewportH = win && win.innerHeight ? win.innerHeight : 0;
+  const minWidth = viewportW > 0 ? Math.min(720, viewportW * 0.42) : 640;
+  const minHeight = viewportH > 0 ? Math.min(520, viewportH * 0.42) : 420;
+  return rect.width >= minWidth && rect.height >= minHeight;
 }
 
 function findDirectoryContentRoot(tabRow, surfaceRoot) {
@@ -618,12 +1618,24 @@ function hasUsefulDirectoryContentBox(node) {
 
 function directoryContentRootScore(node) {
   const text = compactText(node.textContent || "");
+  const hasSearch = hasNativeDirectorySearch(node);
+  const hasListing = hasNativeDirectoryListingSignal(text);
+  const hasTitle = text.includes("Make Codex work your way");
+  if (!hasListing) return 0;
   let score = 0;
-  if (text.includes("Make Codex work your way")) score += 4;
-  if (hasNativeDirectorySearch(node)) score += 4;
-  if (text.includes("Recommended") || text.includes("Featured")) score += 2;
-  if (text.includes("PDF") || text.includes("Playwright") || text.includes("Computer Use")) score += 1;
+  if (hasListing) score += 8;
+  if (hasSearch) score += 4;
+  if (hasTitle) score += 1;
   return score;
+}
+
+function hasNativeDirectoryListingSignal(text) {
+  if (!text) return false;
+  if (text.includes("Recommended") || text.includes("Featured")) return true;
+  if (text.includes("PDF") || text.includes("Playwright") || text.includes("Computer Use")) return true;
+  if (text.includes("Plan Grader") || text.includes("Use when")) return true;
+  if (text.includes("Try in chat")) return true;
+  return false;
 }
 
 function hasNativeDirectorySearch(root) {
@@ -664,7 +1676,13 @@ function isAppContentColumn(node) {
   const viewportH = win && win.innerHeight ? win.innerHeight : 0;
   if (viewportW <= 0 || viewportH <= 0) return false;
   const rect = node.getBoundingClientRect();
-  if (rect.height < viewportH * 0.85 || Math.abs(rect.top) > 24) return false;
+  if (rect.height < viewportH * 0.85) return false;
+  // Anchor by both top and bottom proximity so Codex's tall custom titlebar
+  // (~47px) still counts as the "app content column". The old `top > 24`
+  // check missed this and let the directory broad-hide nuke unrelated
+  // surfaces (Settings dialog, chat content) on the same column.
+  if (rect.top < 0 || rect.top > viewportH * 0.12) return false;
+  if (rect.bottom < viewportH * 0.92) return false;
   return rect.width >= viewportW * 0.42;
 }
 
@@ -696,14 +1714,31 @@ function looksLikeAppSidebar(node) {
 }
 
 function ensurePanel(state, tabRow) {
+  const useFloating = isUnsafeDirectoryRoot(state.root, tabRow);
   if (state.panel && state.panel.isConnected) {
     state.panel.hidden = false;
+    if (useFloating) {
+      state.panel.className = "codexpp-tweaks-directory codexpp-tweaks-directory-floating";
+      if (state.panel.parentElement !== document.body) document.body.appendChild(state.panel);
+      state.floatingPanel = true;
+      return;
+    }
+    state.panel.className = "codexpp-tweaks-directory";
+    const anchor = findPanelAnchor(state.root, tabRow);
+    if (anchor && typeof anchor.insertAdjacentElement === "function") {
+      anchor.insertAdjacentElement("afterend", state.panel);
+    } else if (state.root && typeof state.root.appendChild === "function") {
+      state.root.appendChild(state.panel);
+    } else {
+      document.body.appendChild(state.panel);
+    }
+    state.floatingPanel = false;
     return;
   }
   const panel = document.createElement("section");
   panel.dataset.codexppTweaksDirectoryPanel = "true";
   panel.dataset.slot = "page";
-  if (isUnsafeDirectoryRoot(state.root, tabRow)) {
+  if (useFloating) {
     panel.className = "codexpp-tweaks-directory codexpp-tweaks-directory-floating";
     document.body.appendChild(panel);
     state.floatingPanel = true;
@@ -723,13 +1758,47 @@ function ensurePanel(state, tabRow) {
 }
 
 function findPanelAnchor(root, tabRow) {
-  if (root && root.contains && root.contains(tabRow)) return tabRow;
+  const replacementAnchor = nativeDetailReplacementAnchor(root, tabRow);
+  if (replacementAnchor) return replacementAnchor;
+  const rootAnchor = rootPanelAnchor(root, tabRow);
+  if (rootAnchor) return rootAnchor;
   return null;
+}
+
+function rootPanelAnchor(root, tabRow) {
+  if (!root || !tabRow || typeof root.contains !== "function" || !root.contains(tabRow)) return null;
+  let anchor = tabRow;
+  while (anchor.parentElement && anchor.parentElement !== root) {
+    anchor = anchor.parentElement;
+  }
+  return anchor.parentElement === root ? anchor : tabRow;
+}
+
+function nativeDetailReplacementAnchor(root, tabRow) {
+  if (!isNativeDetailSurface(root) || !tabRow) return null;
+  const parent = root.parentElement;
+  if (!parent || typeof parent.contains !== "function" || !parent.contains(tabRow)) return null;
+  let anchor = tabRow;
+  while (anchor.parentElement && anchor.parentElement !== parent) {
+    anchor = anchor.parentElement;
+  }
+  return anchor.parentElement === parent ? anchor : null;
+}
+
+function isNativeDetailSurface(node) {
+  if (!node) return false;
+  const text = compactText(node.textContent || "");
+  if (!text.includes("Try in chat")) return false;
+  if (hasNativeDirectorySearch(node)) return false;
+  if (text.includes("Featured") || text.includes("Recommended")) return false;
+  if (looksLikeAppSidebar(node)) return false;
+  return true;
 }
 
 function isUnsafeDirectoryRoot(root, tabRow) {
   if (!root || root === document.body || root === document.documentElement) return true;
   if (isCompactDirectoryHeader(root, tabRow)) return true;
+  if (isDirectoryContentColumnForTab(root, tabRow)) return false;
   if (isAppContentColumn(root)) return true;
   if (!isViewportSized(root)) return false;
   const parent = tabRow && tabRow.parentElement;
@@ -779,6 +1848,69 @@ function hideNativeDirectoryContent(state, tabRow) {
   }
   if (broadHideAllowed && rootContainsTabRow) hideNativeSiblingsAlongTabPath(state, tabRow);
   hideNativeRegistryNodes(state, tabRow);
+  hideNearbyNativeDirectoryNodes(state, tabRow);
+}
+
+function hideNativeDirectorySiblingsAroundPanel(state, tabRow) {
+  if (!state.panel || !state.panel.parentElement) return;
+  const parent = state.panel.parentElement;
+  if (!isSafeDirectoryRoot(parent) && !isDirectoryContentColumnForTab(parent, tabRow)) {
+    state.api.log.warn("Tweaks Directory skipped panel-sibling hide because panel parent looks like app shell");
+    return;
+  }
+  for (const child of Array.from(parent.children)) {
+    if (shouldKeepNode(state, tabRow, child)) {
+      if (child && child.contains && child.contains(tabRow)) {
+        hideNativeContentInsideKeptTabAncestor(state, tabRow, child);
+      }
+      continue;
+    }
+    if (child === state.errorBanner) continue;
+    if (looksLikeAppSidebar(child)) continue;
+    hideNode(state, child);
+  }
+}
+
+function hideNativeContentInsideKeptTabAncestor(state, tabRow, ancestor) {
+  if (!ancestor || typeof ancestor.querySelectorAll !== "function") return;
+  const selectors = "h1,h2,h3,section,article,div,ul,ol,[role='listitem'],[role='option'],input,[placeholder]";
+  const nodes = Array.from(ancestor.querySelectorAll(selectors)).slice(0, DOM_SCAN_LIMIT);
+  for (const node of nodes) {
+    if (shouldKeepNode(state, tabRow, node)) continue;
+    if (looksLikeAppSidebar(node)) continue;
+    if (isNativePluginsRegistryNode(node) || isNativeDirectoryHeadingOrListing(node)) {
+      const target = nativeRegistryHideTarget(state, tabRow, node);
+      if (target && !shouldKeepNode(state, tabRow, target)) hideNode(state, target);
+      else hideNode(state, node);
+    }
+  }
+}
+
+function isNativeDirectoryHeadingOrListing(node) {
+  if (!node) return false;
+  const text = compactText(node.textContent || "");
+  if (text === "Make Codex work your way") return true;
+  if (text.includes("Make Codex work your way") && (text.includes("Coding") || text.includes("Featured") || text.includes("Recommended"))) return true;
+  if (text.includes("Coding") && (text.includes("Hugging Face") || text.includes("Netlify") || text.includes("Superpowers"))) return true;
+  return false;
+}
+
+function hideFloatingNativePluginSiblings(state, tabRow) {
+  if (!tabRow) return;
+  let current = tabRow.parentElement || tabRow;
+  let depth = 0;
+  while (current && current !== document.body && depth < 3) {
+    const parent = current.parentElement;
+    if (!parent) break;
+    for (const sibling of Array.from(parent.children)) {
+      if (sibling === current) continue;
+      if (shouldKeepNode(state, tabRow, sibling)) continue;
+      if (looksLikeAppSidebar(sibling)) continue;
+      if (isNativePluginBackdropSibling(sibling)) hideNode(state, sibling);
+    }
+    current = parent;
+    depth += 1;
+  }
 }
 
 function isSafeDirectoryRoot(root) {
@@ -787,6 +1919,15 @@ function isSafeDirectoryRoot(root) {
   if (isAppContentColumn(root)) return false;
   if (looksLikeAppSidebar(root)) return false;
   return true;
+}
+
+function isDirectoryContentColumnForTab(root, tabRow) {
+  if (!root || root === document.body || root === document.documentElement) return false;
+  if (!tabRow || typeof root.contains !== "function" || !root.contains(tabRow)) return false;
+  if (looksLikeAppSidebar(root)) return false;
+  if (hasShellNavigationSibling(root, tabRow)) return false;
+  if (!hasDirectoryTabRow(root, tabRow)) return false;
+  return hasDirectoryLayoutBox(root) && (isAppContentColumn(root) || isViewportSized(root) || !isSafeDirectoryRoot(root));
 }
 
 function hideNativeSiblingsAlongTabPath(state, tabRow) {
@@ -805,8 +1946,8 @@ function hideNativeSiblingsAlongTabPath(state, tabRow) {
   }
 }
 
-function hideNativeRegistryNodes(state, tabRow) {
-  const roots = [state.root].filter(Boolean);
+function hideNativeRegistryNodes(state, tabRow, extraRoot) {
+  const roots = [state.root, extraRoot].filter(Boolean);
   const selectors = [
     "input",
     "[placeholder]",
@@ -825,7 +1966,10 @@ function hideNativeRegistryNodes(state, tabRow) {
   ].join(",");
   const seen = new Set();
   for (const root of roots) {
+    let scanned = 0;
     for (const node of Array.from(root.querySelectorAll(selectors))) {
+      if (scanned >= DOM_SCAN_LIMIT) break;
+      scanned += 1;
       if (seen.has(node)) continue;
       seen.add(node);
       if (shouldKeepNode(state, tabRow, node)) continue;
@@ -836,10 +1980,48 @@ function hideNativeRegistryNodes(state, tabRow) {
   }
 }
 
+function hideNearbyNativeDirectoryNodes(state, tabRow) {
+  const scope = nearbyDirectoryScope(state, tabRow);
+  if (!scope || typeof scope.querySelectorAll !== "function") return;
+  const selectors = "h1,h2,h3,section,article,div,input,[placeholder],[role='button'],[role='option'],[role='listitem']";
+  let scanned = 0;
+  for (const node of Array.from(scope.querySelectorAll(selectors))) {
+    if (scanned >= DOM_SCAN_LIMIT) break;
+    scanned += 1;
+    if (shouldKeepNode(state, tabRow, node)) continue;
+    if (looksLikeAppSidebar(node)) continue;
+    if (!isNativePluginsRegistryNode(node) && !isNativeDirectoryHeadingOrListing(node)) continue;
+    const target = nativeRegistryHideTarget(state, tabRow, node);
+    if (target && !shouldKeepNode(state, tabRow, target)) hideNode(state, target);
+    else hideNode(state, node);
+  }
+}
+
+function nearbyDirectoryScope(state, tabRow) {
+  if (!state.panel || !tabRow) return null;
+  let node = state.panel.parentElement;
+  let depth = 0;
+  while (node && node !== document.body && depth < 5) {
+    if (
+      node.contains &&
+      node.contains(tabRow) &&
+      node.contains(state.panel) &&
+      !looksLikeAppSidebar(node) &&
+      !hasShellNavigationSibling(node, tabRow)
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+    depth += 1;
+  }
+  return null;
+}
+
 function shouldKeepNode(state, tabRow, node) {
   if (!node) return true;
   if (node === tabRow || node === state.panel || node.dataset.codexppTweaksDirectoryTab === "true") return true;
   if (state.panel && state.panel.contains && state.panel.contains(node)) return true;
+  if (state.panel && node.contains && node.contains(state.panel)) return true;
   if (tabRow.contains && tabRow.contains(node)) return true;
   if (node.contains && node.contains(tabRow)) return true;
   return false;
@@ -855,9 +2037,21 @@ function isNativePluginsRegistryNode(node) {
   if (text.includes("Control Mac apps from Codex")) return true;
   if (text.includes("Control Chrome with Codex")) return true;
   if (text.includes("Create and edit spreadsheet files")) return true;
+  if (text.includes("Plan Grader:") || text.includes("Use when")) return true;
   if (text.includes("Read and manage Slack")) return true;
   if (text.includes("Read and manage Gmail")) return true;
   if (text.includes("Draft replies for every email")) return true;
+  return false;
+}
+
+function isNativePluginBackdropSibling(node) {
+  if (!node) return false;
+  const text = compactText(node.textContent || "");
+  if (!text) return false;
+  if (text.includes("New chat") || text.includes("Projects") || text.includes("Settings")) return false;
+  if (text.includes("Featured") && (text.includes("Computer Use") || text.includes("Chrome"))) return true;
+  if (text.includes("Search plugins") && (text.includes("Featured") || text.includes("Built by OpenAI"))) return true;
+  if (text.includes("Try in chat") && !text.includes("Tweaks")) return true;
   return false;
 }
 
@@ -887,8 +2081,9 @@ function nativeRegistryHideTarget(state, tabRow, node) {
 function isBoundedRegistryContainer(node) {
   if (!node) return false;
   const text = compactText(node.textContent || "");
-  if (!text) return false;
+  if (!text && !hasNativeDirectorySearch(node)) return false;
   if (text.includes("New chat") || text.includes("Projects") || text.includes("Settings")) return false;
+  if (hasNativeDirectorySearch(node)) return true;
   if (text.includes("Search plugins") || text.includes("Search skills")) return true;
   if (text.includes("Featured") && (text.includes("Computer Use") || text.includes("Chrome"))) return true;
   if (text.includes("Make Codex work your way") && (text.includes("Try in chat") || text.includes("Featured"))) return true;
@@ -905,8 +2100,9 @@ function hideNode(state, node) {
 }
 
 function logHiddenNodes(state) {
-  const details = state.hiddenNodes.map((node) => describeNode(node)).join(" | ") || "(none)";
-  state.api.log.info(`Tweaks Directory hidden native nodes: ${details}`);
+  const sample = state.hiddenNodes.slice(0, DEBUG_NODE_SAMPLE_LIMIT).map((node) => describeNode(node)).join(" | ") || "(none)";
+  const suffix = state.hiddenNodes.length > DEBUG_NODE_SAMPLE_LIMIT ? `; more=${state.hiddenNodes.length - DEBUG_NODE_SAMPLE_LIMIT}` : "";
+  state.api.log.info(`Tweaks Directory hidden native nodes: count=${state.hiddenNodes.length}; sample=${sample}${suffix}`);
   exposeDebugState(state);
 }
 
@@ -924,10 +2120,11 @@ function exposeDebugState(state) {
   if (!win) return;
   win.__codexppTweaksDirectory = {
     active: state.active,
-    hiddenNodes: state.hiddenNodes.map((node) => ({
+    hiddenNodeCount: state.hiddenNodes.length,
+    hiddenNodes: state.hiddenNodes.slice(0, DEBUG_NODE_SAMPLE_LIMIT).map((node) => ({
       description: describeNode(node),
       display: node.style.display || "",
-      text: compactText(node.textContent || "").slice(0, 400),
+      text: compactText(node.textContent || "").slice(0, DEBUG_NODE_TEXT_LIMIT),
     })),
     panelConnected: Boolean(state.panel && state.panel.isConnected),
     tabConnected: Boolean(state.tab && state.tab.isConnected),
@@ -938,9 +2135,12 @@ function setTabVisualState(state, active) {
   applyTweaksTabShell(state.tab);
   if (state.tab) {
     state.tab.setAttribute("aria-pressed", active ? "true" : "false");
+    state.tab.setAttribute("aria-selected", active ? "true" : "false");
     state.tab.classList.toggle("codexpp-tweaks-directory-tab-active", active);
     state.tab.dataset.state = active ? "active" : "inactive";
   }
+  if (active) suppressNativeTabVisualState(state);
+  else restoreNativeTabVisualState(state);
   // Use a tab-row delegate (re-attached on every activation) instead of the
   // old `{once: true, capture: true}` listener per button — React may swap
   // the underlying button DOM nodes, which would lose a per-node listener
@@ -949,8 +2149,49 @@ function setTabVisualState(state, active) {
   if (active) installTabRowDelegate(state);
 }
 
+function suppressNativeTabVisualState(state) {
+  restoreNativeTabVisualState(state);
+  state.nativeTabVisualRestore = [];
+  for (const button of state.nativeButtons || []) {
+    if (!button || !button.dataset || typeof button.setAttribute !== "function") continue;
+    state.nativeTabVisualRestore.push({
+      button,
+      dataState: button.dataset.state,
+      ariaSelected: button.getAttribute ? button.getAttribute("aria-selected") : null,
+      ariaPressed: button.getAttribute ? button.getAttribute("aria-pressed") : null,
+    });
+    button.dataset.state = "inactive";
+    button.setAttribute("aria-selected", "false");
+    button.setAttribute("aria-pressed", "false");
+  }
+}
+
+function restoreNativeTabVisualState(state) {
+  for (const entry of state.nativeTabVisualRestore || []) {
+    const button = entry && entry.button;
+    if (!button || !button.dataset || typeof button.setAttribute !== "function") continue;
+    if (entry.dataState === undefined) delete button.dataset.state;
+    else button.dataset.state = entry.dataState;
+    restoreAttribute(button, "aria-selected", entry.ariaSelected);
+    restoreAttribute(button, "aria-pressed", entry.ariaPressed);
+  }
+  state.nativeTabVisualRestore = [];
+}
+
+function restoreAttribute(node, name, value) {
+  if (!node) return;
+  if (value === null || value === undefined) {
+    if (typeof node.removeAttribute === "function") node.removeAttribute(name);
+    else if (node.attributes) delete node.attributes[name];
+    return;
+  }
+  if (typeof node.setAttribute === "function") node.setAttribute(name, value);
+}
+
 async function loadData(state, forceStore) {
   if (!state.active) return;
+  const token = state.loadToken + 1;
+  state.loadToken = token;
   state.loading = true;
   render(state);
   try {
@@ -958,16 +2199,22 @@ async function loadData(state, forceStore) {
       state.api.ipc.invoke(CHANNELS.listInstalled),
       state.api.ipc.invoke(CHANNELS.getUserPaths).catch(() => null),
     ]);
+    if (!state.active || state.loadToken !== token) return;
     state.installed = Array.isArray(installed) ? installed : [];
     state.paths = paths;
     if (!state.store || forceStore) {
-      state.store = await state.api.ipc.invoke(CHANNELS.getStore, Boolean(forceStore));
+      const store = await state.api.ipc.invoke(CHANNELS.getStore, Boolean(forceStore));
+      if (!state.active || state.loadToken !== token) return;
+      state.store = store;
     }
+    if (!state.active || state.loadToken !== token) return;
     syncDetailFromLocation(state, false);
     state.status = "";
   } catch (error) {
+    if (!state.active || state.loadToken !== token) return;
     state.status = error && error.message ? error.message : String(error);
   } finally {
+    if (!state.active || state.loadToken !== token) return;
     state.loading = false;
     render(state);
   }
@@ -1077,16 +2324,19 @@ function filterSelect(state) {
 
 function visibleRows(state) {
   const installedById = new Map(state.installed.map((item) => [item.manifest.id, item]));
+  const hiddenForkedUpstreamIds = forkedUpstreamIds(state.installed);
   const storeEntries = state.store && Array.isArray(state.store.entries) ? state.store.entries : [];
   const rows = [];
 
   for (const item of state.installed) {
+    if (shouldHideForkedUpstreamRow(item, hiddenForkedUpstreamIds)) continue;
     const storeEntry = storeEntries.find((entry) => entry.id === item.manifest.id) || null;
     rows.push({ type: "installed", installed: item, store: storeEntry, manifest: item.manifest });
   }
 
   for (const entry of storeEntries) {
     if (installedById.has(entry.id)) continue;
+    if (hiddenForkedUpstreamIds.has(entry.id)) continue;
     rows.push({ type: "store", installed: null, store: entry, manifest: entry.manifest });
   }
 
@@ -1105,6 +2355,25 @@ function visibleRows(state) {
     ].filter(Boolean).join(" ").toLowerCase();
     return haystack.includes(query);
   });
+}
+
+function forkedUpstreamIds(installed) {
+  const ids = new Set();
+  for (const item of installed || []) {
+    const upstreamId = item && item.manifest && item.manifest.forkOf && item.manifest.forkOf.upstreamId;
+    if (typeof upstreamId === "string" && upstreamId.trim()) ids.add(upstreamId.trim());
+  }
+  return ids;
+}
+
+function shouldHideForkedUpstreamRow(item, hiddenForkedUpstreamIds) {
+  const id = item && item.manifest && item.manifest.id;
+  return Boolean(
+    id
+      && item.enabled === false
+      && hiddenForkedUpstreamIds
+      && hiddenForkedUpstreamIds.has(id)
+  );
 }
 
 function groupedRows(rows) {
@@ -1155,6 +2424,7 @@ function rowCard(state, row) {
   body.appendChild(title);
   if (row.manifest.description) {
     const desc = document.createElement("p");
+    desc.dataset.slot = "card-description";
     desc.textContent = truncateDescription(row.manifest.description);
     body.appendChild(desc);
   }
@@ -1215,7 +2485,7 @@ function renderTweakDetailPage(state, panel, row) {
 
   const headerActions = document.createElement("div");
   headerActions.className = "codexpp-td-detail-actions";
-  headerActions.dataset.slot = "button-group";
+  headerActions.dataset.slot = "card-action";
   for (const action of detailActions(state, row, page, hasUpdate)) headerActions.appendChild(action);
   header.appendChild(headerActions);
   panel.appendChild(header);
@@ -1235,6 +2505,7 @@ function renderTweakDetailPage(state, panel, row) {
   hero.appendChild(title);
   if (manifest.description) {
     const description = document.createElement("p");
+    description.dataset.slot = "card-description";
     description.textContent = manifest.description;
     hero.appendChild(description);
   }
@@ -1273,6 +2544,9 @@ function renderTweakDetailPage(state, panel, row) {
   includesCard.appendChild(detailIncludeItem(state, row, row.installed ? "Installed package" : "Store package", row.installed ? "Entry" : "Store", row.installed && row.installed.entry ? row.installed.entry : "Available through the tweak store."));
   includes.appendChild(includesCard);
   main.appendChild(includes);
+
+  const filesSection = renderInstalledTweakFilesSection(state, row);
+  if (filesSection) main.appendChild(filesSection);
 
   const info = document.createElement("section");
   info.className = "codexpp-td-detail-section";
@@ -1316,6 +2590,7 @@ function detailActions(state, row, page, hasUpdate) {
   else if (row.store && !row.installed) actions.push(button("Install", () => installStoreEntry(state, row.store.id), "primary"));
   else if (row.installed && !row.installed.enabled) actions.push(button("Enable", () => setEnabled(state, manifest.id, true), "primary"));
   else if (page) actions.push(button("Configure", () => openTweakSettingsPage(state, page), "primary"));
+  if (row.installed) actions.push(button("Reload tweaks", () => reloadInstalledTweaks(state)));
   if (manifest.homepage) actions.push(button("Homepage", () => state.api.ipc.invoke(CHANNELS.openExternal, manifest.homepage)));
   if (manifest.githubRepo) actions.push(button("GitHub", () => state.api.ipc.invoke(CHANNELS.openExternal, `https://github.com/${manifest.githubRepo}`)));
   actions.push(detailMenu(state, row));
@@ -1340,6 +2615,7 @@ function detailMenu(state, row) {
   menu.setAttribute("role", "menu");
   menu.appendChild(detailMenuItem("Copy detail link", () => copyDetailLink(state, manifest.id)));
   menu.appendChild(detailMenuItem("Refresh directory", () => loadData(state, true)));
+  if (row.installed) menu.appendChild(detailMenuItem("Reload tweaks", () => reloadInstalledTweaks(state)));
   menu.appendChild(detailMenuItem("Open tweaks folder", () => state.api.ipc.invoke(CHANNELS.revealTweaksFolder)));
   if (row.installed && row.installed.enabled) {
     menu.appendChild(detailMenuItem("Disable tweak", () => setEnabled(state, manifest.id, false)));
@@ -1366,6 +2642,370 @@ function detailMenuItem(label, onClick) {
     }
   });
   return item;
+}
+
+function renderInstalledTweakFilesSection(state, row) {
+  const manifest = row && row.manifest || {};
+  if (!row || !row.installed || !manifest.id) return null;
+  const entry = fileTreeStateFor(state, manifest.id);
+  if (!entry.loading && !entry.result && !entry.error) {
+    void loadTweakFileTree(state, manifest.id, false, false);
+  }
+
+  const section = document.createElement("section");
+  section.className = "codexpp-td-detail-section codexpp-td-files-section";
+  section.dataset.slot = "card";
+
+  const header = document.createElement("div");
+  header.className = "codexpp-td-files-header";
+  header.appendChild(detailSectionTitle("Files"));
+
+  const source = document.createElement("span");
+  source.className = "codexpp-td-files-source";
+  source.textContent = fileTreeSourceLabel(entry.result);
+  if (entry.result && entry.result.rootPath) source.title = entry.result.rootPath;
+  header.appendChild(source);
+
+  const refresh = button("Refresh files", () => loadTweakFileTree(state, manifest.id, true, true));
+  refresh.classList.add("codexpp-td-files-refresh");
+  refresh.disabled = entry.loading;
+  header.appendChild(refresh);
+  section.appendChild(header);
+
+  const card = document.createElement("div");
+  card.className = "codexpp-td-detail-card codexpp-td-files-card";
+  card.dataset.slot = "card-content";
+
+  if (entry.loading && !entry.result) {
+    card.appendChild(fileTreeMessage("Loading files", "Reading the installed tweak package."));
+  } else if (entry.error) {
+    card.appendChild(fileTreeMessage("Could not load files", entry.error));
+  } else if (!entry.result || !entry.result.tree) {
+    card.appendChild(fileTreeMessage("No files found", fileTreeStatusMessage(entry.result, "The installed tweak did not return a readable file tree.")));
+  } else if (isEmptyFileTree(entry.result.tree)) {
+    card.appendChild(fileTreeMessage("No files found", fileTreeStatusMessage(entry.result, "This installed tweak folder is empty.")));
+  } else {
+    if (entry.loading) card.appendChild(fileTreeMessage("Refreshing files", "Keeping the current tree visible while the runtime refreshes it."));
+    card.appendChild(renderFileTree(state, manifest.id, entry, entry.result.tree));
+  }
+
+  section.appendChild(card);
+  return section;
+}
+
+function renderNativePluginFilesSection(state, detail) {
+  if (!detail || !detail.candidate) return null;
+  const treeKey = pluginFileTreeKey(detail.candidate);
+  const entry = fileTreeStateFor(state, treeKey);
+  if (!entry.loading && !entry.result && !entry.error) {
+    void loadPluginFileTree(state, detail.candidate, false, false, detail.key);
+  }
+
+  const section = document.createElement("section");
+  section.className = "codexpp-td-detail-section codexpp-td-files-section codexpp-td-native-plugin-files";
+  section.dataset.codexppPluginFiles = "true";
+  section.dataset.slot = "card";
+
+  const header = document.createElement("div");
+  header.className = "codexpp-td-files-header";
+  header.appendChild(detailSectionTitle("Files"));
+
+  const source = document.createElement("span");
+  source.className = "codexpp-td-files-source";
+  source.textContent = fileTreeSourceLabel(entry.result || { rootLabel: detail.candidate, sourceKind: "plugin" });
+  if (entry.result && entry.result.rootPath) source.title = entry.result.rootPath;
+  header.appendChild(source);
+
+  const refresh = button("Refresh files", () => loadPluginFileTree(state, detail.candidate, true, true, detail.key));
+  refresh.classList.add("codexpp-td-files-refresh");
+  refresh.disabled = entry.loading;
+  header.appendChild(refresh);
+  section.appendChild(header);
+
+  const card = document.createElement("div");
+  card.className = "codexpp-td-detail-card codexpp-td-files-card";
+  card.dataset.slot = "card-content";
+
+  if (entry.loading && !entry.result) {
+    card.appendChild(fileTreeMessage("Loading files", "Reading the plugin package."));
+  } else if (entry.error) {
+    card.appendChild(fileTreeMessage("Could not load files", entry.error));
+  } else if (!entry.result || !entry.result.tree) {
+    const fallback = entry.result && entry.result.status === "ambiguous"
+      ? "This plugin matched more than one installed source. Choose a more exact plugin identity."
+      : "This plugin did not return a readable file tree.";
+    card.appendChild(fileTreeMessage("No files found", fileTreeStatusMessage(entry.result, fallback)));
+  } else if (isEmptyFileTree(entry.result.tree)) {
+    card.appendChild(fileTreeMessage("No files found", fileTreeStatusMessage(entry.result, "This plugin folder is empty.")));
+  } else {
+    if (entry.loading) card.appendChild(fileTreeMessage("Refreshing files", "Keeping the current tree visible while the runtime refreshes it."));
+    card.appendChild(renderFileTree(state, treeKey, entry, entry.result.tree));
+  }
+
+  section.appendChild(card);
+  return section;
+}
+
+function fileTreeStateFor(state, tweakId) {
+  const id = String(tweakId || "");
+  if (!state.fileTrees[id]) {
+    state.fileTrees[id] = {
+      loading: false,
+      error: "",
+      result: null,
+      expanded: new Set(),
+      selected: "",
+      requestId: 0,
+    };
+  }
+  return state.fileTrees[id];
+}
+
+async function loadTweakFileTree(state, tweakId, refresh, renderStart) {
+  const id = String(tweakId || "");
+  if (!id) return;
+  const entry = fileTreeStateFor(state, id);
+  const requestId = entry.requestId + 1;
+  entry.requestId = requestId;
+  entry.loading = true;
+  entry.error = "";
+  if (renderStart) render(state);
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getTweakFileTree, id, {
+      refresh: Boolean(refresh),
+      force: Boolean(refresh),
+    });
+    if (entry.requestId !== requestId) return;
+    entry.result = normalizeFileTreeResult(result, id);
+    if (entry.result && entry.result.tree) entry.expanded.add(fileTreeNodeId(entry.result.tree));
+    if (entry.result && entry.result.status && !isFileTreeReadyStatus(entry.result.status)) {
+      entry.error = fileTreeStatusMessage(entry.result, "The runtime returned a non-ready file tree response.");
+    }
+  } catch (error) {
+    if (entry.requestId !== requestId) return;
+    entry.error = errorMessage(error);
+  } finally {
+    if (entry.requestId === requestId) {
+      entry.loading = false;
+      render(state);
+    }
+  }
+}
+
+async function loadPluginFileTree(state, pluginIdOrName, refresh, renderStart, nativeKey) {
+  const id = String(pluginIdOrName || "");
+  if (!id) return;
+  const treeKey = pluginFileTreeKey(id);
+  const entry = fileTreeStateFor(state, treeKey);
+  const requestId = entry.requestId + 1;
+  entry.requestId = requestId;
+  entry.loading = true;
+  entry.error = "";
+  if (renderStart) syncNativePluginFilesSection(state, true);
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getPluginFileTree, id, {
+      refresh: Boolean(refresh),
+      force: Boolean(refresh),
+    });
+    if (entry.requestId !== requestId) return;
+    entry.result = normalizeFileTreeResult(result, id);
+    if (entry.result && entry.result.tree) entry.expanded.add(fileTreeNodeId(entry.result.tree));
+    if (entry.result && entry.result.status && !isFileTreeReadyStatus(entry.result.status)) {
+      entry.error = fileTreeStatusMessage(entry.result, "The runtime returned a non-ready plugin file tree response.");
+    }
+  } catch (error) {
+    if (entry.requestId !== requestId) return;
+    entry.error = errorMessage(error);
+  } finally {
+    if (entry.requestId === requestId) {
+      entry.loading = false;
+      if (nativeKey && state.nativePluginFiles && state.nativePluginFiles.key === nativeKey) {
+        syncNativePluginFilesSection(state, true);
+      }
+    }
+  }
+}
+
+function pluginFileTreeKey(pluginIdOrName) {
+  return `plugin:${String(pluginIdOrName || "").trim().toLowerCase()}`;
+}
+
+function normalizeFileTreeResult(result, tweakId) {
+  const value = result && typeof result === "object" ? result : {};
+  return {
+    status: typeof value.status === "string" ? value.status : "ok",
+    rootLabel: typeof value.rootLabel === "string" && value.rootLabel ? value.rootLabel : typeof value.label === "string" && value.label ? value.label : tweakId,
+    rootPath: typeof value.rootPath === "string" ? value.rootPath : typeof value.root === "string" ? value.root : "",
+    sourceKind: typeof value.sourceKind === "string" && value.sourceKind ? value.sourceKind : "installed-tweak",
+    tree: value.tree && typeof value.tree === "object" ? value.tree : null,
+    message: typeof value.message === "string" ? value.message : "",
+    candidates: Array.isArray(value.candidates) ? value.candidates : [],
+  };
+}
+
+function isFileTreeReadyStatus(status) {
+  return status === "ok" || status === "resolved";
+}
+
+function fileTreeSourceLabel(result) {
+  if (!result) return "Installed source";
+  const kind = compactText(String(result.sourceKind || "installed").replace(/[-_]+/g, " "));
+  const label = compactText(result.rootLabel || "");
+  if (kind && label) return `${kind} · ${label}`;
+  return label || kind || "Installed source";
+}
+
+function fileTreeStatusMessage(result, fallback) {
+  if (result && result.message) return result.message;
+  if (result && Array.isArray(result.candidates) && result.candidates.length > 0) {
+    return `Checked ${result.candidates.length} candidate location${result.candidates.length === 1 ? "" : "s"}.`;
+  }
+  return fallback;
+}
+
+function isEmptyFileTree(node) {
+  if (!node || typeof node !== "object") return true;
+  if (node.omittedReason) return false;
+  const children = Array.isArray(node.children) ? node.children : [];
+  return children.length === 0;
+}
+
+function renderFileTree(state, tweakId, entry, rootNode) {
+  const tree = document.createElement("div");
+  tree.className = "codexpp-td-file-tree";
+  tree.setAttribute("role", "tree");
+  tree.appendChild(renderFileTreeNode(state, tweakId, entry, rootNode, 0));
+  return tree;
+}
+
+function renderFileTreeNode(state, tweakId, entry, node, depth) {
+  const item = document.createElement("div");
+  item.className = "codexpp-td-file-tree-item";
+  const nodeId = fileTreeNodeId(node);
+  const children = Array.isArray(node.children) ? node.children : [];
+  const isFolder = isFileTreeFolder(node);
+  const canExpand = isFolder && children.length > 0 && !node.omittedReason;
+  const expanded = canExpand && entry.expanded.has(nodeId);
+
+  const row = document.createElement("div");
+  row.className = "codexpp-td-file-tree-row";
+  row.style.setProperty("--codexpp-td-file-depth", String(Math.max(0, depth)));
+  row.dataset.codexppTweakFileNode = nodeId;
+  row.setAttribute("role", "treeitem");
+  row.tabIndex = 0;
+  if (canExpand) row.setAttribute("aria-expanded", expanded ? "true" : "false");
+  if (!canExpand && !isFolder && entry.selected === nodeId) row.classList.add("selected");
+  if (node.omittedReason) row.classList.add("omitted");
+
+  const disclosure = document.createElement("span");
+  disclosure.className = "codexpp-td-file-tree-disclosure";
+  disclosure.setAttribute("aria-hidden", "true");
+  disclosure.textContent = canExpand ? expanded ? "⌄" : "›" : "";
+  row.appendChild(disclosure);
+
+  const icon = document.createElement("span");
+  icon.className = "codexpp-td-file-tree-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = isFolder ? "□" : "•";
+  row.appendChild(icon);
+
+  const name = document.createElement("span");
+  name.className = "codexpp-td-file-tree-name";
+  name.textContent = fileTreeNodeName(node);
+  row.appendChild(name);
+
+  const meta = document.createElement("span");
+  meta.className = "codexpp-td-file-tree-meta";
+  meta.textContent = node.omittedReason ? `Omitted: ${node.omittedReason}` : fileTreeNodeMeta(node);
+  row.appendChild(meta);
+
+  row.addEventListener("click", () => activateFileTreeRow(state, tweakId, node, canExpand));
+  row.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    activateFileTreeRow(state, tweakId, node, canExpand);
+  });
+
+  item.appendChild(row);
+  if (expanded) {
+    const group = document.createElement("div");
+    group.className = "codexpp-td-file-tree-children";
+    group.setAttribute("role", "group");
+    for (const child of children) group.appendChild(renderFileTreeNode(state, tweakId, entry, child, depth + 1));
+    item.appendChild(group);
+  }
+  return item;
+}
+
+function activateFileTreeRow(state, tweakId, node, canExpand) {
+  if (canExpand) {
+    toggleTweakFileFolder(state, tweakId, node);
+    return;
+  }
+  if (!isFileTreeFolder(node) && !node.omittedReason) selectTweakFile(state, tweakId, node);
+}
+
+function toggleTweakFileFolder(state, tweakId, node) {
+  const entry = fileTreeStateFor(state, tweakId);
+  const id = fileTreeNodeId(node);
+  if (entry.expanded.has(id)) entry.expanded.delete(id);
+  else entry.expanded.add(id);
+  render(state);
+}
+
+function selectTweakFile(state, tweakId, node) {
+  const entry = fileTreeStateFor(state, tweakId);
+  entry.selected = fileTreeNodeId(node);
+  render(state);
+}
+
+function fileTreeNodeId(node) {
+  return String(node && (node.id || node.relPath || node.path || node.name) || ".");
+}
+
+function fileTreeNodeName(node) {
+  return String(node && (node.name || node.relPath || node.path || node.id) || "(unnamed)");
+}
+
+function isFileTreeFolder(node) {
+  const kind = String(node && node.kind || "").toLowerCase();
+  const type = String(node && node.type || "").toLowerCase();
+  return kind === "directory" || kind === "folder" || type === "directory" || type === "folder" || Array.isArray(node && node.children);
+}
+
+function fileTreeNodeMeta(node) {
+  if (!node || typeof node !== "object") return "";
+  const parts = [];
+  if (Number.isFinite(node.size)) parts.push(formatFileSize(node.size));
+  if (Number.isFinite(node.mtimeMs)) parts.push(formatFileMtime(node.mtimeMs));
+  return parts.join(" · ");
+}
+
+function formatFileSize(size) {
+  const value = Number(size);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 102.4) / 10} KB`;
+  return `${Math.round(value / 1024 / 102.4) / 10} MB`;
+}
+
+function formatFileMtime(mtimeMs) {
+  try {
+    return new Date(Number(mtimeMs)).toLocaleDateString();
+  } catch {
+    return "";
+  }
+}
+
+function fileTreeMessage(title, message) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-file-tree-message";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const text = document.createElement("p");
+  text.textContent = message || "";
+  wrap.append(heading, text);
+  return wrap;
 }
 
 function syncNativeTabRowBreadcrumb(state, row) {
@@ -1569,7 +3209,10 @@ function writeDetailToLocation(id) {
       url.searchParams.delete("codexpp-tweak");
       url.searchParams.delete("tweak");
     }
-    history.pushState(null, "", url.toString());
+    // Tag entries we own with state.codexpp so onNav can short-circuit
+    // and we don't pingpong against Codex's own pushState handlers /
+    // settings-injector route listeners.
+    history.pushState({ codexpp: true }, "", url.toString());
   } catch {
     // Deep links are a convenience; never block the directory UI if URL state is unavailable.
   }
@@ -1638,7 +3281,7 @@ function firstPageForTweak(state, tweakId) {
 
 function openTweakSettingsPage(state, page) {
   if (!state.api.codex || typeof state.api.codex.openRegisteredTweakPage !== "function") {
-    state.status = "This Codex++ runtime cannot open tweak settings pages from the Plugins directory.";
+    state.status = "This ShadGPT runtime cannot open tweak settings pages from the Plugins directory.";
     render(state);
     return false;
   }
@@ -1666,6 +3309,18 @@ function isSettingsSurfaceAvailable() {
 async function setEnabled(state, id, enabled) {
   await state.api.ipc.invoke(CHANNELS.setEnabled, id, enabled);
   await loadData(state, true);
+}
+
+async function reloadInstalledTweaks(state) {
+  state.status = "Reloading installed tweaks...";
+  render(state);
+  try {
+    await state.api.ipc.invoke(CHANNELS.reload);
+    location.reload();
+  } catch (error) {
+    state.status = `Could not reload installed tweaks: ${errorMessage(error)}`;
+    render(state);
+  }
 }
 
 async function installStoreEntry(state, id) {
@@ -1963,24 +3618,48 @@ function injectStyles() {
       gap: 6px;
       color: var(--codexpp-td-foreground, var(--text-primary, #111));
     }
-    .codexpp-tweaks-directory, .codexpp-tweaks-directory * { box-sizing: border-box; }
-    .codexpp-tweaks-directory {
+    .codexpp-native-plugin-status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 68px;
+      max-width: 92px;
+      min-height: 24px;
+      margin: 8px 0 0;
+      white-space: nowrap;
+      pointer-events: none;
+      border: 1px solid color-mix(in srgb, var(--border, rgba(0,0,0,.16)) 80%, transparent);
+      border-radius: 7px;
+      padding: 2px 8px;
+      background: var(--bg-primary, var(--background, #fff));
+      color: var(--text-secondary, var(--muted-foreground, rgba(0,0,0,.58)));
+      font: inherit;
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 550;
+      letter-spacing: 0;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files * { box-sizing: border-box; }
+    .codexpp-tweaks-directory, .codexpp-td-native-plugin-files {
       --codexpp-td-background: var(--background, var(--bg-primary, #fff));
       --codexpp-td-foreground: var(--foreground, var(--text-primary, #111));
       --codexpp-td-muted: var(--muted-foreground, var(--text-secondary, rgba(0,0,0,.54)));
       --codexpp-td-border: var(--border, var(--border-light, rgba(0,0,0,.12)));
       --codexpp-td-muted-bg: var(--muted, rgba(0,0,0,.035));
       --codexpp-td-ring: var(--ring, var(--codexpp-shadcn-ui-accent, #2563eb));
+    }
+    .codexpp-tweaks-directory {
       width: 100%;
       max-width: min(704px, calc(100% - 96px));
-      max-height: calc(100vh - 88px);
+      max-height: none;
       margin: 58px auto 32px;
       padding: 0 1px 42px;
       color: var(--codexpp-td-foreground);
       font-size: 14px;
       line-height: 1.35;
-      overflow: auto;
-      overscroll-behavior: contain;
+      overflow: visible;
+      overscroll-behavior: auto;
     }
     .codexpp-tweaks-directory.codexpp-td-detail-mode {
       max-width: calc(100% - 80px);
@@ -2068,6 +3747,25 @@ function injectStyles() {
     .codexpp-td-detail-section { margin-top: 36px; }
     .codexpp-td-detail-section-title { margin: 0 0 10px; font-size: 15px; line-height: 1.3; font-weight: 650; letter-spacing: 0; }
     .codexpp-td-detail-card { overflow: hidden; border: 1px solid var(--codexpp-td-border); border-radius: 8px; background: var(--codexpp-td-background); }
+    .codexpp-td-files-header { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .codexpp-td-files-header .codexpp-td-detail-section-title { margin: 0; }
+    .codexpp-td-files-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codexpp-td-muted); font-size: 12px; }
+    .codexpp-td-files-refresh { flex: 0 0 auto; }
+    .codexpp-td-files-card { padding: 6px; }
+    .codexpp-td-file-tree { width: 100%; display: flex; flex-direction: column; gap: 1px; }
+    .codexpp-td-file-tree-item { min-width: 0; }
+    .codexpp-td-file-tree-children { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    .codexpp-td-file-tree-row { min-width: 0; min-height: 30px; display: grid; grid-template-columns: 14px 18px minmax(0, 1fr) auto; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px 4px calc(8px + (var(--codexpp-td-file-depth, 0) * 18px)); color: var(--codexpp-td-foreground); cursor: pointer; }
+    .codexpp-td-file-tree-row:hover,
+    .codexpp-td-file-tree-row:focus-visible { outline: none; background: var(--codexpp-td-muted-bg); border-color: color-mix(in srgb, var(--codexpp-td-border) 70%, transparent); }
+    .codexpp-td-file-tree-row.selected { background: color-mix(in srgb, var(--codexpp-td-ring) 12%, transparent); border-color: color-mix(in srgb, var(--codexpp-td-ring) 36%, var(--codexpp-td-border)); }
+    .codexpp-td-file-tree-row.omitted { color: color-mix(in srgb, var(--codexpp-td-muted) 88%, var(--codexpp-td-foreground)); cursor: default; }
+    .codexpp-td-file-tree-disclosure,
+    .codexpp-td-file-tree-icon { display: inline-grid; place-items: center; color: var(--codexpp-td-muted); font-size: 12px; line-height: 1; }
+    .codexpp-td-file-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 1.25; }
+    .codexpp-td-file-tree-meta { min-width: 0; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codexpp-td-muted); font-size: 12px; }
+    .codexpp-td-file-tree-message { padding: 10px 12px; }
+    .codexpp-td-file-tree-message p { margin: 3px 0 0; color: var(--codexpp-td-muted); }
     .codexpp-td-detail-include-item { min-height: 64px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 14px; padding: 10px 14px; }
     .codexpp-td-detail-include-item + .codexpp-td-detail-include-item { border-top: 1px solid color-mix(in srgb, var(--codexpp-td-border) 62%, transparent); }
     .codexpp-td-detail-include-item .codexpp-td-avatar { width: 34px; height: 34px; border-radius: 999px; background: var(--codexpp-td-background); color: var(--codexpp-td-muted); }
@@ -2099,6 +3797,10 @@ function injectStyles() {
       .codexpp-td-detail-header { grid-template-columns: 1fr; }
       .codexpp-td-detail-actions { justify-content: flex-start; flex-wrap: wrap; }
       .codexpp-td-detail-row { grid-template-columns: 1fr; gap: 4px; }
+      .codexpp-td-files-header { grid-template-columns: 1fr; align-items: start; }
+      .codexpp-td-files-source { white-space: normal; }
+      .codexpp-td-file-tree-row { grid-template-columns: 14px 18px minmax(0, 1fr); }
+      .codexpp-td-file-tree-meta { grid-column: 3; max-width: 100%; }
     }
   `;
 }

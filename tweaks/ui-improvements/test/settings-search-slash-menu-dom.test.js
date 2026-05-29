@@ -113,6 +113,61 @@ test("slash-menu-polish marks only the menu root, preserves item events, and cle
   );
 });
 
+test("tweak-mention-menu opens from percent trigger and inserts a short tweak mention", async () => {
+  const fixture = createTweakMentionFixture();
+
+  runTweak(fixture);
+  fixture.flush();
+
+  fixture.input.value = "%Proj";
+  fixture.input.selectionStart = fixture.input.value.length;
+  fixture.input.selectionEnd = fixture.input.value.length;
+  fixture.document.activeElement = fixture.input;
+  fixture.input.dispatchEvent(new FakeEvent("input", { bubbles: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.flush();
+
+  const menu = fixture.document.querySelector("[data-codexpp-tweak-mention-menu='true']");
+  assert.ok(menu);
+  assert.match(menu.textContent, /Projects/);
+  assert.doesNotMatch(menu.textContent, /ShadGPT Projects/);
+
+  fixture.input.dispatchEvent(new FakeKeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+  fixture.flush();
+
+  assert.equal(fixture.input.value, "%Projects");
+  assert.equal(fixture.input.selectionStart, "%Projects".length);
+  assert.equal(fixture.document.querySelector("[data-codexpp-tweak-mention-menu='true']"), null);
+
+  fixture.context.module.exports.stop();
+  fixture.flush();
+});
+
+test("tweak-mention-menu resolves contenteditable composer targets", async () => {
+  const fixture = createTweakMentionFixture({ contenteditable: true });
+
+  runTweak(fixture);
+  fixture.flush();
+
+  fixture.input.textContent = "%Bet";
+  fixture.document.activeElement = fixture.input;
+  fixture.input.dispatchEvent(new FakeEvent("input", { bubbles: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.flush();
+
+  const menu = fixture.document.querySelector("[data-codexpp-tweak-mention-menu='true']");
+  assert.ok(menu);
+  assert.match(menu.textContent, /Better Browser/);
+
+  fixture.input.dispatchEvent(new FakeKeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+  fixture.flush();
+
+  assert.equal(fixture.input.textContent, "%Better Browser");
+
+  fixture.context.module.exports.stop();
+  fixture.flush();
+});
+
 function runTweak(fixture) {
   vm.runInNewContext(source, fixture.context, {
     filename: join(__dirname, "..", "index.js"),
@@ -223,6 +278,36 @@ function createSlashMenuFixture() {
   };
 }
 
+function createTweakMentionFixture(options = {}) {
+  const fixture = createFixture({ enabledFeature: "tweak-mention-menu" });
+  const { document } = fixture;
+
+  const composer = document.createElement("div");
+  composer.setAttribute("data-testid", "composer");
+  composer.setRect({ left: 80, top: 560, width: 720, height: 80, right: 800, bottom: 640 });
+
+  const input = options.contenteditable ? document.createElement("div") : document.createElement("textarea");
+  input.setAttribute("aria-label", "Message Codex");
+  if (options.contenteditable) {
+    input.setAttribute("contenteditable", "true");
+    input.className = "ProseMirror";
+  } else {
+    input.setSelectionRange = (start, end) => {
+      input.selectionStart = start;
+      input.selectionEnd = end;
+    };
+  }
+  input.setRect({ left: 100, top: 580, width: 680, height: 44, right: 780, bottom: 624 });
+  composer.appendChild(input);
+  document.body.appendChild(composer);
+  document.activeElement = input;
+
+  return {
+    ...fixture,
+    input,
+  };
+}
+
 function navGroup(document, labels, attrs = {}) {
   const group = document.createElement("div");
   group.className = "flex flex-col gap-1";
@@ -294,6 +379,31 @@ function createFixture({ enabledFeature }) {
       },
       set(key, value) {
         storage.set(key, value);
+      },
+    },
+    ipc: {
+      invoke(channel) {
+        if (channel === "tweak-mentions-list") {
+          return Promise.resolve([
+            {
+              manifest: {
+                id: "co.thomashulihan.projects",
+                name: "ShadGPT Projects",
+                description: "Project inventory.",
+              },
+              enabled: true,
+            },
+            {
+              manifest: {
+                id: "co.thomashulihan.better-browser-agent",
+                name: "ShadGPT Better Browser Agent",
+                description: "Browser tools.",
+              },
+              enabled: true,
+            },
+          ]);
+        }
+        return Promise.resolve(null);
       },
     },
   };
@@ -593,6 +703,11 @@ class FakeElement extends FakeNode {
 
   appendChild(node) {
     return this.insertBefore(node, null);
+  }
+
+  replaceChildren(...nodes) {
+    for (const child of [...this.childNodes]) child.remove();
+    nodes.forEach((node) => this.appendChild(node));
   }
 
   insertBefore(node, referenceNode) {

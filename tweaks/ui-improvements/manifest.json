@@ -11,7 +11,7 @@
     "forkedAt": "2026-05-17T22:00:00.000Z",
     "notes": "ShadGPT-styled fork. Ported upstream settings-search and slash-menu-polish on 2026-05-19, plus local clarify-stale-chat-branch-label."
   },
-  "description": "ShadGPT quality-of-life UI tweaks: 12 individually toggleable improvements for sidebar layout, project labels, chat multi-select, settings search, slash-menu polish, and message metrics.",
+  "description": "ShadGPT quality-of-life UI tweaks: 13 individually toggleable improvements for sidebar layout, project labels, chat multi-select, settings search, slash-menu polish, tweak mentions, and message metrics.",
   "author": {
     "name": "Thomas Hulihan",
     "url": "https://github.com/hulibrands"
@@ -27,6 +27,7 @@
   "permissions": [
     "ipc",
     "settings",
-    "filesystem"
+    "filesystem",
+    "codex.views"
   ]
 }

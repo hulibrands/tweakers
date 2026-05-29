@@ -1,6 +1,6 @@
-# Tweaks Directory
+# ShadGPT Tweaks Directory
 
-First-party Codex++ tweak that moves the installed tweaks manager and live
+First-party ShadGPT tweak that moves the installed tweaks manager and live
 Tweak Store into a `Tweaks` tab next to Codex's native `Plugins` and `Skills`
 directory tabs.
 

@@ -22,8 +22,8 @@
  *                          layout jump when opening/closing Settings.
  *  • sidebar-action-grid   Render the four main sidebar actions as a 2x2
  *                          grid of filled buttons.
- *  • sidebar-project-backgrounds  Color project labels and icons without
- *                                 painting whole project groups.
+ *  • sidebar-project-backgrounds  Add subtle grouped backgrounds behind
+ *                                 project/session rows in the main sidebar.
  *  • sidebar-chat-multi-select  Cmd/Ctrl-click sidebar chats to select
  *                               multiple rows and run batch actions.
  *  • show-pinned-chat-project-names  Shows a small project name under
@@ -84,9 +84,9 @@ const FEATURE_DEFS = Object.freeze([
   },
   {
     id: "sidebar-project-backgrounds",
-    title: "Sidebar project label colors",
+    title: "Sidebar project backgrounds",
     description:
-      "Color project labels and folder icons so adjacent projects are easier to scan without boxing whole project groups.",
+      "Add subtle grouped backgrounds behind project/session rows so adjacent work is easier to scan.",
   },
   {
     id: "sidebar-chat-multi-select",
@@ -102,6 +102,17 @@ const FEATURE_DEFS = Object.freeze([
     id: "slash-menu-polish",
     title: "Slash menu polish",
     description: "Tighten slash menu rows with calmer section headers and clearer active state.",
+  },
+  {
+    id: "tweak-mention-menu",
+    title: "Tweak mention menu",
+    description: "Type % in the composer to insert installed tweak mentions like %Projects.",
+  },
+  {
+    id: "browser-annotation-transparent-card",
+    title: "Browser annotation transparency",
+    description:
+      "Keep the annotated page visible behind the in-app browser comment editor while preserving saved-draft comments.",
   },
   {
     id: "clarify-stale-chat-branch-label",
@@ -122,16 +133,42 @@ const DEFAULT_FEATURE_FLAGS = Object.freeze({
   "sidebar-chat-multi-select": true,
   "show-pinned-chat-project-names": true,
   "slash-menu-polish": false,
+  "tweak-mention-menu": true,
+  "browser-annotation-transparent-card": true,
   "clarify-stale-chat-branch-label": true,
 });
 
 const BRIDGE_EVENT = "codexpp-ui-improvements-setting-changed";
 const COLOR_EVENT = "codexpp-ui-improvements-project-color-changed";
 const PROJECT_COLOR_STORAGE_KEY = "sidebar-project-backgrounds:colors";
+const PROJECT_OVERLAY_STORAGE_KEY = "sidebar-project-backgrounds:overlays";
+const PROJECT_OVERLAY_OPTIONS = Object.freeze({
+  off: { id: "off", label: "Off", light: 0, dark: 0, hoverLight: 10, hoverDark: 18 },
+  subtle: { id: "subtle", label: "Subtle", light: 6, dark: 11, hoverLight: 14, hoverDark: 22 },
+  medium: { id: "medium", label: "Medium", light: 10, dark: 18, hoverLight: 18, hoverDark: 26 },
+  strong: { id: "strong", label: "Strong", light: 15, dark: 24, hoverLight: 24, hoverDark: 34 },
+});
+const DEFAULT_PROJECT_OVERLAY_INTENSITY = "medium";
 const MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY =
   "__codexpp_ui_improvements_browser_annotation_composer_mode_patch__";
 const BROWSER_ANNOTATION_DEFAULT_MODE_TARGET = "defaultCreateSubmitMode:`direct`,session:";
 const BROWSER_ANNOTATION_DEFAULT_MODE_REPLACEMENT = "defaultCreateSubmitMode:`saved`,session:";
+const BROWSER_ANNOTATION_THREAD_PANEL_DEFAULT_MODE_TARGET =
+  "s=i===void 0?`direct`:i,c=o===void 0?!0:o";
+const BROWSER_ANNOTATION_THREAD_PANEL_DEFAULT_MODE_REPLACEMENT =
+  "s=i===void 0?`saved`:i,c=o===void 0?!0:o";
+const BROWSER_ANNOTATION_DEFAULT_MODE_REWRITES = Object.freeze([
+  {
+    target: BROWSER_ANNOTATION_DEFAULT_MODE_TARGET,
+    replacement: BROWSER_ANNOTATION_DEFAULT_MODE_REPLACEMENT,
+    reason: "legacy-direct-submit",
+  },
+  {
+    target: BROWSER_ANNOTATION_THREAD_PANEL_DEFAULT_MODE_TARGET,
+    replacement: BROWSER_ANNOTATION_THREAD_PANEL_DEFAULT_MODE_REPLACEMENT,
+    reason: "thread-panel-direct-submit",
+  },
+]);
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
@@ -140,6 +177,7 @@ module.exports = {
       this._mainDisposes = [
         startMainLegacyBrandUiScrubber(api),
         startMainBrowserAnnotationComposerModePatch(api),
+        startMainTweakMentionProvider(api),
       ].filter(Boolean);
       startMainMetricsProvider(api);
       startMainUsageProvider(api);
@@ -390,6 +428,12 @@ function installShadcnBridge(state) {
     setProjectColor(projectKey, colorId) {
       setProjectColorPref(state.api, projectKey, colorId);
     },
+    getProjectOverlays() {
+      return state.api.storage.get(PROJECT_OVERLAY_STORAGE_KEY, {});
+    },
+    setProjectOverlay(projectKey, intensity) {
+      setProjectOverlayPref(state.api, projectKey, intensity);
+    },
     getProjectRows() {
       return discoverProjectRows();
     },
@@ -438,6 +482,25 @@ function setProjectColorPref(api, projectKey, colorId) {
   api.storage.set(PROJECT_COLOR_STORAGE_KEY, next);
   window.dispatchEvent(
     new CustomEvent(COLOR_EVENT, { detail: { projectKey: key, colorId: colorId || "auto" } }),
+  );
+}
+
+function normalizeProjectOverlayIntensity(value) {
+  const id = String(value || DEFAULT_PROJECT_OVERLAY_INTENSITY).trim().toLowerCase();
+  return PROJECT_OVERLAY_OPTIONS[id] ? id : DEFAULT_PROJECT_OVERLAY_INTENSITY;
+}
+
+function setProjectOverlayPref(api, projectKey, intensity) {
+  const key = normalizeProjectColorKey(projectKey);
+  if (!key) return;
+  const value = normalizeProjectOverlayIntensity(intensity);
+  const prefs = api.storage.get(PROJECT_OVERLAY_STORAGE_KEY, {});
+  const next = prefs && typeof prefs === "object" ? { ...prefs } : {};
+  if (value === DEFAULT_PROJECT_OVERLAY_INTENSITY) delete next[key];
+  else next[key] = value;
+  api.storage.set(PROJECT_OVERLAY_STORAGE_KEY, next);
+  window.dispatchEvent(
+    new CustomEvent(COLOR_EVENT, { detail: { projectKey: key, overlayIntensity: value } }),
   );
 }
 
@@ -1387,6 +1450,62 @@ const FEATURES = {
   },
 
   /**
+   * Browser annotation transparency: Codex's browser comment editor card is
+   * rendered from `annotation-comment-editor-card-*.js`. The stable anchors
+   * below are data attributes in the upstream renderer bundle, avoiding
+   * hashed/minified class selectors.
+   */
+  "browser-annotation-transparent-card"() {
+    const STYLE_ID = "codexpp-browser-annotation-transparent-card";
+    const ROOT_ATTR = "data-codexpp-browser-annotation-transparent-card";
+    document.getElementById(STYLE_ID)?.remove();
+    document.documentElement.setAttribute(ROOT_ATTR, "true");
+
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root),
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root) body,
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root) body > div,
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root) #root,
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root) #browser-sidebar-comment-popup-root,
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root) #browser-sidebar-comment-popup-root > div,
+      html[${ROOT_ATTR}].compact-window:has(#browser-sidebar-comment-popup-root) #browser-sidebar-comment-popup-root > div > div {
+        background: transparent !important;
+        background-color: transparent !important;
+      }
+
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] {
+        background: var(--color-token-main-surface-primary, var(--color-token-dropdown-background, #fff)) !important;
+        background-color: var(--color-token-main-surface-primary, var(--color-token-dropdown-background, #fff)) !important;
+      }
+
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] [data-browser-comment-design-prompt-shell],
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] .ProseMirror,
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] [contenteditable="true"] {
+        background: var(--color-token-dropdown-background, var(--color-token-main-surface-primary, #fff)) !important;
+      }
+
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] .ProseMirror,
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] [contenteditable="true"] {
+        border-radius: var(--radius-md, 0.375rem) !important;
+      }
+
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] [data-browser-comment-editor-footer-actions],
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] [data-browser-comment-submit],
+      #browser-sidebar-comment-popup-root [data-browser-comment-editor-surface] [data-browser-sidebar-design-editor-toggle] {
+        pointer-events: auto !important;
+      }
+    `;
+    document.head.appendChild(style);
+
+    return () => {
+      style.remove();
+      document.documentElement.removeAttribute(ROOT_ATTR);
+    };
+  },
+
+  /**
    * Add a lightweight filter box to Codex Settings' sidebar. This deliberately
    * stays inside the sidebar/nav surface and marks itself with
    * `data-codexpp-settings-search` so the runtime Settings injector can ignore
@@ -2251,6 +2370,355 @@ const FEATURES = {
       marked.clear();
       style.remove();
     };
+  },
+
+  /**
+   * Provide a lightweight tweak mention picker for the composer. Codex owns
+   * plugin (`@`) and skill (`/`) mentions internally; this mirrors that
+   * ergonomics for installed tweaks by replacing the active `%query` token
+   * with a stable, human-readable `%Tweak Name` mention.
+   */
+  "tweak-mention-menu"(api) {
+    const STYLE_ID = "codexpp-tweak-mention-style";
+    const MENU_ATTR = "data-codexpp-tweak-mention-menu";
+    const ITEM_ATTR = "data-codexpp-tweak-mention-item";
+    const MAX_QUERY_LENGTH = 80;
+    const MAX_ITEMS = 8;
+    let disposed = false;
+    let menu = null;
+    let activeTarget = null;
+    let activeTrigger = null;
+    let tweaks = [];
+    let selectedIndex = 0;
+    let loadPromise = null;
+    let ignoreNextInput = false;
+    let suppressSelectionRefresh = false;
+    let lastComposerTarget = null;
+    const prefixBoundaryChars = new Set([" ", "\t", "\n", "\r", "(", "[", "{", "\"", "'"]);
+
+    document.getElementById(STYLE_ID)?.remove();
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      [${MENU_ATTR}="true"] {
+        position: fixed;
+        z-index: 2147483647;
+        width: min(360px, calc(100vw - 24px));
+        max-height: min(320px, calc(100vh - 24px));
+        overflow: auto;
+        border: 1px solid var(--color-token-border, var(--color-border, currentColor));
+        border-radius: var(--radius-lg, 0.5rem);
+        background: var(--color-token-bg-primary, var(--color-bg-primary, Canvas));
+        color: var(--color-token-text-primary, currentColor);
+        box-shadow: 0 12px 36px rgb(9 9 11 / 0.18);
+        padding: 4px;
+      }
+
+      [${MENU_ATTR}="true"] [${ITEM_ATTR}="true"] {
+        display: flex;
+        width: 100%;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border: 0;
+        border-radius: var(--radius-md, 0.375rem);
+        background: transparent;
+        color: inherit;
+        padding: 8px 10px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      [${MENU_ATTR}="true"] [${ITEM_ATTR}="true"]:hover,
+      [${MENU_ATTR}="true"] [${ITEM_ATTR}="true"][aria-selected="true"] {
+        background: var(--color-token-list-selected-background, var(--color-token-bg-fog, color-mix(in srgb, currentColor 8%, transparent)));
+      }
+
+      [${MENU_ATTR}="true"] [data-codexpp-tweak-mention-label] {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 14px;
+      }
+
+      [${MENU_ATTR}="true"] [data-codexpp-tweak-mention-meta] {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--color-token-text-secondary, currentColor);
+        font-size: 12px;
+        opacity: 0.78;
+      }
+
+      [${MENU_ATTR}="true"] [data-codexpp-tweak-mention-pill] {
+        flex: none;
+        color: var(--color-token-text-secondary, currentColor);
+        font-size: 12px;
+        opacity: 0.78;
+      }
+    `;
+    document.head.appendChild(style);
+
+    const ensureTweaks = () => {
+      if (tweaks.length) return Promise.resolve(tweaks);
+      if (loadPromise) return loadPromise;
+      loadPromise = api.ipc
+        .invoke("tweak-mentions-list")
+        .then((items) => {
+          tweaks = normalizeTweakMentionItems(items);
+          return tweaks;
+        })
+        .catch((e) => {
+          api.log.warn("[tweak-mention] installed tweak list unavailable", e);
+          tweaks = [];
+          return tweaks;
+        })
+        .finally(() => {
+          loadPromise = null;
+        });
+      return loadPromise;
+    };
+
+    const closeMenu = () => {
+      menu?.remove();
+      menu = null;
+      activeTarget = null;
+      activeTrigger = null;
+      selectedIndex = 0;
+    };
+
+    const matchesFor = (query) => {
+      const needle = normalizeMentionSearch(query);
+      const scored = [];
+      for (const item of tweaks) {
+        const haystacks = [item.label, item.name, item.id, ...(item.aliases || [])].map(normalizeMentionSearch);
+        const exactPrefix = haystacks.some((value) => value.startsWith(needle));
+        const wordPrefix = haystacks.some((value) => value.split(" ").some((part) => part.startsWith(needle)));
+        const contains = haystacks.some((value) => value.includes(needle));
+        if (needle && !exactPrefix && !wordPrefix && !contains) continue;
+        scored.push({ item, score: exactPrefix ? 0 : wordPrefix ? 1 : contains ? 2 : 3 });
+      }
+      scored.sort((a, b) => a.score - b.score || a.item.label.localeCompare(b.item.label));
+      return scored.slice(0, MAX_ITEMS).map((entry) => entry.item);
+    };
+
+    const positionMenu = (target) => {
+      if (!menu || !(target instanceof HTMLElement)) return;
+      const rect = target.getBoundingClientRect();
+      const menuHeight = Number(menu.offsetHeight) > 0 ? Number(menu.offsetHeight) : 280;
+      const top = Math.max(8, Math.min(window.innerHeight - menuHeight - 8, rect.top - 12 - menuHeight));
+      const left = Math.max(12, Math.min(window.innerWidth - 372, rect.left));
+      menu.style.top = `${top}px`;
+      menu.style.left = `${left}px`;
+    };
+
+    const renderMenu = (target, trigger) => {
+      const items = matchesFor(trigger.query);
+      if (!items.length) {
+        closeMenu();
+        return;
+      }
+      activeTarget = target;
+      activeTrigger = trigger;
+      selectedIndex = Math.max(0, Math.min(selectedIndex, items.length - 1));
+      if (!menu) {
+        menu = document.createElement("div");
+        menu.setAttribute(MENU_ATTR, "true");
+        menu.setAttribute("role", "listbox");
+        menu.addEventListener("mousedown", (event) => event.preventDefault());
+        document.body.appendChild(menu);
+      }
+      menu.replaceChildren();
+      for (const [index, item] of items.entries()) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.setAttribute(ITEM_ATTR, "true");
+        button.setAttribute("role", "option");
+        button.setAttribute("aria-selected", String(index === selectedIndex));
+        button.addEventListener("mouseenter", () => {
+          selectedIndex = index;
+          updateSelectedMenuItem();
+        });
+        button.addEventListener("click", () => insertMention(item));
+
+        const text = document.createElement("span");
+        text.className = "min-w-0";
+        const label = document.createElement("span");
+        label.setAttribute("data-codexpp-tweak-mention-label", "true");
+        label.textContent = item.label;
+        const meta = document.createElement("span");
+        meta.setAttribute("data-codexpp-tweak-mention-meta", "true");
+        meta.textContent = item.enabled === false ? `${item.id} disabled` : item.id;
+        text.append(label, meta);
+
+        const pill = document.createElement("span");
+        pill.setAttribute("data-codexpp-tweak-mention-pill", "true");
+        pill.textContent = `%${item.label}`;
+        button.append(text, pill);
+        menu.appendChild(button);
+      }
+      positionMenu(target);
+    };
+
+    const updateSelectedMenuItem = () => {
+      if (!menu) return;
+      const items = Array.from(menu.querySelectorAll(`[${ITEM_ATTR}="true"]`));
+      items.forEach((item, index) => item.setAttribute("aria-selected", String(index === selectedIndex)));
+    };
+
+    const refresh = async (target = activeComposerInput()) => {
+      target = resolveComposerInput(target);
+      if (disposed || !target) {
+        closeMenu();
+        return;
+      }
+      lastComposerTarget = target;
+      const trigger = findTweakMentionTrigger(target);
+      if (!trigger) {
+        closeMenu();
+        return;
+      }
+      await ensureTweaks();
+      if (disposed) return;
+      renderMenu(target, trigger);
+    };
+
+    const insertMention = (item) => {
+      if (!activeTarget || !activeTrigger) return;
+      ignoreNextInput = true;
+      suppressSelectionRefresh = true;
+      replaceComposerRange(activeTarget, activeTrigger.start, activeTrigger.end, `%${item.label}`);
+      closeMenu();
+    };
+
+    const selectedItem = () => {
+      if (!activeTrigger) return null;
+      return matchesFor(activeTrigger.query)[selectedIndex] || null;
+    };
+
+    const onInput = (event) => {
+      if (ignoreNextInput) {
+        ignoreNextInput = false;
+        return;
+      }
+      suppressSelectionRefresh = false;
+      const target = resolveComposerInput(event.target);
+      if (target) void refresh(target);
+    };
+
+    const scheduleRefresh = (target = activeComposerInput()) => {
+      const resolved = resolveComposerInput(target);
+      if (!resolved || disposed) return;
+      lastComposerTarget = resolved;
+      requestAnimationFrame(() => {
+        if (!disposed) void refresh(resolved);
+      });
+    };
+
+    const onBeforeInput = (event) => {
+      if (event?.data !== "%" && event?.inputType !== "insertText") return;
+      scheduleRefresh(event.target);
+    };
+
+    const onKeyup = (event) => {
+      if (event.key === "%" || event.key === "Backspace" || event.key === "Delete" || event.key === " ") {
+        scheduleRefresh(event.target);
+      }
+    };
+
+    const onKeydown = (event) => {
+      if (!menu) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        const count = menu.querySelectorAll(`[${ITEM_ATTR}="true"]`).length;
+        if (!count) return;
+        event.preventDefault();
+        event.stopPropagation();
+        selectedIndex = event.key === "ArrowDown"
+          ? (selectedIndex + 1) % count
+          : (selectedIndex - 1 + count) % count;
+        updateSelectedMenuItem();
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        const item = selectedItem();
+        if (!item) return;
+        event.preventDefault();
+        event.stopPropagation();
+        insertMention(item);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMenu();
+      }
+    };
+
+    const onFocusChange = () => {
+      window.setTimeout(() => {
+        if (disposed) return;
+        const active = activeComposerInput();
+        if (!active || (menu && !document.activeElement?.closest?.(`[${MENU_ATTR}="true"]`))) {
+          closeMenu();
+        }
+      }, 0);
+    };
+
+    const onResize = () => {
+      if (activeTarget) positionMenu(activeTarget);
+    };
+    const onSelectionChange = () => {
+      if (suppressSelectionRefresh) return;
+      void refresh(activeComposerInput() || lastComposerTarget);
+    };
+    const onFocusIn = (event) => {
+      const target = resolveComposerInput(event.target);
+      if (target) lastComposerTarget = target;
+    };
+
+    document.addEventListener("beforeinput", onBeforeInput, true);
+    document.addEventListener("input", onInput, true);
+    document.addEventListener("keydown", onKeydown, true);
+    document.addEventListener("keyup", onKeyup, true);
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("selectionchange", onSelectionChange, true);
+    document.addEventListener("focusout", onFocusChange, true);
+    window.addEventListener("resize", onResize);
+    api.log.info("tweak mention menu active");
+
+    return () => {
+      disposed = true;
+      document.removeEventListener("beforeinput", onBeforeInput, true);
+      document.removeEventListener("input", onInput, true);
+      document.removeEventListener("keydown", onKeydown, true);
+      document.removeEventListener("keyup", onKeyup, true);
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("selectionchange", onSelectionChange, true);
+      document.removeEventListener("focusout", onFocusChange, true);
+      window.removeEventListener("resize", onResize);
+      closeMenu();
+      style.remove();
+    };
+
+    function findTweakMentionTrigger(target) {
+      const state = composerTextState(target);
+      if (!state) return null;
+      const before = state.text.slice(0, state.caret);
+      const start = before.lastIndexOf("%");
+      if (start < 0) return null;
+      const previous = before[start - 1] || "";
+      if (previous && !prefixBoundaryChars.has(previous)) return null;
+      const query = before.slice(start + 1);
+      if (query.length > MAX_QUERY_LENGTH || /[\r\n]/.test(query)) return null;
+      if (/^\s/.test(query)) return null;
+      if (/[\\/]/.test(query)) return null;
+      return { start, end: state.caret, query };
+    }
   },
 
   /**
@@ -3389,12 +3857,12 @@ const FEATURES = {
   },
 
   /**
-   * Color project labels and folder icons in the main sidebar.
+   * Add subtle grouped backgrounds behind project/session rows in the main sidebar.
    *
    * Codex's sidebar project rows are `div[role="listitem"]` nodes with
    * class `group/cwd` and an aria-label matching the child folder button.
-   * We mark that row for lookup, then color only the folder icon/title and any
-   * unread indicator with the row's project theme.
+   * We mark that row for lookup, then tint the project block plus folder
+   * icon/title and any unread indicator with the row's project theme.
    *
    * We only mark existing nodes and inject token-based CSS. No wrapping,
    * no synthetic click targets, and cleanup restores the original DOM.
@@ -3467,6 +3935,9 @@ const FEATURES = {
     const colorPrefsCacheKey = "__codexppSidebarProjectColorPrefs";
     let colorPrefs = readColorPrefs();
     window[colorPrefsCacheKey] = colorPrefs;
+    const overlayPrefsCacheKey = "__codexppSidebarProjectOverlayPrefs";
+    let overlayPrefs = readOverlayPrefs();
+    window[overlayPrefsCacheKey] = overlayPrefs;
     let pendingContextMenu = null;
     let menu = null;
     let disposed = false;
@@ -3501,10 +3972,6 @@ const FEATURES = {
         box-shadow: none !important;
       }
 
-      .electron-dark [${ATTR}="row"] {
-        box-shadow: none !important;
-      }
-
       [${ATTR}="row"][style*="--codexpp-project-blue-token-override"] {
         --color-accent-blue: var(--codexpp-project-blue-token-override);
         --color-token-charts-blue: var(--codexpp-project-blue-token-override);
@@ -3526,8 +3993,114 @@ const FEATURES = {
         gap: 0 !important;
       }
 
-      [${ATTR}="row"]:hover {
+      [${ATTR}="row"] + [${ATTR}="row"],
+      [${ATTR}="project-child"] + [${ATTR}="row"] {
+        margin-top: 4px !important;
+      }
+
+      [${ATTR}="row"]:hover,
+      [${ATTR}="header"]:hover,
+      [${ATTR}="row"]:has([data-app-action-sidebar-thread-active="true"]),
+      [${ATTR}="header"]:has([data-app-action-sidebar-thread-active="true"]),
+      [${ATTR}="project-child-target"]:hover,
+      [${ATTR}="project-child-target"]:has([data-app-action-sidebar-thread-active="true"]) {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-background-tint, var(--codexpp-project-tint, currentColor)) var(--codexpp-project-child-hover-light, 18%),
+          var(--color-token-list-hover-background, transparent)
+        ) !important;
+      }
+
+      .electron-dark [${ATTR}="row"]:hover,
+      .electron-dark [${ATTR}="header"]:hover,
+      .electron-dark [${ATTR}="row"]:has([data-app-action-sidebar-thread-active="true"]),
+      .electron-dark [${ATTR}="header"]:has([data-app-action-sidebar-thread-active="true"]),
+      .electron-dark [${ATTR}="project-child-target"]:hover,
+      .electron-dark [${ATTR}="project-child-target"]:has([data-app-action-sidebar-thread-active="true"]) {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-background-tint, var(--codexpp-project-tint, currentColor)) var(--codexpp-project-child-hover-dark, 26%),
+          var(--color-token-list-hover-background, transparent)
+        ) !important;
+      }
+
+      [${ATTR}="header"] {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-background-tint, var(--codexpp-project-tint, currentColor)) var(--codexpp-project-header-light, 12%),
+          transparent
+        ) !important;
+        border-radius: 8px !important;
+      }
+
+      .electron-dark [${ATTR}="header"] {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-background-tint, var(--codexpp-project-tint, currentColor)) var(--codexpp-project-header-dark, 19%),
+          transparent
+        ) !important;
+      }
+
+      [${ATTR}="project-child"] {
         background-color: transparent !important;
+        border-radius: 0 !important;
+        box-sizing: border-box !important;
+        margin-block: 1px !important;
+        margin-inline: 0 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+
+      [${ATTR}="project-child-target"] {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-background-tint, var(--codexpp-project-tint, currentColor)) var(--codexpp-project-child-light, 10%),
+          transparent
+        ) !important;
+        border-radius: 6px !important;
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+
+      .electron-dark [${ATTR}="project-child-target"] {
+        background-color: color-mix(
+          in srgb,
+          var(--codexpp-project-background-tint, var(--codexpp-project-tint, currentColor)) var(--codexpp-project-child-dark, 18%),
+          transparent
+        ) !important;
+      }
+
+      [${ATTR}="project-expander"],
+      [${ATTR}="project-expander"]:hover,
+      [${ATTR}="project-expander"]:focus,
+      [${ATTR}="project-expander"]:focus-visible,
+      .electron-dark [${ATTR}="project-expander"],
+      .electron-dark [${ATTR}="project-expander"]:hover,
+      .electron-dark [${ATTR}="project-expander"]:focus,
+      .electron-dark [${ATTR}="project-expander"]:focus-visible {
+        background: transparent !important;
+        background-color: transparent !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+        color: color-mix(
+          in srgb,
+          var(--codexpp-project-text-color, var(--codexpp-project-tint, currentColor)) 82%,
+          black
+        ) !important;
+        font-weight: 700 !important;
+        -webkit-text-fill-color: color-mix(
+          in srgb,
+          var(--codexpp-project-text-color, var(--codexpp-project-tint, currentColor)) 82%,
+          black
+        ) !important;
+      }
+
+      [${ATTR}="project-expander"] :where(*) {
+        color: inherit !important;
+        font-weight: inherit !important;
+        -webkit-text-fill-color: inherit !important;
       }
 
       [${ATTR}="icon"] {
@@ -3686,6 +4259,13 @@ const FEATURES = {
         if ("style" in node) {
           node.style.removeProperty("--codexpp-project-tint");
           node.style.removeProperty("--codexpp-project-text-color");
+          node.style.removeProperty("--codexpp-project-background-tint");
+          node.style.removeProperty("--codexpp-project-header-light");
+          node.style.removeProperty("--codexpp-project-header-dark");
+          node.style.removeProperty("--codexpp-project-child-light");
+          node.style.removeProperty("--codexpp-project-child-dark");
+          node.style.removeProperty("--codexpp-project-child-hover-light");
+          node.style.removeProperty("--codexpp-project-child-hover-dark");
           node.style.removeProperty("--codexpp-project-blue-token-override");
           node.style.removeProperty("--codexpp-project-link-token-override");
         }
@@ -3723,18 +4303,40 @@ const FEATURES = {
       return textColorFor(text);
     };
 
+    const overlayIntensityFor = (text) =>
+      normalizeProjectOverlayIntensity(overlayPrefs[projectKey(text)]);
+
+    const overlayOptionFor = (text) =>
+      PROJECT_OVERLAY_OPTIONS[overlayIntensityFor(text)] || PROJECT_OVERLAY_OPTIONS[DEFAULT_PROJECT_OVERLAY_INTENSITY];
+
+    const applyProjectStyleVars = (node, label) => {
+      const tint = tintFor(label);
+      const overlay = overlayOptionFor(label);
+      setStyleVar(node, "--codexpp-project-tint", tint);
+      setStyleVar(node, "--codexpp-project-text-color", textColorFor(label));
+      setStyleVar(node, "--codexpp-project-background-tint", tint);
+      setStyleVar(node, "--codexpp-project-header-light", `${Math.max(0, Math.round(overlay.light * 1.2))}%`);
+      setStyleVar(node, "--codexpp-project-header-dark", `${Math.max(0, Math.round(overlay.dark * 1.05))}%`);
+      setStyleVar(node, "--codexpp-project-child-light", `${overlay.light}%`);
+      setStyleVar(node, "--codexpp-project-child-dark", `${overlay.dark}%`);
+      setStyleVar(node, "--codexpp-project-child-hover-light", `${overlay.hoverLight}%`);
+      setStyleVar(node, "--codexpp-project-child-hover-dark", `${overlay.hoverDark}%`);
+    };
+
     const markRows = (rows) => {
       reconcileProjectLists(rows);
+      clearProjectChildMarks();
+      const rowSet = new Set(rows);
       for (const row of rows) {
         if (!(row instanceof HTMLElement)) continue;
         renameLegacyBrandInElement(row);
         const label = labelFor(row);
         setAttr(row, ATTR, "row");
         setAttr(row, "data-codexpp-sidebar-project-expanded", String(isExpandedProject(row)));
-        setStyleVar(row, "--codexpp-project-tint", tintFor(label));
-        setStyleVar(row, "--codexpp-project-text-color", textColorFor(label));
+        applyProjectStyleVars(row, label);
         setOptionalStyleVar(row, "--codexpp-project-blue-token-override", blueTokenOverrideFor(label));
         setOptionalStyleVar(row, "--codexpp-project-link-token-override", linkTokenOverrideFor(label));
+        markProjectGroup(row, label, rowSet);
         markProjectParts(row, label);
       }
     };
@@ -3754,6 +4356,192 @@ const FEATURES = {
     };
 
     const projectKey = (label) => normalize(label);
+
+    function readOverlayPrefs() {
+      const value = api.storage.get(PROJECT_OVERLAY_STORAGE_KEY, {});
+      const stored = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+      const cached = window[overlayPrefsCacheKey];
+      return cached && typeof cached === "object" && !Array.isArray(cached)
+        ? { ...stored, ...cached }
+        : stored;
+    }
+
+    const writeOverlayPrefs = () => {
+      overlayPrefs = { ...overlayPrefs };
+      window[overlayPrefsCacheKey] = overlayPrefs;
+      return api.storage.set(PROJECT_OVERLAY_STORAGE_KEY, overlayPrefs);
+    };
+
+    const clearProjectChildMarks = () => {
+      document.querySelectorAll(`[${ATTR}="project-child"], [${ATTR}="project-child-target"], [${ATTR}="project-expander"], [${ATTR}="header"]`).forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        node.removeAttribute(ATTR);
+        clearProjectStyleVars(node);
+      });
+    };
+
+    const clearProjectStyleVars = (node) => {
+      node.style.removeProperty("--codexpp-project-tint");
+      node.style.removeProperty("--codexpp-project-text-color");
+      node.style.removeProperty("--codexpp-project-background-tint");
+      node.style.removeProperty("--codexpp-project-header-light");
+      node.style.removeProperty("--codexpp-project-header-dark");
+      node.style.removeProperty("--codexpp-project-child-light");
+      node.style.removeProperty("--codexpp-project-child-dark");
+      node.style.removeProperty("--codexpp-project-child-hover-light");
+      node.style.removeProperty("--codexpp-project-child-hover-dark");
+    };
+
+    const markProjectGroup = (row, label, rowSet) => {
+      const overlay = overlayOptionFor(label);
+      markProjectHeader(row, label);
+      if (overlay.id === "off") return;
+      for (const node of projectGroupNodes(row, label, rowSet)) {
+        if (!(node instanceof HTMLElement)) continue;
+        setAttr(node, ATTR, "project-child");
+        applyProjectStyleVars(node, label);
+        const target = projectChildTintTarget(node);
+        if (target) {
+          setAttr(target, ATTR, isProjectExpanderControl(target) ? "project-expander" : "project-child-target");
+          applyProjectStyleVars(target, label);
+        }
+      }
+    };
+
+    const markProjectHeader = (row, label) => {
+      const header = projectHeaderFor(row, label);
+      if (!(header instanceof HTMLElement)) return;
+      setAttr(header, ATTR, "header");
+      applyProjectStyleVars(header, label);
+    };
+
+    const projectHeaderFor = (row, label) =>
+      Array.from(row.querySelectorAll("[role='button'][aria-label]"))
+        .find((node) => node instanceof HTMLElement && labelFor(node) === label) ||
+      row.querySelector("[role='button'][aria-label]");
+
+    const projectGroupNodes = (row, label, rowSet) => {
+      const nodes = new Set();
+      for (const node of projectGroupDescendantNodes(row, label)) nodes.add(node);
+      for (const node of projectGroupSiblingNodes(row, rowSet)) nodes.add(node);
+      for (const node of flatProjectThreadNodes(label)) nodes.add(node);
+      return Array.from(nodes);
+    };
+
+    const projectGroupSiblingNodes = (row, rowSet) => {
+      const nodes = [];
+      let node = row.nextElementSibling;
+      while (node && !rowSet.has(node) && !isLikelyProjectBoundary(node) && normalize(node.textContent) !== "chats") {
+        if (isLikelyThreadRow(node) || node.querySelector?.(THREAD_OR_TASK_SELECTOR)) nodes.push(node);
+        node = node.nextElementSibling;
+      }
+      return nodes;
+    };
+
+    const isLikelyProjectBoundary = (node) =>
+      node instanceof HTMLElement &&
+      node.getAttribute("role") === "listitem" &&
+      (node.classList.contains("group/cwd") || Boolean(node.querySelector?.("[data-app-action-sidebar-project-id]")));
+
+    const THREAD_OR_TASK_SELECTOR = [
+      "[data-app-action-sidebar-thread-row]",
+      "[data-app-action-sidebar-thread-id]",
+      "[data-app-action-sidebar-task-id]",
+      "[data-sidebar-thread-id]",
+      "[data-app-action-sidebar-thread-title]",
+      "[data-app-action-sidebar-task-title]",
+      "[data-sidebar-thread-title]",
+    ].join(", ");
+
+    const projectGroupDescendantNodes = (row, label) => {
+      const header = projectHeaderFor(row, label);
+      return Array.from(row.querySelectorAll(`div[role='listitem'], ${THREAD_OR_TASK_SELECTOR}`))
+        .filter((node) => (
+          node instanceof HTMLElement &&
+          node !== row &&
+          node !== header &&
+          !header?.contains(node) &&
+          labelFor(node) !== label &&
+          (isLikelyThreadRow(node) || node.querySelector?.(THREAD_OR_TASK_SELECTOR) || node.matches?.(THREAD_OR_TASK_SELECTOR))
+        ));
+    };
+
+    const flatProjectThreadNodes = (label) => {
+      const sidebar = mainSidebar();
+      if (!sidebar) return [];
+      return Array.from(sidebar.querySelectorAll(`div[role='listitem'], ${THREAD_OR_TASK_SELECTOR}`))
+        .filter((node) => node instanceof HTMLElement && !node.closest(`[${ATTR}="row"]`))
+        .filter((node) => threadProjectKey(node) === projectKey(label));
+    };
+
+    const projectChildTintTarget = (node) => {
+      if (!(node instanceof HTMLElement)) return null;
+      if (
+        node.matches?.("button, a, [role='button']") ||
+        node.matches?.(THREAD_OR_TASK_SELECTOR)
+      ) {
+        return node;
+      }
+      const target = node.querySelector?.(`button, a, [role='button'], ${THREAD_OR_TASK_SELECTOR}`);
+      return target instanceof HTMLElement ? target : node;
+    };
+
+    const isProjectExpanderControl = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const text = normalize(node.getAttribute("aria-label") || node.textContent || "");
+      return /^show (more|less)\b/.test(text);
+    };
+
+    const isLikelyThreadRow = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (node.matches?.(THREAD_OR_TASK_SELECTOR)) return true;
+      if (node.querySelector?.(THREAD_OR_TASK_SELECTOR)) return true;
+      const text = labelFor(node);
+      return node.getAttribute("role") === "listitem" && Boolean(text) && !isProjectRow(node);
+    };
+
+    const threadProjectKey = (node) => {
+      if (!(node instanceof HTMLElement)) return "";
+      const attr = attrValue(node, [
+        "data-app-action-sidebar-project-label",
+        "data-sidebar-project-label",
+        "data-project-label",
+        "data-app-action-sidebar-thread-project-label",
+        "data-app-action-sidebar-task-project-label",
+      ]);
+      if (attr) return projectKey(attr);
+      const pathValue = attrValue(node, [
+        "data-app-action-sidebar-project-id",
+        "data-app-action-sidebar-thread-cwd",
+        "data-app-action-sidebar-task-cwd",
+        "data-sidebar-thread-cwd",
+        "data-cwd",
+        "data-project-path",
+      ]);
+      if (pathValue) return projectKey(projectNameFromPath(pathValue));
+      return "";
+    };
+
+    const attrValue = (node, names) => {
+      if (!(node instanceof HTMLElement)) return "";
+      for (const name of names) {
+        const direct = node.getAttribute(name);
+        if (direct) return direct;
+        const child = node.querySelector?.(`[${name}]`);
+        const nested = child instanceof HTMLElement ? child.getAttribute(name) : "";
+        if (nested) return nested;
+      }
+      return "";
+    };
+
+    const projectNameFromPath = (value) => {
+      const input = String(value || "").trim();
+      if (!input) return "";
+      if (input.startsWith("codex-sidebar://")) return input.replace("codex-sidebar://", "");
+      if (input.startsWith("cloud:")) return input.split("/").pop() || input.replace(/^cloud:/, "");
+      const parts = input.split(/[\\/]+/).filter(Boolean);
+      return parts.at(-1) || input;
+    };
 
     function readColorPrefs() {
       const value = api.storage.get(COLOR_STORAGE_KEY, {});
@@ -3816,6 +4604,15 @@ const FEATURES = {
       return value || null;
     };
 
+    const slugifyProjectSettingsId = (value) =>
+      String(value || "project")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "") || "project";
+
+    const projectSettingsPageId = (context) =>
+      `co.thomashulihan.projects:project-${slugifyProjectSettingsId(context?.label || context?.projectPath)}`;
+
     const numberOrClient = (value, fallback) =>
       typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
@@ -3875,6 +4672,7 @@ const FEATURES = {
     const openColorMenu = (label, x, y, anchor) => {
       closeMenu();
       const selected = colorPrefs[projectKey(label)] || "auto";
+      const selectedOverlay = overlayIntensityFor(label);
       menu = document.createElement("div");
       menu.setAttribute(MENU_ATTR, "root");
       menu.className = "flex flex-col gap-0.5";
@@ -3930,6 +4728,59 @@ const FEATURES = {
         menu.appendChild(item);
       }
 
+      const overlayTitle = document.createElement("div");
+      overlayTitle.className = "mt-1 border-t border-token-border/60 px-2 py-1 text-xs text-token-text-secondary";
+      overlayTitle.textContent = "Chat row overlay";
+      menu.appendChild(overlayTitle);
+
+      for (const option of Object.values(PROJECT_OVERLAY_OPTIONS)) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.setAttribute(MENU_ATTR, "item");
+        item.setAttribute("data-overlay-id", option.id);
+        item.className =
+          "flex h-token-button-composer items-center gap-2 px-2 text-left text-sm " +
+          "text-token-text-primary hover:bg-token-foreground/10 cursor-interaction";
+        item.setAttribute("aria-pressed", String(selectedOverlay === option.id));
+
+        const swatch = document.createElement("span");
+        swatch.setAttribute(MENU_ATTR, "swatch");
+        swatch.className = "size-3 shrink-0 rounded-full border border-token-border";
+        swatch.style.setProperty("--codexpp-project-menu-color", tintFor(label));
+        swatch.style.opacity = option.id === "off" ? "0.18" : String(Math.max(0.32, option.light / 18));
+
+        const text = document.createElement("span");
+        text.className = "min-w-0 flex-1 truncate";
+        text.textContent = option.label;
+
+        const check = document.createElement("span");
+        check.setAttribute(MENU_ATTR, "check");
+        check.className = "text-token-text-secondary";
+        check.textContent = selectedOverlay === option.id ? "✓" : "";
+
+        item.append(swatch, text, check);
+        item.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const key = projectKey(label);
+          overlayPrefs = { ...overlayPrefs };
+          if (option.id === DEFAULT_PROJECT_OVERLAY_INTENSITY) delete overlayPrefs[key];
+          else overlayPrefs[key] = option.id;
+          window[overlayPrefsCacheKey] = overlayPrefs;
+          applyColorToCurrentRows(label);
+          syncNativeMenuChecks(label);
+          try {
+            await writeOverlayPrefs();
+          } catch (e) {
+            api.log.warn("sidebar project overlay write failed", e);
+          }
+          applyColorToCurrentRows(label);
+          closeMenu();
+          scheduleApply();
+        });
+        menu.appendChild(item);
+      }
+
       document.body.appendChild(menu);
       const rect = menu.getBoundingClientRect();
       const anchorRect = anchor?.getBoundingClientRect?.();
@@ -3960,6 +4811,115 @@ const FEATURES = {
       if (event.key === "Escape") closeMenu();
     }
 
+    const menuText = (node) => normalize(node?.textContent || "");
+
+    const isKnownNativeMenuText = (text) =>
+      /\b(pin project|open in finder|create permanent worktree|rename project|archive chats|remove|delete)\b/i.test(text);
+
+    const isBoundedMenuPopover = (node) => {
+      if (!(node instanceof HTMLElement) || !visible(node)) return false;
+      if (node === document.body || node === document.documentElement) return false;
+      const rect = node.getBoundingClientRect?.() || { width: 0, height: 0 };
+      const maxWidth = Math.max(360, Math.min(window.innerWidth || 1280, 900));
+      const maxHeight = Math.max(220, Math.min(window.innerHeight || 800, 720));
+      return rect.width >= 120 && rect.height >= 48 && rect.width <= maxWidth && rect.height <= maxHeight;
+    };
+
+    const closestNativeMenu = (target) => {
+      if (!(target instanceof HTMLElement)) return null;
+      const semantic = target.closest('[role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]');
+      if (semantic instanceof HTMLElement) return semantic;
+      let node = target.parentElement;
+      let best = null;
+      while (node instanceof HTMLElement && node !== document.body && node !== document.documentElement) {
+        const text = menuText(node);
+        if (isBoundedMenuPopover(node) && isKnownNativeMenuText(text)) best = node;
+        node = node.parentElement;
+      }
+      return best;
+    };
+
+    const openMenuRoots = () => {
+      const roots = Array.from(document.querySelectorAll('[role="menu"][data-state="open"], [role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]'))
+        .filter((node) => node instanceof HTMLElement && visible(node));
+      for (const item of Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [data-radix-collection-item], div'))) {
+        if (!(item instanceof HTMLElement) || !isKnownNativeMenuText(menuText(item))) continue;
+        const root = closestNativeMenu(item);
+        if (root && !roots.includes(root)) roots.push(root);
+      }
+      return roots;
+    };
+
+    const nativeMenuItems = (root) =>
+      Array.from(root.querySelectorAll('[role="menuitem"], [data-radix-collection-item], button, div'))
+        .filter((item) => item instanceof HTMLElement && visible(item));
+
+    const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    const clickElement = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      node.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window, button: 0 }));
+      node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, button: 0 }));
+      node.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, cancelable: true, view: window, button: 0 }));
+      node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, button: 0 }));
+      node.click();
+      return true;
+    };
+
+    const findSettingsControl = () =>
+      Array.from(document.querySelectorAll('button, a, [role="button"], [role="menuitem"]'))
+        .filter((node) => node instanceof HTMLElement && visible(node) && !node.closest("[data-codexpp]"))
+        .find((node) => normalize(node.getAttribute("aria-label") || node.textContent || "") === "settings") || null;
+
+    const showProjectMenuToast = (message) => {
+      let host = document.querySelector(`[${MENU_ATTR}="toast-host"]`);
+      if (!host) {
+        host = document.createElement("div");
+        host.setAttribute(MENU_ATTR, "toast-host");
+        host.className = "pointer-events-none fixed bottom-5 right-5 z-[2147483647] flex flex-col items-end gap-2";
+        document.body.appendChild(host);
+      }
+      const toast = document.createElement("div");
+      toast.className =
+        "translate-y-2 rounded-xl border border-token-border/50 bg-token-main-surface-primary " +
+        "px-3 py-2 text-sm font-medium text-token-foreground opacity-0 shadow-lg transition-all duration-200";
+      toast.textContent = message;
+      host.appendChild(toast);
+      requestAnimationFrame(() => {
+        toast.classList.remove("translate-y-2", "opacity-0");
+      });
+      window.setTimeout(() => {
+        toast.classList.add("translate-y-2", "opacity-0");
+        window.setTimeout(() => {
+          toast.remove();
+          if (host && host.childElementCount === 0) host.remove();
+        }, 220);
+      }, 3200);
+    };
+
+    const openProjectSettingsPage = async (context) => {
+      const pageId = projectSettingsPageId(context);
+      const openRegisteredPage = () => {
+        try {
+          return Boolean(api.codex?.openRegisteredTweakPage?.(pageId));
+        } catch (e) {
+          api.log.warn("open project settings page failed", e);
+          return false;
+        }
+      };
+
+      if (openRegisteredPage()) return true;
+      clickElement(findSettingsControl());
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        await wait(125);
+        if (openRegisteredPage()) return true;
+      }
+      const message = `Could not open Project settings for ${context?.label || "this project"}. Open Settings, then try again.`;
+      api.log.warn("project settings page did not open", { pageId });
+      showProjectMenuToast(message);
+      return false;
+    };
+
     const injectColorMenuIntoNativeMenu = () => {
       if (!pendingContextMenu || Date.now() - pendingContextMenu.at > 1500) return;
       const nativeMenu = findNativeContextMenu(pendingContextMenu.x, pendingContextMenu.y);
@@ -3982,6 +4942,20 @@ const FEATURES = {
             api.log.warn("copy project path failed", e);
           }
           nativeMenu.remove();
+        },
+      });
+      const settingsItem = createNativeMenuItem({
+        nativeItem,
+        attr: "project-settings",
+        label: "Project settings",
+        icon: projectSettingsIcon(),
+        onActivate: async (event) => {
+          event?.preventDefault?.();
+          event?.stopPropagation?.();
+          const context = pendingContextMenu;
+          nativeMenu.remove();
+          closeMenu();
+          if (context) await openProjectSettingsPage(context);
         },
       });
 
@@ -4023,6 +4997,7 @@ const FEATURES = {
       trigger.addEventListener("click", open);
       const removeItem = findRemoveMenuItem(nativeMenu);
       nativeMenu.insertBefore(copyPathItem, removeItem);
+      nativeMenu.insertBefore(settingsItem, removeItem);
       nativeMenu.insertBefore(trigger, removeItem);
     };
 
@@ -4098,6 +5073,34 @@ const FEATURES = {
       return icon;
     };
 
+    const projectSettingsIcon = () => {
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("width", "16");
+      icon.setAttribute("height", "16");
+      icon.setAttribute("viewBox", "0 0 16 16");
+      icon.setAttribute("fill", "none");
+      icon.setAttribute("aria-hidden", "true");
+      icon.classList.add(
+        "icon-xs",
+        "shrink-0",
+        "opacity-75",
+        "group-focus:opacity-100",
+        "group-hover:opacity-100",
+      );
+
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute(
+        "d",
+        "M3 4.75C3 3.78 3.78 3 4.75 3h6.5C12.22 3 13 3.78 13 4.75v6.5c0 .97-.78 1.75-1.75 1.75h-6.5C3.78 13 3 12.22 3 11.25v-6.5Z M5.25 6h5.5 M5.25 8h5.5 M5.25 10h3.25",
+      );
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.35");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      icon.appendChild(path);
+      return icon;
+    };
+
     const projectColorIcon = () => {
       const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       icon.setAttribute("width", "16");
@@ -4150,9 +5153,11 @@ const FEATURES = {
       const selected = colorPrefs[projectKey(label)] || "auto";
       menu?.querySelectorAll(`[${MENU_ATTR}="item"]`).forEach((item) => {
         const id = item.getAttribute("data-color-id");
-        item.setAttribute("aria-pressed", String(id === selected));
+        const overlayId = item.getAttribute("data-overlay-id");
+        const isSelected = id ? id === selected : overlayId === overlayIntensityFor(label);
+        item.setAttribute("aria-pressed", String(isSelected));
         const check = item.querySelector(`[${MENU_ATTR}="check"]`);
-        if (check) check.textContent = id === selected ? "✓" : "";
+        if (check) check.textContent = isSelected ? "✓" : "";
       });
     };
 
@@ -4210,11 +5215,13 @@ const FEATURES = {
     const clearRowMarks = (row) => {
       row.removeAttribute(ATTR);
       row.removeAttribute("data-codexpp-sidebar-project-expanded");
-      row.style.removeProperty("--codexpp-project-tint");
-      row.style.removeProperty("--codexpp-project-text-color");
+      clearProjectStyleVars(row);
       row.style.removeProperty("--codexpp-project-blue-token-override");
       row.style.removeProperty("--codexpp-project-link-token-override");
-      row.querySelectorAll(`[${ATTR}]`).forEach((node) => node.removeAttribute(ATTR));
+      row.querySelectorAll(`[${ATTR}]`).forEach((node) => {
+        node.removeAttribute(ATTR);
+        if (node instanceof HTMLElement) clearProjectStyleVars(node);
+      });
     };
 
     const setAttr = (node, name, value) => {
@@ -4255,10 +5262,19 @@ const FEATURES = {
       const key = normalize(detail.projectKey || "");
       if (!key) return;
       const colorId = String(detail.colorId || "auto");
-      colorPrefs = { ...colorPrefs };
-      if (colorId === "auto") delete colorPrefs[key];
-      else colorPrefs[key] = colorId;
-      window[colorPrefsCacheKey] = colorPrefs;
+      if ("colorId" in detail) {
+        colorPrefs = { ...colorPrefs };
+        if (colorId === "auto") delete colorPrefs[key];
+        else colorPrefs[key] = colorId;
+        window[colorPrefsCacheKey] = colorPrefs;
+      }
+      if ("overlayIntensity" in detail) {
+        const intensity = normalizeProjectOverlayIntensity(detail.overlayIntensity);
+        overlayPrefs = { ...overlayPrefs };
+        if (intensity === DEFAULT_PROJECT_OVERLAY_INTENSITY) delete overlayPrefs[key];
+        else overlayPrefs[key] = intensity;
+        window[overlayPrefsCacheKey] = overlayPrefs;
+      }
       scheduleApply();
     };
 
@@ -4514,6 +5530,7 @@ const PROJECT_LABEL_HANDLER_KEY = "__shadgptUiImprovementsProjectLabelsHandler";
 const SIDEBAR_BATCH_MENU_GLOBAL_KEY = "__shadgptUiImprovementsSidebarBatchMenu";
 const SIDEBAR_BATCH_MENU_HANDLER_KEY =
   "__shadgptUiImprovementsSidebarBatchMenuHandler";
+const TWEAK_MENTION_HANDLER_KEY = "__shadgptUiImprovementsTweakMentionHandler";
 
 function startMainLegacyBrandUiScrubber(api) {
   let electron;
@@ -4597,20 +5614,20 @@ function startMainBrowserAnnotationComposerModePatch(api) {
       if (!isBrowserAnnotationRendererAsset(request?.url)) return response;
 
       try {
-        if (!response || typeof response.text !== "function") return response;
-        const readableResponse = typeof response.clone === "function" ? response.clone() : response;
+        if (!response || typeof response.text !== "function" || typeof response.clone !== "function") {
+          return response;
+        }
+        const readableResponse = response.clone();
         const originalText = await readableResponse.text();
-        const patchedText = patchBrowserAnnotationDefaultMode(originalText);
-        if (patchedText === originalText && readableResponse !== response) {
+        const patch = browserAnnotationDefaultModePatch(originalText);
+        if (!patch.changed) {
           return response;
         }
         const headers = new Headers(response.headers);
         headers.delete("content-length");
         headers.set("content-type", "text/javascript; charset=utf-8");
-        if (patchedText !== originalText) {
-          api.log.info("[browser-annotation] patched browser comment Enter behavior");
-        }
-        return new Response(patchedText, {
+        api.log.info("[browser-annotation] patched browser comment Enter behavior");
+        return new Response(patch.source, {
           status: response.status,
           statusText: response.statusText,
           headers,
@@ -4642,30 +5659,95 @@ function isBrowserAnnotationRendererAsset(rawUrl) {
   if (typeof rawUrl !== "string") return false;
   try {
     const basename = new URL(rawUrl).pathname.split("/").pop() || "";
-    return /^(composer|annotation-comment-editor-card)-[A-Za-z0-9_-]+\.js$/.test(basename);
+    return /^(composer|annotation-comment-editor-card|thread-side-panel-tabs)-[A-Za-z0-9_-]+\.js$/.test(basename);
   } catch {
     return false;
   }
 }
 
 function patchBrowserAnnotationDefaultMode(source) {
-  if (typeof source !== "string" || !source.includes(BROWSER_ANNOTATION_DEFAULT_MODE_TARGET)) {
-    return source;
-  }
-  return source.replace(
-    BROWSER_ANNOTATION_DEFAULT_MODE_TARGET,
-    BROWSER_ANNOTATION_DEFAULT_MODE_REPLACEMENT,
-  );
+  return browserAnnotationDefaultModePatch(source).source;
 }
 
-function responseInitFrom(response) {
-  const headers = new Headers(response.headers);
-  headers.delete("content-length");
-  return {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
+function startMainTweakMentionProvider(api) {
+  const manager = api.codex?.tweaks;
+  if (!manager || typeof api.ipc?.handle !== "function") {
+    api.log.warn("[tweak-mention] codex.tweaks API unavailable");
+    return null;
+  }
+
+  try {
+    globalThis[TWEAK_MENTION_HANDLER_KEY]?.dispose?.();
+  } catch (e) {
+    api.log.warn("[tweak-mention] previous handler dispose failed", String(e?.message || e));
+  }
+
+  const dispose = api.ipc.handle("tweak-mentions-list", () => {
+    const installed = typeof manager.listInstalled === "function" ? manager.listInstalled() : [];
+    return installed.map((item) => ({
+      manifest: {
+        id: item?.manifest?.id,
+        name: item?.manifest?.name,
+        description: item?.manifest?.description,
+      },
+      enabled: item?.enabled !== false,
+    }));
+  });
+  globalThis[TWEAK_MENTION_HANDLER_KEY] = { dispose };
+  api.log.info("[tweak-mention] installed tweak mention provider active");
+  return () => {
+    try {
+      dispose?.();
+    } finally {
+      if (globalThis[TWEAK_MENTION_HANDLER_KEY]?.dispose === dispose) {
+        delete globalThis[TWEAK_MENTION_HANDLER_KEY];
+      }
+    }
   };
+}
+
+function browserAnnotationDefaultModePatch(source) {
+  if (typeof source !== "string" || source.length === 0) {
+    return { changed: false, source, reason: "invalid-source" };
+  }
+
+  const candidates = BROWSER_ANNOTATION_DEFAULT_MODE_REWRITES
+    .map((rewrite) => ({
+      ...rewrite,
+      targetCount: countOccurrences(source, rewrite.target),
+      replacementCount: countOccurrences(source, rewrite.replacement),
+    }))
+    .filter((rewrite) => rewrite.targetCount > 0);
+
+  if (candidates.length === 0) {
+    return { changed: false, source, reason: "current-or-unknown-asset" };
+  }
+  if (candidates.length !== 1 || candidates[0].targetCount !== 1) {
+    return { changed: false, source, reason: "ambiguous-legacy-target" };
+  }
+
+  const rewrite = candidates[0];
+  const patched = source.replace(rewrite.target, rewrite.replacement);
+  if (
+    patched === source ||
+    countOccurrences(patched, rewrite.target) !== 0 ||
+    countOccurrences(patched, rewrite.replacement) !== rewrite.replacementCount + 1
+  ) {
+    return { changed: false, source, reason: "unverified-rewrite" };
+  }
+
+  return { changed: true, source: patched, reason: rewrite.reason };
+}
+
+function countOccurrences(source, needle) {
+  if (typeof source !== "string" || typeof needle !== "string" || needle.length === 0) return 0;
+  let count = 0;
+  let index = 0;
+  while ((index = source.indexOf(needle, index)) !== -1) {
+    count += 1;
+    index += needle.length;
+  }
+  return count;
 }
 
 function legacyBrandMainInjectionScript() {
@@ -5213,6 +6295,206 @@ function cleanMetricText(text) {
 
 function compactText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeTweakMentionItems(items) {
+  if (!Array.isArray(items)) return [];
+  const seen = new Set();
+  const normalized = [];
+  for (const item of items) {
+    const manifest = item?.manifest && typeof item.manifest === "object" ? item.manifest : item;
+    const id = compactText(manifest?.id);
+    const name = compactText(manifest?.name || id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const label = tweakMentionLabel(name, id);
+    normalized.push({
+      id,
+      name,
+      label,
+      enabled: item?.enabled !== false,
+      aliases: tweakMentionAliases(name, label, id),
+    });
+  }
+  return normalized.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function tweakMentionLabel(name, id) {
+  const raw = compactText(name || id);
+  const withoutBrand = raw
+    .replace(/^ShadGPT\s+/i, "")
+    .replace(/^Codex\+\+\s+/i, "")
+    .replace(/^Codex Plus Plus\s+/i, "");
+  const withoutGenericSuffix = withoutBrand.replace(/\s+Agent$/i, "");
+  return compactText(withoutGenericSuffix || withoutBrand || raw || id);
+}
+
+function tweakMentionAliases(name, label, id) {
+  const aliases = new Set([name, label, id]);
+  aliases.add(String(id || "").split(".").pop() || "");
+  aliases.add(String(name || "").replace(/^ShadGPT\s+/i, ""));
+  aliases.add(String(label || "").replace(/\s+Agent$/i, ""));
+  return Array.from(aliases).map(compactText).filter(Boolean);
+}
+
+function normalizeMentionSearch(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isTextEntryElement(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  const tag = String(node.tagName || "").toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag === "input") {
+    const type = String(node.getAttribute("type") || "text").toLowerCase();
+    return !["button", "checkbox", "file", "hidden", "radio", "range", "submit"].includes(type);
+  }
+  if (node.getAttribute("contenteditable") === "true" || node.getAttribute("contenteditable") === "plaintext-only") {
+    return true;
+  }
+  return node.classList?.contains?.("ProseMirror") === true;
+}
+
+function isComposerInput(node) {
+  return Boolean(resolveComposerInput(node));
+}
+
+function resolveComposerInput(node) {
+  let current = node;
+  if (current && current.nodeType === Node.TEXT_NODE) current = current.parentElement;
+  if (!(current instanceof HTMLElement)) return null;
+  if (isTextEntryElement(current)) return current;
+
+  const closestEditable = current.closest?.(
+    "textarea, input, [contenteditable='true'], [contenteditable='plaintext-only'], .ProseMirror",
+  );
+  if (closestEditable instanceof HTMLElement && isTextEntryElement(closestEditable)) {
+    return closestEditable;
+  }
+
+  const composerRoot = current.closest?.(
+    "[data-testid*='composer' i], [aria-label*='composer' i], [aria-label*='prompt' i], form",
+  );
+  if (!(composerRoot instanceof HTMLElement)) return null;
+  const nested = composerRoot.querySelector?.(
+    "textarea, input, [contenteditable='true'], [contenteditable='plaintext-only'], .ProseMirror",
+  );
+  if (nested instanceof HTMLElement && isTextEntryElement(nested)) return nested;
+  return null;
+}
+
+function activeComposerInput() {
+  const active = document.activeElement;
+  const activeInput = resolveComposerInput(active);
+  if (activeInput) return activeInput;
+  const selection = window.getSelection?.();
+  const anchor = selection?.anchorNode;
+  return resolveComposerInput(anchor);
+}
+
+function composerTextState(target) {
+  target = resolveComposerInput(target);
+  if (!target) return null;
+  const tag = String(target.tagName || "").toLowerCase();
+  if (tag === "textarea" || tag === "input") {
+    const text = String(target.value || "");
+    const caret = typeof target.selectionStart === "number" ? target.selectionStart : text.length;
+    return { text, caret };
+  }
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0 || !target.contains(selection.anchorNode)) {
+    const text = target.textContent || "";
+    return document.activeElement === target && text ? { text, caret: text.length } : null;
+  }
+  const text = target.textContent || "";
+  const range = selection.getRangeAt(0).cloneRange();
+  range.selectNodeContents(target);
+  range.setEnd(selection.anchorNode, selection.anchorOffset);
+  return { text, caret: range.toString().length };
+}
+
+function replaceComposerRange(target, start, end, replacement) {
+  target = resolveComposerInput(target);
+  if (!target) return;
+  const mention = String(replacement || "");
+  const tag = String(target?.tagName || "").toLowerCase();
+  if (tag === "textarea" || tag === "input") {
+    const value = String(target.value || "");
+    const after = value.slice(end);
+    const suffix = after && !/^\s/.test(after) ? " " : "";
+    const next = `${value.slice(0, start)}${mention}${suffix}${after}`;
+    const caret = start + mention.length + suffix.length;
+    target.value = next;
+    if (typeof target.setSelectionRange === "function") target.setSelectionRange(caret, caret);
+    else {
+      target.selectionStart = caret;
+      target.selectionEnd = caret;
+    }
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  const selection = window.getSelection?.();
+  if (selection?.rangeCount && target.contains(selection.anchorNode)) {
+    const text = target.textContent || "";
+    const after = text.slice(end);
+    const suffix = after && !/^\s/.test(after) ? " " : "";
+    if (setTextSelectionByOffsets(target, start, end)) {
+      const inserted = `${mention}${suffix}`;
+      if (typeof document.execCommand === "function" && document.execCommand("insertText", false, inserted)) {
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      const textNode = document.createTextNode(inserted);
+      range.insertNode(textNode);
+      range.setStartAfter(textNode);
+      range.collapse(true);
+      selection.removeAllRanges?.();
+      selection.addRange?.(range);
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+  }
+  const text = target.textContent || "";
+  const after = text.slice(end);
+  const suffix = after && !/^\s/.test(after) ? " " : "";
+  target.textContent = `${text.slice(0, start)}${mention}${suffix}${after}`;
+  target.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function setTextSelectionByOffsets(root, start, end) {
+  const selection = window.getSelection?.();
+  if (!selection || typeof document.createRange !== "function") return false;
+  const range = document.createRange();
+  let offset = 0;
+  let started = false;
+  let ended = false;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.nodeValue?.length || 0;
+    const nextOffset = offset + length;
+    if (!started && start >= offset && start <= nextOffset) {
+      range.setStart(node, start - offset);
+      started = true;
+    }
+    if (!ended && end >= offset && end <= nextOffset) {
+      range.setEnd(node, end - offset);
+      ended = true;
+      break;
+    }
+    offset = nextOffset;
+    node = walker.nextNode();
+  }
+  if (!started || !ended) return false;
+  selection.removeAllRanges?.();
+  selection.addRange?.(range);
+  return true;
 }
 
 function messageMetricTitle(metric) {
