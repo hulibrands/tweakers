@@ -140,10 +140,13 @@ function startRenderer(api) {
   scheduleScan();
 
   state.observer = new MutationObserver(scheduleScan);
+  // Avoid characterData: Codex streams assistant text through text-node updates,
+  // and parsing candidate JSON on every token makes message rendering lag.
+  // Structural changes plus the periodic scan are enough to discover finished
+  // codex_ui payloads.
   state.observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
-    characterData: true,
   });
   state.interval = window.setInterval(scheduleScan, 3_000);
   window.addEventListener("focus", scheduleScan);

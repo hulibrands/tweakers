@@ -615,10 +615,6 @@ const FEATURES = {
           scheduleScan(mutation.target);
           continue;
         }
-        if (mutation.type === "characterData") {
-          scheduleScan(mutation.target);
-          continue;
-        }
         if (mutation.type === "childList") {
           for (const node of mutation.addedNodes) scheduleScan(node);
         }
@@ -627,10 +623,12 @@ const FEATURES = {
 
     const obs = new MutationObserver(onMutate);
     scanRoot(document.body || document.documentElement);
+    // No characterData: the stale-branch label is static chrome reached via
+    // childList/attribute changes, so per-streamed-token text mutations should
+    // never trigger a full-document re-scan.
     obs.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["aria-label", "title"],
-      characterData: true,
       childList: true,
       subtree: true,
     });
@@ -757,8 +755,6 @@ const FEATURES = {
       for (const mutation of mutations) {
         if (mutation.type === "childList") {
           for (const node of mutation.addedNodes) scheduleScan(node);
-        } else if (mutation.type === "characterData") {
-          scheduleScan(mutation.target.parentElement);
         } else if (mutation.type === "attributes") {
           scheduleScan(mutation.target);
         }
@@ -767,10 +763,11 @@ const FEATURES = {
 
     scanRoot(document.body || document.documentElement);
     const obs = new MutationObserver(onMutate);
+    // No characterData: hidden-element targeting keys off structure/attributes,
+    // so per-streamed-token text mutations should never trigger a re-scan.
     obs.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["aria-label", "title"],
-      characterData: true,
       childList: true,
       subtree: true,
     });
@@ -2211,19 +2208,23 @@ const FEATURES = {
     const scheduleApply = () => {
       if (scheduled) return;
       scheduled = true;
-      window.setTimeout(() => {
+      // requestAnimationFrame (not setTimeout(0)) so apply()'s two
+      // getBoundingClientRect() reads fire at most once per frame instead of on
+      // every event-loop turn during streaming.
+      window.requestAnimationFrame(() => {
         scheduled = false;
         apply();
-      }, 0);
+      });
     };
 
     clearStaleNodes();
     apply();
     const obs = new MutationObserver(scheduleApply);
+    // No characterData: the action buttons' labels are static, so per-token
+    // text mutations should never trigger a layout-reading re-apply.
     obs.observe(document.body, {
       attributes: true,
       attributeFilter: ["aria-label", "title"],
-      characterData: true,
       childList: true,
       subtree: true,
     });
@@ -5422,21 +5423,56 @@ function startLegacyBrandUiScrubber(api) {
   if (typeof document === "undefined" || !document.documentElement) return null;
   let disposed = false;
   let scheduled = false;
+  const pending = new Set();
 
-  const schedule = () => {
-    if (disposed || scheduled) return;
+  const flush = () => {
+    scheduled = false;
+    if (disposed) return;
+    const roots = [...pending];
+    pending.clear();
+    try {
+      for (const node of roots) {
+        if (node instanceof HTMLElement && node.isConnected) {
+          renameLegacyBrandInElement(node);
+        }
+      }
+    } catch (e) {
+      api.log.warn("legacy ShadGPT UI branding scrub failed", e);
+    }
+  };
+
+  const enqueue = (node) => {
+    if (node instanceof HTMLElement) pending.add(node);
+    else if (node && node.parentElement) pending.add(node.parentElement);
+  };
+
+  // Scrub only the subtrees that actually changed instead of re-scanning the
+  // entire document every frame, and ignore characterData: legacy brand text
+  // lives in static UI labels/attributes delivered via childList/attribute
+  // mutations, so per-token streaming text never needs a rescan. The old
+  // implementation ran querySelectorAll(LEGACY_BRAND_UI_SELECTOR) over the
+  // whole document on every animation frame during streaming.
+  const schedule = (records) => {
+    if (disposed) return;
+    if (records) {
+      for (const rec of records) {
+        if (rec.type === "attributes") enqueue(rec.target);
+        else if (rec.type === "childList") {
+          for (const node of rec.addedNodes) enqueue(node);
+        }
+      }
+    } else {
+      enqueue(document.documentElement);
+    }
+    if (scheduled || pending.size === 0) return;
     scheduled = true;
-    window.requestAnimationFrame(() => {
-      scheduled = false;
-      scrubLegacyBrandUi(api);
-    });
+    window.requestAnimationFrame(flush);
   };
 
   const observer = new MutationObserver(schedule);
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
-    characterData: true,
     attributes: true,
     attributeFilter: ["aria-label", "title", "placeholder", "value"],
   });
@@ -5446,16 +5482,8 @@ function startLegacyBrandUiScrubber(api) {
   return () => {
     disposed = true;
     observer.disconnect();
+    pending.clear();
   };
-}
-
-function scrubLegacyBrandUi(api) {
-  try {
-    const roots = Array.from(document.querySelectorAll(LEGACY_BRAND_UI_SELECTOR));
-    for (const root of roots) renameLegacyBrandInElement(root);
-  } catch (e) {
-    api.log.warn("legacy ShadGPT UI branding scrub failed", e);
-  }
 }
 
 const LEGACY_BRAND_UI_SELECTOR = [
@@ -5755,42 +5783,57 @@ function legacyBrandMainInjectionScript() {
     const KEY = "__shadgptLegacyVisibleBrandScrubber";
     const pattern = /${LEGACY_BRAND_TOKEN}|Codex\\+\\+/gi;
     const normalize = (value) => String(value || "").replace(pattern, "ShadGPT");
-    const scrubNode = (root) => {
-      if (!root) return;
-      const attrs = ["aria-label", "title", "placeholder"];
-      const elements = root.querySelectorAll ? [root, ...root.querySelectorAll("*")] : [root];
-      for (const el of elements) {
-        if (!el || typeof el.getAttribute !== "function") continue;
-        for (const attr of attrs) {
-          const value = el.getAttribute(attr);
-          if (value && pattern.test(value)) el.setAttribute(attr, normalize(value));
-          pattern.lastIndex = 0;
-        }
-      }
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      while (walker.nextNode()) {
-        const node = walker.currentNode;
-        if (node.parentElement?.closest("input, textarea, [contenteditable='true'], [contenteditable='plaintext-only']")) continue;
-        const value = node.nodeValue || "";
-        if (pattern.test(value)) node.nodeValue = normalize(value);
+    const scrubText = (node) => {
+      if (!node) return;
+      if (node.parentElement?.closest("input, textarea, [contenteditable='true'], [contenteditable='plaintext-only']")) return;
+      const value = node.nodeValue || "";
+      if (pattern.test(value)) node.nodeValue = normalize(value);
+      pattern.lastIndex = 0;
+    };
+    const scrubEl = (el) => {
+      if (!el || typeof el.getAttribute !== "function") return;
+      for (const attr of ["aria-label", "title", "placeholder"]) {
+        const value = el.getAttribute(attr);
+        if (value && pattern.test(value)) el.setAttribute(attr, normalize(value));
         pattern.lastIndex = 0;
       }
     };
+    const scrubNode = (root) => {
+      if (!root) return;
+      if (root.nodeType === 3) { scrubText(root); return; }
+      if (root.nodeType !== 1) return;
+      scrubEl(root);
+      if (root.querySelectorAll) for (const el of root.querySelectorAll("*")) scrubEl(el);
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) scrubText(walker.currentNode);
+    };
     if (!window[KEY]) {
+      const pending = new Set();
       let scheduled = false;
-      const schedule = () => {
-        if (scheduled) return;
+      const flush = () => {
+        scheduled = false;
+        const roots = [...pending];
+        pending.clear();
+        for (const root of roots) { try { scrubNode(root); } catch (e) {} }
+      };
+      const enqueue = (node) => {
+        if (node && (node.nodeType === 1 || node.nodeType === 3)) pending.add(node);
+      };
+      // Scrub only changed subtrees, not the whole document each frame, and
+      // drop characterData so per-streamed-token text never triggers a rescan.
+      const schedule = (records) => {
+        for (const rec of records) {
+          if (rec.type === "attributes") enqueue(rec.target);
+          else if (rec.type === "childList") { for (const node of rec.addedNodes) enqueue(node); }
+        }
+        if (scheduled || pending.size === 0) return;
         scheduled = true;
-        requestAnimationFrame(() => {
-          scheduled = false;
-          scrubNode(document.documentElement);
-        });
+        requestAnimationFrame(flush);
       };
       const observer = new MutationObserver(schedule);
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
-        characterData: true,
         attributes: true,
         attributeFilter: ["aria-label", "title", "placeholder"]
       });

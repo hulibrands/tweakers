@@ -298,7 +298,11 @@ async function injectProfilesSection(rootDocument, api) {
   try {
     summary = await api.ipc.invoke(IPC_GET_SUMMARY, context);
   } catch {
-    summary = { projectPath: context.projectPath || "", projectName: context.projectName || "", rows: buildProfileRows("", "", {}) };
+    // Renderer fallback: buildProfileRows reads local storage via require("node:fs"),
+    // which is undefined in the browser context and threw "require is not defined",
+    // aborting every injection. The renderer can't read files anyway — degrade to
+    // empty rows (the panel is removed when rows.length === 0).
+    summary = { projectPath: context.projectPath || "", projectName: context.projectName || "", rows: [] };
   }
   const rows = Array.isArray(summary.rows) ? summary.rows.map(normalizeProfileRow).filter((row) => row.state !== "unset") : [];
   let count = 0;
@@ -353,7 +357,7 @@ function createProfilesSection(summary = {}, options = {}) {
   title.textContent = "Profiles";
   section.appendChild(title);
 
-  const rows = Array.isArray(summary.rows) ? summary.rows.map(normalizeProfileRow).filter((row) => row.state !== "unset") : buildProfileRows("", "", {});
+  const rows = Array.isArray(summary.rows) ? summary.rows.map(normalizeProfileRow).filter((row) => row.state !== "unset") : [];
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "codexpp-thread-summary-profiles__empty";
