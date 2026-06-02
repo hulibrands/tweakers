@@ -26,6 +26,6 @@
     "args": [
       "./mcp-server.js"
     ],
-    "enabledByDefault": true
+    "enabledByDefault": false
   }
 }
