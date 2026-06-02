@@ -3873,12 +3873,6 @@ const FEATURES = {
     const ATTR = "data-codexpp-sidebar-project-backgrounds";
     const MENU_ATTR = "data-codexpp-sidebar-project-color-menu";
     const COLOR_STORAGE_KEY = PROJECT_COLOR_STORAGE_KEY;
-    const EXCLUDED_PROJECT_IDS = new Set([
-      "cloud:therealityreport/trr-app",
-      "cloud:therealityreport/screenalytics",
-    ]);
-    const CLOUD_PROJECT_PREFIX = "cloud:";
-    const EXCLUDED_PROJECT_LABELS = new Set(["trr-app", "screenalytics"]);
     const ASIDE_SELECTOR = [
       "aside.pointer-events-auto.relative.flex.overflow-hidden",
       "aside.pointer-events-auto.relative.flex.overflow-visible",
@@ -4177,14 +4171,6 @@ const FEATURES = {
       [${MENU_ATTR}="trigger"] {
         color: var(--color-token-foreground);
       }
-
-      div[role="listitem"][aria-label="trr-app"],
-      div[role="listitem"][aria-label="screenalytics"],
-      div[role="listitem"]:has([data-app-action-sidebar-project-id^="cloud:"]),
-      div[role="listitem"]:has([data-app-action-sidebar-project-id="cloud:therealityreport/trr-app"]),
-      div[role="listitem"]:has([data-app-action-sidebar-project-id="cloud:therealityreport/screenalytics"]) {
-        display: none !important;
-      }
     `;
     document.head.appendChild(style);
 
@@ -4228,24 +4214,10 @@ const FEATURES = {
       const text = labelFor(node);
       if (!text || text.length < 2 || text.length > 80) return false;
       if (EXCLUDED_LABELS.has(text)) return false;
-      if (isExcludedProjectRow(node)) return false;
 
       const action = node.querySelector("[role='button'][aria-label]");
       return action instanceof HTMLElement && labelFor(action) === text;
     };
-
-    const isExcludedProjectRow = (node) => {
-      if (!(node instanceof HTMLElement)) return false;
-      if (EXCLUDED_PROJECT_LABELS.has(labelFor(node))) return true;
-      const action = node.querySelector("[data-app-action-sidebar-project-id]");
-      const projectId = action instanceof HTMLElement
-        ? action.getAttribute("data-app-action-sidebar-project-id")
-        : null;
-      return Boolean(projectId && (isCloudProjectId(projectId) || EXCLUDED_PROJECT_IDS.has(projectId)));
-    };
-
-    const isCloudProjectId = (projectId) =>
-      typeof projectId === "string" && projectId.trim().toLowerCase().startsWith(CLOUD_PROJECT_PREFIX);
 
     const candidateRows = (sidebar) =>
       Array.from(sidebar.querySelectorAll("div[role='listitem'][aria-label]"))
@@ -5175,10 +5147,6 @@ const FEATURES = {
       if (!sidebar) {
         return;
       }
-
-      sidebar.querySelectorAll("div[role='listitem'][aria-label]").forEach((row) => {
-        if (isExcludedProjectRow(row)) clearRowMarks(row);
-      });
 
       let rows = candidateRows(sidebar);
       rows = rows.filter((node, index) => rows.indexOf(node) === index);

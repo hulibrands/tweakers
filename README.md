@@ -7,15 +7,22 @@ This repository exists for users who want individual tweaks without installing o
 ## Tweaks
 
 - `account-switcher` - Easy Account Switcher
+- `add-project-by-path` - ShadGPT Add Project by Path
 - `better-browser-agent` - Better Browser Agent
+- `codex-chat-ui` - ShadGPT Codex Chat UI
 - `followup` - Codex Follow-up
 - `github-accounts` - GitHub Accounts
 - `mode-switcher` - Mode Switcher
-- `project-chrome-profile` - Plugin Profiles
+- `projects` - ShadGPT Projects
 - `shadcn-codex-ui` - Shadcn Codex UI
+- `thread-summary-profiles` - ShadGPT Thread Summary Profiles
 - `titlebar-controls` - Titlebar Controls
 - `tweaks-directory` - Tweaks Directory
 - `ui-improvements` - UI Improvements
+
+## Retired Tweaks
+
+- `retired/project-chrome-profile` - Legacy Plugin Profiles code retained for migration reference. Its Chrome profile assignment behavior now lives in `projects`, and the active store no longer exposes it as a separate tweak.
 
 ## Install A Tweak
 
@@ -31,4 +38,3 @@ Then reload Codex++ or use Force Reload from the Tweaks page.
 ## Compatibility
 
 These folders are copied from the Codex++ project and kept usable as ordinary Codex++ tweaks. The public repository metadata points back to `hulibrands/tweakers`, while individual manifests retain their tweak ids so existing Codex++ installs can continue to recognize them.
-

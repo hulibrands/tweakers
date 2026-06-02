@@ -112,6 +112,8 @@ module.exports = {
     state.disposed = true;
     state.observer?.disconnect();
     if (state.interval) window.clearInterval(state.interval);
+    if (state.startupSyncTimer) window.clearTimeout(state.startupSyncTimer);
+    state.startupSyncTimer = null;
     window.removeEventListener("focus", state.scheduleScan);
     document.removeEventListener("visibilitychange", state.scheduleScan);
     state.pageHandle?.unregister?.();
@@ -162,6 +164,7 @@ function startRenderer(api) {
     ),
     observer: null,
     interval: null,
+    startupSyncTimer: null,
     disposed: false,
     scheduled: false,
     pageHandle: null,
@@ -209,7 +212,10 @@ function startRenderer(api) {
   this._state = state;
 
   if (state.syncAgents) {
-    window.setTimeout(() => syncAgentsInstruction(state, { quiet: true }), 1_500);
+    state.startupSyncTimer = window.setTimeout(() => {
+      state.startupSyncTimer = null;
+      if (!state.disposed) syncAgentsInstruction(state, { quiet: true });
+    }, 1_500);
   }
 
   api.log.info("Codex Follow-up renderer active");
@@ -511,20 +517,11 @@ function renderRadarPanel({ title, items, showDivider, clickableItems, pending }
   const selected = new Set();
 
   const syncSelection = () => {
-    const value = Array.from(selected)
-      .sort((a, b) => a - b)
-      .map((index) => visibleItems[index]?.prompt)
-      .map((prompt, index) => prompt ? `${index + 1}. ${prompt}` : "")
-      .filter(Boolean)
-      .join("\n");
-
     list.querySelectorAll(".soren-radar-row").forEach((row, index) => {
       const isSelected = selected.has(index);
       row.classList.toggle("soren-radar-row-selected", isSelected);
       row.setAttribute("aria-checked", String(isSelected));
     });
-
-    insertIntoComposer(value);
   };
 
   visibleItems.forEach((item, index) => {
@@ -539,8 +536,12 @@ function renderRadarPanel({ title, items, showDivider, clickableItems, pending }
       row.setAttribute("role", "checkbox");
       row.setAttribute("aria-checked", "false");
       row.addEventListener("click", () => {
-        if (selected.has(index)) selected.delete(index);
-        else selected.add(index);
+        if (selected.has(index)) {
+          selected.delete(index);
+        } else {
+          selected.add(index);
+          insertIntoComposer(item.prompt);
+        }
         syncSelection();
       });
     }
@@ -585,24 +586,129 @@ function renderRadarPanel({ title, items, showDivider, clickableItems, pending }
 
 function insertIntoComposer(text) {
   const value = String(text || "").trim();
+  if (!value) return;
 
-  const textarea = document.querySelector("textarea");
-  if (textarea instanceof HTMLTextAreaElement) {
-    textarea.focus();
-    textarea.value = value;
-    textarea.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  const control = findComposerControl();
+  if (control instanceof HTMLTextAreaElement) {
+    control.focus();
+    insertIntoTextControl(control, value);
     return;
   }
 
-  const editable = document.querySelector('[contenteditable="true"]');
-  if (editable instanceof HTMLElement) {
-    editable.focus();
-    editable.innerText = value;
-    editable.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  if (control instanceof HTMLElement) {
+    control.focus();
+    insertIntoContentEditable(control, value);
     return;
   }
 
-  if (value) navigator.clipboard?.writeText(value).catch(() => {});
+  navigator.clipboard?.writeText(value).catch(() => {});
+}
+
+function findComposerControl() {
+  const selectors = [
+    "textarea[aria-label*='message' i]",
+    "textarea[placeholder*='message' i]",
+    "textarea[name*='message' i]",
+    "[data-testid*='composer' i] textarea",
+    "[data-testid*='prompt' i] textarea",
+    "[aria-label*='message' i][contenteditable='true']",
+    "[aria-label*='message' i][contenteditable='plaintext-only']",
+    "[data-testid*='composer' i] [contenteditable='true']",
+    "[data-testid*='composer' i] [contenteditable='plaintext-only']",
+    "[data-testid*='prompt' i] [contenteditable='true']",
+    "[data-testid*='prompt' i] [contenteditable='plaintext-only']",
+    "form textarea",
+    "main textarea",
+    "textarea",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']",
+  ];
+
+  for (const selector of selectors) {
+    const candidate = Array.from(document.querySelectorAll(selector)).find(isUsableComposerControl);
+    if (candidate) return candidate;
+  }
+
+  return null;
+}
+
+function isUsableComposerControl(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  if (node.hidden || node.getAttribute("aria-hidden") === "true") return false;
+  if (node instanceof HTMLTextAreaElement) return !node.disabled && !node.readOnly;
+  const editable = node.getAttribute("contenteditable");
+  return editable === "true" || editable === "plaintext-only";
+}
+
+function insertIntoTextControl(textarea, insertion) {
+  const current = String(textarea.value || "");
+  const hasSelection = typeof textarea.selectionStart === "number" &&
+    typeof textarea.selectionEnd === "number";
+
+  if (hasSelection) {
+    const start = Math.max(0, Math.min(textarea.selectionStart, current.length));
+    const end = Math.max(start, Math.min(textarea.selectionEnd, current.length));
+    const next = insertWithSpacing(current, insertion, start, end);
+    textarea.value = next.value;
+    textarea.setSelectionRange?.(next.cursor, next.cursor);
+  } else {
+    textarea.value = appendWithSpacing(current, insertion);
+    const cursor = textarea.value.length;
+    textarea.setSelectionRange?.(cursor, cursor);
+  }
+
+  dispatchComposerInput(textarea, insertion);
+}
+
+function insertIntoContentEditable(editable, insertion) {
+  const selection = document.getSelection?.();
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+
+  if (range && editable.contains(range.commonAncestorContainer)) {
+    const beforeText = range.startContainer?.textContent || "";
+    const afterText = range.endContainer?.textContent || "";
+    const before = beforeText.slice(0, range.startOffset || 0);
+    const after = afterText.slice(range.endOffset || 0);
+    const prefix = before && !/\s$/.test(before) ? "\n\n" : "";
+    const suffix = after && !/^\s/.test(after) ? "\n\n" : "";
+    const node = document.createTextNode(`${prefix}${insertion}${suffix}`);
+    range.deleteContents();
+    range.insertNode(node);
+    range.setStartAfter?.(node);
+    range.collapse?.(true);
+    selection.removeAllRanges?.();
+    selection.addRange?.(range);
+  } else {
+    editable.innerText = appendWithSpacing(editable.innerText || editable.textContent || "", insertion);
+  }
+
+  dispatchComposerInput(editable, insertion);
+}
+
+function appendWithSpacing(current, insertion) {
+  const base = String(current || "").replace(/\s+$/u, "");
+  return `${base}${base ? "\n\n" : ""}${insertion}`;
+}
+
+function insertWithSpacing(current, insertion, start, end) {
+  const before = current.slice(0, start);
+  const after = current.slice(end);
+  const prefix = before && !/\s$/.test(before) ? "\n\n" : "";
+  const suffix = after && !/^\s/.test(after) ? "\n\n" : "";
+  const inserted = `${prefix}${insertion}${suffix}`;
+  return {
+    value: `${before}${inserted}${after}`,
+    cursor: before.length + inserted.length,
+  };
+}
+
+function dispatchComposerInput(target, data) {
+  const event = typeof InputEvent === "function"
+    ? new InputEvent("input", { bubbles: true, inputType: "insertText", data })
+    : typeof Event === "function"
+      ? new Event("input", { bubbles: true })
+      : null;
+  if (event) target.dispatchEvent(event);
 }
 
 function clearPanels() {

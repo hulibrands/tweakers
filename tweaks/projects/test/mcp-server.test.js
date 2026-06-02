@@ -9,10 +9,13 @@ const test = require("node:test");
 
 const SERVER = path.join(__dirname, "..", "mcp-server.js");
 
-async function runServer(lines, store) {
+async function runServer(lines, store, legacyChromeStore = null) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "projects-mcp-"));
   await fs.mkdir(path.join(root, "storage"), { recursive: true });
   await fs.writeFile(path.join(root, "storage", "co.thomashulihan.projects.json"), JSON.stringify(store));
+  if (legacyChromeStore) {
+    await fs.writeFile(path.join(root, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify(legacyChromeStore));
+  }
 
   const child = spawn(process.execPath, [SERVER], {
     env: { ...process.env, CODEX_PLUSPLUS_USER_ROOT: root },
@@ -72,6 +75,91 @@ test("Projects MCP resolves Gmail and Google Drive assignments for cwd children"
   assert.equal(payload.env.CODEX_PROJECT_GOOGLE_DRIVE_ACCOUNT, "thomas@hulibrands.com");
   assert.match(payload.instructions.join("\n"), /@gmail/);
   assert.match(payload.instructions.join("\n"), /@google-drive/);
+});
+
+test("Projects MCP resolves Chrome assignments for exact and child paths", async () => {
+  const projectPath = path.join(os.tmpdir(), "projects-mcp-chrome");
+  const childPath = path.join(projectPath, "apps", "web");
+  const preferencesPath = path.join(os.tmpdir(), "Chrome", "Profile 8", "Preferences");
+  const result = await runServer(
+    [
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "projects_chrome_profile_resolve",
+          arguments: { projectPath },
+        },
+      }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "projects_connections_resolve",
+          arguments: { projectPath: childPath },
+        },
+      }),
+    ],
+    {
+      chromeAssignments: {
+        [projectPath]: {
+          projectPath,
+          profileDirectory: "Profile 8",
+          profileName: "TRR",
+          preferencesPath,
+          preferencesPaths: [preferencesPath],
+        },
+      },
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const exact = JSON.parse(result.messages[0].result.content[0].text);
+  const child = JSON.parse(result.messages[1].result.content[0].text);
+  assert.equal(exact.matched, true);
+  assert.equal(exact.assignment.profileName, "TRR");
+  assert.equal(exact.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
+  assert.equal(child.matched, true);
+  assert.equal(child.assignment.chrome.projectPath, projectPath);
+  assert.equal(child.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
+  assert.match(child.instructions.join("\n"), /@Chrome/);
+});
+
+test("Projects MCP falls back to legacy Plugin Profiles Chrome storage", async () => {
+  const projectPath = path.join(os.tmpdir(), "projects-mcp-legacy-chrome");
+  const preferencesPath = path.join(os.tmpdir(), "Chrome", "Profile 2", "Preferences");
+  const result = await runServer(
+    [
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "projects_chrome_profile_resolve",
+          arguments: { projectPath: path.join(projectPath, "packages", "ui") },
+        },
+      }),
+    ],
+    {},
+    {
+      assignments: {
+        [projectPath]: {
+          projectPath,
+          profileDirectory: "Profile 2",
+          profileName: "Legacy",
+          preferencesPath,
+        },
+      },
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const payload = JSON.parse(result.messages[0].result.content[0].text);
+  assert.equal(payload.matched, true);
+  assert.equal(payload.assignment.projectPath, projectPath);
+  assert.equal(payload.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
 });
 
 test("Projects MCP can resolve a single Google Workspace service", async () => {
