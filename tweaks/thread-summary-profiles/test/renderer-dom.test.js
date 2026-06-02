@@ -3,6 +3,46 @@ const test = require("node:test");
 
 const tweak = require("../index.js").__test;
 
+test("renderer registers a lightweight Settings page", () => {
+  const restore = installFakeDom();
+  try {
+    let registered = null;
+    let unregistered = false;
+    const cleanup = [];
+    const api = {
+      settings: {
+        registerPage(options) {
+          registered = options;
+          return {
+            unregister() {
+              unregistered = true;
+            },
+          };
+        },
+      },
+      log: { warn() {} },
+    };
+
+    const handle = tweak.registerSettingsPage(api, cleanup);
+
+    assert.ok(handle);
+    assert.equal(registered.id, "main");
+    assert.equal(registered.title, "Thread Summary Profiles");
+    assert.equal(typeof registered.render, "function");
+    assert.equal(cleanup.length, 1);
+
+    const root = document.createElement("div");
+    registered.render(root);
+    assert.match(root.textContent, /Profiles section/);
+    assert.match(root.textContent, /Enabled/);
+
+    cleanup[0]();
+    assert.equal(unregistered, true);
+  } finally {
+    restore();
+  }
+});
+
 test("renderer inserts Profiles once and replaces stale content", async () => {
   const restore = installFakeDom();
   try {

@@ -5,6 +5,12 @@ const path = require("node:path");
 const test = require("node:test");
 
 const tweak = require("../index.js").__test;
+const manifest = require("../manifest.json");
+
+test("manifest declares settings permission for the registered settings page", () => {
+  assert.ok(Array.isArray(manifest.permissions));
+  assert.ok(manifest.permissions.includes("settings"));
+});
 
 test("resolver emits all six profile rows in stable order with local metadata", () => {
   const root = tempDir();
@@ -19,8 +25,8 @@ test("resolver emits all six profile rows in stable order with local metadata", 
     "url = \"https://mcp.supabase.com/mcp?project_ref=abc123&features=database,docs\"",
     "bearer_token_env_var = \"SUPABASE_ACCESS_TOKEN\"",
   ].join("\n"), "utf8");
-  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify({
-    assignments: {
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    chromeAssignments: {
       [projectPath]: {
         profileName: "Work",
         profileDirectory: "Profile 7",
@@ -28,8 +34,6 @@ test("resolver emits all six profile rows in stable order with local metadata", 
         updatedAt: "2026-05-28T12:00:00.000Z",
       },
     },
-  }), "utf8");
-  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
     googleWorkspaceAssignments: {
       [projectPath]: {
         gmail: { email: "mail@example.test", source: "manual", updatedAt: "2026-05-28T12:00:00.000Z" },
@@ -126,6 +130,61 @@ test("resolver infers the only configured project when renderer context is missi
 
   assert.equal(summary.projectPath, projectPath);
   assert.equal(summary.rows[0].value, "Only Profile");
+});
+
+test("Chrome summary prefers Projects storage and ignores cleared legacy assignments", () => {
+  const root = tempDir();
+  const projectPath = path.join(root, "repo");
+  const userRoot = path.join(root, "codex-plusplus");
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify({
+    assignments: {
+      [projectPath]: {
+        profileName: "Legacy Profile",
+        profileDirectory: "Profile 1",
+      },
+    },
+  }), "utf8");
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    chromeAssignments: {
+      [projectPath]: {
+        profileName: "Projects Profile",
+        profileDirectory: "Profile 9",
+      },
+    },
+  }), "utf8");
+
+  const summary = tweak.buildThreadProfileSummary({ projectPath }, {
+    fs,
+    os,
+    path,
+    userRoot,
+    home: root,
+    skipModalCli: true,
+    childProcess: { execFileSync: () => "" },
+  });
+
+  assert.equal(summary.rows[0].value, "Projects Profile");
+
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    chromeAssignments: {},
+    chromeAssignmentClears: {
+      [projectPath]: "2026-06-01T00:00:00.000Z",
+    },
+  }), "utf8");
+
+  const cleared = tweak.buildThreadProfileSummary({ projectPath }, {
+    fs,
+    os,
+    path,
+    userRoot,
+    home: root,
+    skipModalCli: true,
+    childProcess: { execFileSync: () => "" },
+  });
+
+  assert.deepEqual(cleared.rows, []);
 });
 
 test("modal row warns when active CLI context differs from assignment", () => {

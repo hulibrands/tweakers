@@ -14,6 +14,7 @@ const CHANNELS = {
   getTweakFileTree: "get-tweak-file-tree",
   getPluginFileTree: "get-plugin-file-tree",
   getPluginStatuses: "get-plugin-statuses",
+  getForkLineageMetadata: "get-fork-lineage-metadata",
 };
 
 const STORE_FILTERS = [
@@ -34,6 +35,8 @@ const DEFAULT_PREFS = {
   nativePatchesSafeMode: false,
   nativePluginStatusBadges: true,
 };
+const FORK_LINEAGE_CACHE_TTL_MS = 30 * 60 * 1000;
+const forkLineageCache = new Map();
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
@@ -90,6 +93,7 @@ function startMain(api) {
       return manager.getPluginFileTree(String(id || ""), options && typeof options === "object" ? options : {});
     }),
     api.ipc.handle(CHANNELS.getPluginStatuses, () => getRuntimePluginStatuses()),
+    api.ipc.handle(CHANNELS.getForkLineageMetadata, (payload) => getForkLineageMetadata(payload)),
   ];
 
   return () => cleanups.forEach((cleanup) => cleanup());
@@ -124,6 +128,144 @@ function readInstalledTweakIconAsset(manager, id, relPath) {
   } catch {
     return null;
   }
+}
+
+async function getForkLineageMetadata(payload) {
+  const manifests = Array.isArray(payload && payload.manifests) ? payload.manifests : [];
+  const storeEntries = Array.isArray(payload && payload.storeEntries) ? payload.storeEntries : [];
+  const byId = Object.create(null);
+  await Promise.all(manifests.map(async (manifest) => {
+    const base = normalizeForkLineage(manifest, {
+      storeEntries,
+      remote: readCachedForkLineage(manifest),
+    });
+    if (!base.hasFork) return;
+    let remote = readCachedForkLineage(manifest);
+    if (!base.latestVersion && !base.sourceMissing && base.upstreamGithubRepo && !remote) {
+      remote = await fetchAndCacheForkLineage(manifest);
+    }
+    byId[base.tweakId] = normalizeForkLineage(manifest, { storeEntries, remote });
+  }));
+  return {
+    status: "ok",
+    cachedAt: Date.now(),
+    byId,
+  };
+}
+
+function readCachedForkLineage(manifest) {
+  const key = forkLineageCacheKey(manifest);
+  if (!key) return null;
+  const entry = forkLineageCache.get(key);
+  if (!entry || Date.now() - entry.cachedAt > FORK_LINEAGE_CACHE_TTL_MS) {
+    if (entry) forkLineageCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+async function fetchAndCacheForkLineage(manifest) {
+  const key = forkLineageCacheKey(manifest);
+  if (!key) return null;
+  const value = await fetchUpstreamForkLineage(manifest).catch((error) => ({
+    status: "unknown",
+    message: errorMessage(error),
+  }));
+  forkLineageCache.set(key, {
+    cachedAt: Date.now(),
+    value,
+  });
+  return value;
+}
+
+function forkLineageCacheKey(manifest) {
+  const fork = manifest && manifest.forkOf || {};
+  const repo = cleanRepoSlug(fork.upstreamGithubRepo);
+  const id = cleanText(fork.upstreamId);
+  if (!repo && !id) return "";
+  return `${id}|${repo}`;
+}
+
+async function fetchUpstreamForkLineage(manifest) {
+  const fork = manifest && manifest.forkOf || {};
+  const repo = cleanRepoSlug(fork.upstreamGithubRepo);
+  if (!repo) return { status: "source-missing", message: "No upstream GitHub repository is recorded." };
+  const candidates = upstreamManifestUrls(repo);
+  const errors = [];
+  for (const url of candidates) {
+    try {
+      const text = await fetchText(url, 7000);
+      const json = JSON.parse(text);
+      const upstreamManifest = json && json.manifest && typeof json.manifest === "object" ? json.manifest : json;
+      const version = cleanVersion(upstreamManifest && upstreamManifest.version);
+      if (version) {
+        return {
+          status: "ok",
+          latestVersion: version,
+          source: "github",
+          sourceUrl: url,
+        };
+      }
+      errors.push(`No version in ${url}`);
+    } catch (error) {
+      errors.push(errorMessage(error));
+    }
+  }
+  return {
+    status: "unknown",
+    message: errors[0] || "Could not read upstream manifest.",
+  };
+}
+
+function upstreamManifestUrls(repo) {
+  const safeRepo = cleanRepoSlug(repo);
+  if (!safeRepo) return [];
+  return [
+    `https://raw.githubusercontent.com/${safeRepo}/HEAD/manifest.json`,
+    `https://raw.githubusercontent.com/${safeRepo}/main/manifest.json`,
+    `https://raw.githubusercontent.com/${safeRepo}/master/manifest.json`,
+  ];
+}
+
+function fetchText(url, timeoutMs) {
+  if (typeof fetch === "function") {
+    const AbortControllerCtor = typeof AbortController === "function" ? AbortController : null;
+    const controller = AbortControllerCtor ? new AbortControllerCtor() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    return fetch(url, { signal: controller && controller.signal }).then(async (response) => {
+      if (timer) clearTimeout(timer);
+      if (!response || !response.ok) throw new Error(`HTTP ${response && response.status || "error"} for ${url}`);
+      return response.text();
+    }).catch((error) => {
+      if (timer) clearTimeout(timer);
+      throw error;
+    });
+  }
+  return fetchTextWithHttps(url, timeoutMs);
+}
+
+function fetchTextWithHttps(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const https = require("node:https");
+    const req = https.get(url, { headers: { "user-agent": "codex-plusplus-tweaks-directory" } }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        return;
+      }
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > 1024 * 1024) {
+          req.destroy(new Error("Upstream manifest is too large."));
+        }
+      });
+      res.on("end", () => resolve(body));
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("Timed out reading upstream manifest.")));
+    req.on("error", reject);
+  });
 }
 
 function getRuntimePluginStatuses(options = {}) {
@@ -305,6 +447,7 @@ function startRenderer(api) {
     preferences: readPreferences(api),
     pluginStatuses: { status: "idle", items: [], byKey: Object.create(null) },
     pluginStatusToken: 0,
+    forkLineage: { status: "idle", byId: Object.create(null), token: 0, message: "" },
     observerTimer: null,
     loadToken: 0,
     settingsPageHandle: null,
@@ -2221,6 +2364,8 @@ async function loadData(state, forceStore) {
     if (!state.active || state.loadToken !== token) return;
     syncDetailFromLocation(state, false);
     state.status = "";
+    seedForkLineageMetadata(state);
+    void loadForkLineageMetadata(state, token);
   } catch (error) {
     if (!state.active || state.loadToken !== token) return;
     state.status = error && error.message ? error.message : String(error);
@@ -2342,13 +2487,13 @@ function visibleRows(state) {
   for (const item of state.installed) {
     if (shouldHideForkedUpstreamRow(item, hiddenForkedUpstreamIds)) continue;
     const storeEntry = storeEntries.find((entry) => entry.id === item.manifest.id) || null;
-    rows.push({ type: "installed", installed: item, store: storeEntry, manifest: item.manifest });
+    rows.push(withForkLineage(state, { type: "installed", installed: item, store: storeEntry, manifest: item.manifest }));
   }
 
   for (const entry of storeEntries) {
     if (installedById.has(entry.id)) continue;
     if (hiddenForkedUpstreamIds.has(entry.id)) continue;
-    rows.push({ type: "store", installed: null, store: entry, manifest: entry.manifest });
+    rows.push(withForkLineage(state, { type: "store", installed: null, store: entry, manifest: entry.manifest }));
   }
 
   const query = state.query.trim().toLowerCase();
@@ -2366,6 +2511,233 @@ function visibleRows(state) {
     ].filter(Boolean).join(" ").toLowerCase();
     return haystack.includes(query);
   });
+}
+
+function withForkLineage(state, row) {
+  const remote = state.forkLineage && state.forkLineage.byId && row.manifest
+    ? state.forkLineage.byId[row.manifest.id]
+    : null;
+  return {
+    ...row,
+    forkLineage: normalizeForkLineage(row.manifest, {
+      storeEntries: state.store && Array.isArray(state.store.entries) ? state.store.entries : [],
+      remote,
+    }),
+  };
+}
+
+function seedForkLineageMetadata(state) {
+  const storeEntries = state.store && Array.isArray(state.store.entries) ? state.store.entries : [];
+  const byId = Object.create(null);
+  for (const manifest of forkLineageManifestPayload(state)) {
+    const metadata = normalizeForkLineage(manifest, { storeEntries });
+    if (metadata.hasFork) byId[metadata.tweakId] = metadata;
+  }
+  state.forkLineage = {
+    status: "local",
+    byId,
+    token: state.forkLineage && state.forkLineage.token || 0,
+    message: "",
+  };
+}
+
+async function loadForkLineageMetadata(state, loadToken) {
+  const manifests = forkLineageManifestPayload(state);
+  if (!manifests.length || !state.api.ipc || typeof state.api.ipc.invoke !== "function") return;
+  const token = (state.forkLineage && state.forkLineage.token || 0) + 1;
+  state.forkLineage = {
+    ...(state.forkLineage || {}),
+    status: "loading",
+    token,
+    message: "",
+  };
+  render(state);
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getForkLineageMetadata, {
+      manifests,
+      storeEntries: state.store && Array.isArray(state.store.entries) ? state.store.entries : [],
+    });
+    if (!state.active || state.loadToken !== loadToken || state.forkLineage.token !== token) return;
+    const normalized = normalizeForkLineageResult(result, manifests, state.store && state.store.entries);
+    state.forkLineage = {
+      status: normalized.status,
+      byId: normalized.byId,
+      token,
+      message: normalized.message,
+    };
+  } catch (error) {
+    if (!state.active || state.loadToken !== loadToken || state.forkLineage.token !== token) return;
+    state.forkLineage = {
+      ...(state.forkLineage || {}),
+      status: "error",
+      token,
+      message: errorMessage(error),
+    };
+    state.api.log.warn(`Tweaks Directory fork lineage metadata load failed: ${errorMessage(error)}`);
+  } finally {
+    if (state.active && state.loadToken === loadToken && state.forkLineage.token === token) render(state);
+  }
+}
+
+function forkLineageManifestPayload(state) {
+  const manifests = [];
+  const seen = new Set();
+  for (const item of state.installed || []) {
+    const manifest = item && item.manifest;
+    if (!manifest || !manifest.id || !manifest.forkOf || seen.has(manifest.id)) continue;
+    seen.add(manifest.id);
+    manifests.push(manifest);
+  }
+  const storeEntries = state.store && Array.isArray(state.store.entries) ? state.store.entries : [];
+  for (const entry of storeEntries) {
+    const manifest = entry && entry.manifest;
+    if (!manifest || !manifest.id || !manifest.forkOf || seen.has(manifest.id)) continue;
+    seen.add(manifest.id);
+    manifests.push(manifest);
+  }
+  return manifests;
+}
+
+function normalizeForkLineageResult(result, manifests, storeEntries) {
+  const incoming = result && result.byId && typeof result.byId === "object" ? result.byId : {};
+  const byId = Object.create(null);
+  for (const manifest of manifests || []) {
+    const metadata = normalizeForkLineage(manifest, {
+      storeEntries: Array.isArray(storeEntries) ? storeEntries : [],
+      remote: incoming[manifest.id],
+    });
+    if (metadata.hasFork) byId[metadata.tweakId] = metadata;
+  }
+  return {
+    status: result && result.status || "ok",
+    byId,
+    message: result && typeof result.message === "string" ? result.message : "",
+  };
+}
+
+function normalizeForkLineage(manifest, options = {}) {
+  const fork = manifest && manifest.forkOf && typeof manifest.forkOf === "object" ? manifest.forkOf : null;
+  const tweakId = cleanText(manifest && manifest.id);
+  if (!fork) {
+    return {
+      hasFork: false,
+      tweakId,
+      status: "unknown",
+      statusLabel: "Unknown",
+      builtFromVersion: "",
+      latestVersion: "",
+      upstreamId: "",
+      upstreamGithubRepo: "",
+      upstreamCommitSha: "",
+      sourceMissing: true,
+    };
+  }
+  const upstreamId = cleanText(fork.upstreamId);
+  const upstreamGithubRepo = cleanRepoSlug(fork.upstreamGithubRepo);
+  const builtFromVersion = cleanVersion(fork.upstreamVersion);
+  const upstreamCommitSha = cleanText(fork.upstreamCommitSha);
+  const localLatest = latestUpstreamVersionFromStore(upstreamId, options.storeEntries);
+  const remote = options.remote && typeof options.remote === "object" ? options.remote : null;
+  const remoteLatest = cleanVersion(remote && (remote.latestVersion || remote.version));
+  const latestVersion = remoteLatest || localLatest;
+  const sourceMissing = Boolean((!upstreamId && !upstreamGithubRepo) || remote && remote.status === "source-missing");
+  const status = forkLineageStatus({
+    builtFromVersion,
+    latestVersion,
+    sourceMissing,
+  });
+  return {
+    hasFork: true,
+    tweakId,
+    upstreamId,
+    upstreamGithubRepo,
+    upstreamCommitSha,
+    builtFromVersion,
+    latestVersion,
+    status,
+    statusLabel: forkLineageStatusLabel(status),
+    source: latestVersion ? remoteLatest ? "github" : "store" : "",
+    sourceUrl: cleanText(remote && remote.sourceUrl),
+    sourceMissing,
+    message: cleanText(remote && remote.message),
+  };
+}
+
+function latestUpstreamVersionFromStore(upstreamId, storeEntries) {
+  const id = cleanText(upstreamId);
+  if (!id || !Array.isArray(storeEntries)) return "";
+  for (const entry of storeEntries) {
+    const entryId = cleanText(entry && (entry.id || entry.manifest && entry.manifest.id));
+    if (entryId !== id) continue;
+    return cleanVersion(entry && entry.manifest && entry.manifest.version);
+  }
+  return "";
+}
+
+function forkLineageStatus(lineage) {
+  if (lineage.sourceMissing) return "source-missing";
+  if (!lineage.latestVersion) return "unknown";
+  if (!lineage.builtFromVersion) return "unknown";
+  const comparison = compareVersions(lineage.latestVersion, lineage.builtFromVersion);
+  return comparison > 0 ? "update-available" : "current";
+}
+
+function forkLineageStatusLabel(status) {
+  if (status === "current") return "Current";
+  if (status === "update-available") return "Update available";
+  if (status === "source-missing") return "Source missing";
+  return "Unknown";
+}
+
+function forkLineageLatestLabel(lineage) {
+  if (!lineage || !lineage.hasFork) return "";
+  if (lineage.latestVersion) return lineage.latestVersion;
+  if (lineage.sourceMissing) return "Source missing";
+  return "Unknown";
+}
+
+function forkLineageBuiltFromLabel(lineage) {
+  if (!lineage || !lineage.hasFork) return "Unknown";
+  return lineage.builtFromVersion || "Unknown";
+}
+
+function forkLineageSummary(lineage) {
+  if (!lineage || !lineage.hasFork) return "";
+  const source = lineage.upstreamId || lineage.upstreamGithubRepo || "unknown source";
+  return `Forked from ${source} · Built from ${forkLineageBuiltFromLabel(lineage)} · Latest ${forkLineageLatestLabel(lineage)} · ${lineage.statusLabel}`;
+}
+
+function compareVersions(a, b) {
+  const left = versionParts(a);
+  const right = versionParts(b);
+  if (!left.length && !right.length) return cleanText(a).localeCompare(cleanText(b));
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left[index] || 0;
+    const rightPart = right[index] || 0;
+    if (leftPart > rightPart) return 1;
+    if (leftPart < rightPart) return -1;
+  }
+  return 0;
+}
+
+function versionParts(value) {
+  const match = cleanVersion(value).match(/\d+(?:\.\d+)*/);
+  if (!match) return [];
+  return match[0].split(".").map((part) => Number(part)).filter((part) => Number.isFinite(part));
+}
+
+function cleanVersion(value) {
+  return cleanText(value).replace(/^v/i, "");
+}
+
+function cleanText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function cleanRepoSlug(value) {
+  const repo = cleanText(value).replace(/^https:\/\/github\.com\//i, "").replace(/\.git$/i, "");
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ? repo : "";
 }
 
 function forkedUpstreamIds(installed) {
@@ -2442,14 +2814,10 @@ function rowCard(state, row) {
   left.appendChild(body);
   card.appendChild(left);
 
-  if (row.manifest.forkOf) {
+  if (row.forkLineage && row.forkLineage.hasFork) {
     const lineage = document.createElement("div");
-    lineage.className = "codexpp-td-meta codexpp-td-lineage";
-    const upstream = row.manifest.forkOf;
-    lineage.textContent =
-      "Forked from " + upstream.upstreamId +
-      " @ " + (upstream.upstreamVersion || "unknown") +
-      " (" + (upstream.upstreamCommitSha ? upstream.upstreamCommitSha.slice(0, 7) : "unpinned") + ")";
+    lineage.className = `codexpp-td-meta codexpp-td-lineage is-${row.forkLineage.status}`;
+    lineage.textContent = forkLineageSummary(row.forkLineage);
     body.appendChild(lineage);
   }
 
@@ -2568,7 +2936,7 @@ function renderTweakDetailPage(state, panel, row) {
   infoCard.dataset.slot = "card-content";
   infoCard.appendChild(detailRow("Status", row.installed ? row.installed.enabled ? "Installed, enabled" : "Installed, disabled" : "Available in store"));
   infoCard.appendChild(detailRow("Version", manifest.version || "Unknown"));
-  infoCard.appendChild(detailRow("Latest", row.store && row.store.manifest && row.store.manifest.version ? row.store.manifest.version : hasUpdate ? "Update available" : "Current"));
+  infoCard.appendChild(detailRow("Latest", latestVersionLabel(row, hasUpdate)));
   if (manifest.githubRepo) infoCard.appendChild(detailRow("GitHub", manifest.githubRepo));
   if (manifest.author) infoCard.appendChild(detailRow("Developer", authorText(manifest.author)));
   if (manifest.tags && manifest.tags.length) infoCard.appendChild(detailRow("Tags", manifest.tags.join(", ")));
@@ -2576,7 +2944,7 @@ function renderTweakDetailPage(state, panel, row) {
   info.appendChild(infoCard);
   main.appendChild(info);
 
-  if (manifest.forkOf) {
+  if (row.forkLineage && row.forkLineage.hasFork) {
     const lineage = document.createElement("section");
     lineage.className = "codexpp-td-detail-section";
     lineage.dataset.slot = "card";
@@ -2584,9 +2952,12 @@ function renderTweakDetailPage(state, panel, row) {
     const lineageCard = document.createElement("div");
     lineageCard.className = "codexpp-td-detail-card";
     lineageCard.dataset.slot = "card-content";
-    lineageCard.appendChild(detailRow("Forked from", manifest.forkOf.upstreamId || "Unknown"));
-    lineageCard.appendChild(detailRow("Upstream version", manifest.forkOf.upstreamVersion || "Unknown"));
-    lineageCard.appendChild(detailRow("Pinned commit", manifest.forkOf.upstreamCommitSha || "Unpinned"));
+    lineageCard.appendChild(detailRow("Forked from", row.forkLineage.upstreamId || row.forkLineage.upstreamGithubRepo || "Unknown"));
+    lineageCard.appendChild(detailRow("Built from", forkLineageBuiltFromLabel(row.forkLineage)));
+    lineageCard.appendChild(detailRow("Latest upstream", forkLineageLatestLabel(row.forkLineage)));
+    lineageCard.appendChild(detailRow("Upstream status", row.forkLineage.statusLabel));
+    lineageCard.appendChild(detailRow("Pinned commit", row.forkLineage.upstreamCommitSha || "Unpinned"));
+    if (row.forkLineage.message) lineageCard.appendChild(detailRow("Latest source", row.forkLineage.message));
     lineage.appendChild(lineageCard);
     main.appendChild(lineage);
   }
@@ -3170,6 +3541,13 @@ function statusText(row, hasUpdate) {
   return "Available in the tweak store.";
 }
 
+function latestVersionLabel(row, hasUpdate) {
+  if (row && row.forkLineage && row.forkLineage.hasFork) {
+    return forkLineageLatestLabel(row.forkLineage);
+  }
+  return row.store && row.store.manifest && row.store.manifest.version ? row.store.manifest.version : hasUpdate ? "Update available" : "Current";
+}
+
 function authorText(author) {
   if (!author) return "";
   if (typeof author === "string") return author;
@@ -3720,6 +4098,10 @@ function injectStyles() {
     .codexpp-td-item p, .codexpp-td-meta { margin: 0; color: var(--codexpp-td-muted); font-size: 13px; line-height: 1.25; }
     .codexpp-td-item p { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .codexpp-td-meta { font-size: 12px; }
+    .codexpp-td-lineage.is-update-available { color: #b45309; }
+    .codexpp-td-lineage.is-current { color: #047857; }
+    .codexpp-td-lineage.is-unknown,
+    .codexpp-td-lineage.is-source-missing { color: var(--codexpp-td-muted); }
     .codexpp-td-item-actions { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--codexpp-td-muted); }
     .codexpp-td-directory-action { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--codexpp-td-border); border-radius: 8px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-foreground); font: inherit; font-size: 18px; line-height: 1; cursor: pointer; }
     .codexpp-td-directory-action.status { border: 0; background: transparent; color: color-mix(in srgb, var(--codexpp-td-muted) 78%, transparent); font-size: 18px; }
@@ -3815,3 +4197,14 @@ function injectStyles() {
     }
   `;
 }
+
+module.exports.__test = {
+  compareVersions,
+  forkLineageBuiltFromLabel,
+  forkLineageLatestLabel,
+  forkLineageStatusLabel,
+  forkLineageSummary,
+  latestUpstreamVersionFromStore,
+  normalizeForkLineage,
+  normalizeForkLineageResult,
+};

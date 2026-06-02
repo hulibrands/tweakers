@@ -126,7 +126,7 @@ test("sidebar project reorder moves a folder block with its visible chat rows", 
   }
 });
 
-test("Chrome assignments write the existing project-chrome-profile schema", () => {
+test("Chrome assignments write the Projects-owned schema", () => {
   const userRoot = tempDir();
   const projectPath = path.join(userRoot, "repo");
   const preferencesPath = path.join(userRoot, "Chrome", "Profile 7", "Preferences");
@@ -149,21 +149,91 @@ test("Chrome assignments write the existing project-chrome-profile schema", () =
     },
   );
 
-  const stored = tweak.readStorageFile("co.thomashulihan.project-chrome-profile", { userRoot, fs, path });
+  const stored = tweak.readStorageFile("co.thomashulihan.projects", { userRoot, fs, path });
+  const legacy = tweak.readStorageFile("co.thomashulihan.project-chrome-profile", { userRoot, fs, path });
   assert.equal(assignment.profileDirectory, "Profile 7");
-  assert.equal(stored.assignments[projectPath].preferencesPath, preferencesPath);
-  assert.deepEqual(stored.assignments[projectPath].preferencesPaths, [preferencesPath]);
-  assert.deepEqual(stored.assignments[projectPath].preferredProfiles.map((profile) => profile.profileName), ["Work"]);
+  assert.equal(stored.chromeAssignments[projectPath].preferencesPath, preferencesPath);
+  assert.deepEqual(stored.chromeAssignments[projectPath].preferencesPaths, [preferencesPath]);
+  assert.deepEqual(stored.chromeAssignments[projectPath].preferredProfiles.map((profile) => profile.profileName), ["Work"]);
+  assert.equal(legacy.assignments, undefined);
 });
 
-test("Project Settings writes managed AGENTS.md plugin profile blocks", () => {
+test("Chrome assignments migrate from legacy Plugin Profiles storage into Projects storage", () => {
+  const userRoot = tempDir();
+  const projectPath = path.join(userRoot, "repo");
+  const preferencesPath = path.join(userRoot, "Chrome", "Profile 4", "Preferences");
+  fs.mkdirSync(path.dirname(preferencesPath), { recursive: true });
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.writeFileSync(preferencesPath, "{}", "utf8");
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify({
+    assignments: {
+      [projectPath]: {
+        projectPath,
+        profileDirectory: "Profile 4",
+        profileName: "Legacy Work",
+        preferencesPath,
+      },
+    },
+  }), "utf8");
+
+  const migrated = tweak.readChromeStorage(userRoot, { userRoot, fs, path });
+  const stored = tweak.readStorageFile("co.thomashulihan.projects", { userRoot, fs, path });
+
+  assert.equal(migrated.assignments[projectPath].profileName, "Legacy Work");
+  assert.equal(stored.chromeAssignments[projectPath].migratedFrom, "co.thomashulihan.project-chrome-profile");
+  assert.equal(stored.chromeAssignments[projectPath].preferencesPath, preferencesPath);
+});
+
+test("Chrome profile creation stores a pending Projects assignment", () => {
+  const userRoot = tempDir();
+  const projectPath = path.join(userRoot, "repo");
+  const chromeRoot = path.join(userRoot, "Chrome");
+  const previousChromeRoot = process.env.CODEX_CHROME_USER_DATA_DIR;
+  process.env.CODEX_CHROME_USER_DATA_DIR = chromeRoot;
+  fs.mkdirSync(path.join(chromeRoot, "Profile 1"), { recursive: true });
+  fs.mkdirSync(path.join(chromeRoot, "Profile 9"), { recursive: true });
+  fs.mkdirSync(projectPath, { recursive: true });
+  const spawned = [];
+  const childProcess = {
+    spawn(command, args) {
+      spawned.push({ command, args });
+      return { unref() {} };
+    },
+  };
+  try {
+    const assignment = tweak.createChromeProfileAssignmentForProject(
+      { projectPath, projectName: "Repo" },
+      { userRoot, fs, os, path, home: userRoot, childProcess },
+    );
+    const stored = tweak.readStorageFile("co.thomashulihan.projects", { userRoot, fs, path });
+
+    assert.equal(assignment.profileDirectory, "Profile 10");
+    assert.equal(assignment.pendingCreation, true);
+    assert.equal(stored.chromeAssignments[projectPath].profileName, "Repo");
+    assert.ok(spawned[0].args.includes("--new-window"));
+    assert.ok(spawned[0].args.includes("chrome://settings/manageProfile"));
+  } finally {
+    if (previousChromeRoot === undefined) delete process.env.CODEX_CHROME_USER_DATA_DIR;
+    else process.env.CODEX_CHROME_USER_DATA_DIR = previousChromeRoot;
+  }
+});
+
+test("Project Settings writes managed AGENTS.md project connection blocks", () => {
   const userRoot = tempDir();
   const projectPath = path.join(userRoot, "repo");
   const preferencesPath = path.join(userRoot, "Chrome", "Profile 7", "Preferences");
   fs.mkdirSync(path.dirname(preferencesPath), { recursive: true });
   fs.mkdirSync(path.join(projectPath, ".codex"), { recursive: true });
   fs.writeFileSync(preferencesPath, "{}", "utf8");
-  fs.writeFileSync(path.join(projectPath, "AGENTS.md"), "# Repo\n", "utf8");
+  fs.writeFileSync(path.join(projectPath, "AGENTS.md"), [
+    "# Repo",
+    "",
+    "<!-- codex-plugin-profiles:start -->",
+    "## Plugin Profiles",
+    "- old managed content",
+    "<!-- codex-plugin-profiles:end -->",
+    "",
+  ].join("\n"), "utf8");
   fs.writeFileSync(path.join(projectPath, ".codex", "config.toml"), [
     "[mcp_servers.supabase]",
     'project_id = "trrproject"',
@@ -219,6 +289,8 @@ test("Project Settings writes managed AGENTS.md plugin profile blocks", () => {
   assert.equal(result.changed, true);
   assert.equal(result.connectionCount, 6);
   assert.match(agents, /<!-- codex-plugin-profiles:start -->/);
+  assert.match(agents, /## Project Connections/);
+  assert.doesNotMatch(agents, /## Plugin Profiles/);
   assert.match(agents, /\[@Chrome\]\(plugin:\/\/chrome@openai-bundled\)/);
   assert.match(agents, /CODEX_CHROME_PREFERENCES_PATH="/);
   assert.match(agents, /\[@gmail\]\(plugin:\/\/gmail@openai-curated\): use codex@thereality\.report/);
@@ -650,6 +722,8 @@ test("renderer source keeps project color controls in Projects and avoids retire
   assert.match(source, /overlay-segmented/);
   assert.match(source, /PROJECT_COLOR_EVENT/);
   assert.match(source, /profile-dropdown/);
+  assert.match(source, /createChromeProfileForProject/);
+  assert.match(source, /Create profile/);
   assert.match(source, /chromeProfileHasEnabledCodexExtension/);
   assert.match(source, /gitHubMetadataRow/);
   assert.match(source, /gitRepositoriesForProject/);
@@ -862,7 +936,10 @@ test("renderer source registers Projects settings page and accordion markers", (
   assert.match(source, /title:\s*"Projects"/);
   assert.match(source, /groupTitle:\s*"Projects"/);
   assert.match(source, /parentPage:\s*true/);
-  assert.match(source, /renderProjectSettingsPage/);
+  assert.match(source, /projectAccordionRow/);
+  assert.match(source, /panel\.replaceChildren\(projectPanel/);
+  assert.doesNotMatch(source, /syncProjectSettingsPages/);
+  assert.doesNotMatch(source, /projectPageHandles/);
   assert.match(source, /chromeHealthDashboard/);
   assert.match(source, /data-chrome-verifier-status-path/);
   assert.match(source, /runProjectChromeVerifier/);

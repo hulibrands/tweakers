@@ -1,13 +1,15 @@
 /* ShadGPT Projects
  *
- * Coordinates project-local connection assignments without replacing the
- * existing Chrome Profile tweak. Chrome writes intentionally target that
- * tweak's storage file so its MCP helper keeps resolving the same schema.
+ * Coordinates project-local connection assignments. Projects owns Chrome
+ * profile routing and reads the legacy Plugin Profiles storage only for
+ * migration and compatibility fallback.
  */
 
 const TWEAK_ID = "co.thomashulihan.projects";
 const CHROME_TWEAK_ID = "co.thomashulihan.project-chrome-profile";
 const UI_IMPROVEMENTS_TWEAK_ID = "co.thomashulihan.ui-improvements";
+const CHROME_ASSIGNMENTS_KEY = "chromeAssignments";
+const CHROME_CLEARED_ASSIGNMENTS_KEY = "chromeAssignmentClears";
 const SUPABASE_PROFILES_KEY = "supabaseProfiles";
 const GOOGLE_WORKSPACE_ACCOUNTS_KEY = "googleWorkspaceAccounts";
 const GOOGLE_WORKSPACE_ASSIGNMENTS_KEY = "googleWorkspaceAssignments";
@@ -116,6 +118,9 @@ module.exports = {
     projectCandidates,
     saveChromeAssignmentToStorage,
     clearChromeAssignmentFromStorage,
+    createChromeProfileAssignmentForProject,
+    readChromeStorage,
+    nextChromeProfileDirectory,
     googleWorkspaceAccountsForProject,
     googleWorkspaceConnectorAccountsFromMetadata,
     saveGoogleWorkspaceAccountToStorage,
@@ -187,6 +192,7 @@ function startMain(api, cleanup) {
   cleanup.push(api.ipc.handle("listChromeProfiles", () => handlers.listChromeProfiles()));
   cleanup.push(api.ipc.handle("saveChromeAssignment", (input) => handlers.saveChromeAssignment(input)));
   cleanup.push(api.ipc.handle("clearChromeAssignment", (projectPath) => handlers.clearChromeAssignment(projectPath)));
+  cleanup.push(api.ipc.handle("createChromeProfileForProject", (input) => handlers.createChromeProfileForProject(input)));
   cleanup.push(api.ipc.handle("listGoogleWorkspaceAccounts", () => handlers.listGoogleWorkspaceAccounts()));
   cleanup.push(api.ipc.handle("saveGoogleWorkspaceAccount", (input) => handlers.saveGoogleWorkspaceAccount(input)));
   cleanup.push(api.ipc.handle("saveGoogleWorkspaceAssignment", (input) => handlers.saveGoogleWorkspaceAssignment(input)));
@@ -363,7 +369,7 @@ function createMainHandlers(api) {
     const projectName = typeof projectPathInput?.name === "string" ? projectPathInput.name : "";
     const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
     const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
-    const chromeStorage = readChromeStorage(userRoot);
+    const chromeStorage = readChromeStorage(userRoot, { fs, path, home });
     const chromeAssignment = chromeStorage.assignments[projectPath] || null;
     const googleWorkspaceStorage = readGoogleWorkspaceStorage(userRoot);
     const modalWorkspaceStorage = readModalWorkspaceStorage(userRoot);
@@ -432,6 +438,10 @@ function createMainHandlers(api) {
       const projectPath = normalizeProjectPath(projectPathInput?.projectPath || projectPathInput, { home, path });
       clearChromeAssignmentFromStorage(projectPath, { userRoot, home, path });
       return withAgentsInstruction({ cleared: true }, { projectPath, projectName: projectPathInput?.projectName || projectPathInput?.name });
+    },
+    createChromeProfileForProject: (input) => {
+      const assignment = createChromeProfileAssignmentForProject(input, { userRoot, home, path, fs, os, childProcess });
+      return withAgentsInstruction({ assignment }, { projectPath: assignment.projectPath, projectName: input?.projectName || input?.name });
     },
     listGoogleWorkspaceAccounts,
     listModalWorkspaceAccounts,
@@ -524,19 +534,19 @@ function loadChromeRouting() {
   return null;
 }
 
-function chromeRoutingSummary(projectPath, chromeStorage, options = {}) {
-  if (chromeRouting?.resolveChromeRouting) {
-    try {
-      return chromeRouting.resolveChromeRouting(projectPath, options);
-    } catch {}
-  }
-  const match = chromeStorage.assignments?.[projectPath] || null;
+function chromeRoutingSummary(projectPath, chromeStorage, _options = {}) {
+  const path = require("node:path");
+  const normalized = typeof projectPath === "string" ? path.resolve(projectPath) : "";
+  const match = Object.values(chromeStorage.assignments || {})
+    .filter((entry) => entry && typeof entry.projectPath === "string")
+    .filter((entry) => normalized === entry.projectPath || normalized.startsWith(`${entry.projectPath}${path.sep}`))
+    .sort((a, b) => b.projectPath.length - a.projectPath.length)[0] || null;
   const fallback = match ? null : chromeStorage.defaultProfile || null;
   const assignment = match || fallback;
   const preferredProfiles = normalizeChromePreferredProfiles(assignment);
   const primary = preferredProfiles[0] || null;
   return {
-    projectPath,
+    projectPath: match?.projectPath || projectPath,
     matched: Boolean(match),
     source: match ? "project" : fallback ? "default" : "none",
     assignment: match,
@@ -552,17 +562,20 @@ function normalizeChromePreferredProfiles(assignment) {
   const path = require("node:path");
   if (!assignment || typeof assignment !== "object") return [];
   if (Array.isArray(assignment.preferredProfiles) && assignment.preferredProfiles.length) return assignment.preferredProfiles;
+  if (Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length) return assignment.allowedProfiles;
   if (Array.isArray(assignment.preferencesPaths) && assignment.preferencesPaths.length) {
     return assignment.preferencesPaths.map((preferencesPath, index) => ({
       profileDirectory: Array.isArray(assignment.profileDirectories) ? assignment.profileDirectories[index] : path.basename(path.dirname(preferencesPath)),
       profileName: Array.isArray(assignment.profileNames) ? assignment.profileNames[index] : path.basename(path.dirname(preferencesPath)),
       preferencesPath,
+      userDataDir: path.dirname(path.dirname(preferencesPath)),
     }));
   }
   return assignment.profileDirectory || assignment.preferencesPath ? [{
     profileDirectory: assignment.profileDirectory,
     profileName: assignment.profileName,
     preferencesPath: assignment.preferencesPath,
+    userDataDir: assignment.userDataDir || (assignment.preferencesPath ? path.dirname(path.dirname(assignment.preferencesPath)) : ""),
   }] : [];
 }
 
@@ -666,11 +679,59 @@ function chromeVerifierRouteSummary(route) {
   };
 }
 
-function readChromeStorage(userRoot) {
-  const value = readStorageFile(CHROME_TWEAK_ID, { userRoot });
+function readChromeStorage(userRoot, options = {}) {
+  const storageOptions = { ...options, userRoot };
+  const value = readStorageFile(TWEAK_ID, storageOptions);
+  const legacy = readStorageFile(CHROME_TWEAK_ID, storageOptions);
+  const assignments = isPlainObject(value[CHROME_ASSIGNMENTS_KEY]) ? { ...value[CHROME_ASSIGNMENTS_KEY] } : {};
+  const cleared = isPlainObject(value[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? value[CHROME_CLEARED_ASSIGNMENTS_KEY] : {};
+  const legacyAssignments = isPlainObject(legacy.assignments) ? legacy.assignments : {};
+  let migrated = false;
+  for (const [projectPath, assignment] of Object.entries(legacyAssignments)) {
+    if (Object.prototype.hasOwnProperty.call(assignments, projectPath)) continue;
+    if (Object.prototype.hasOwnProperty.call(cleared, projectPath)) continue;
+    const normalized = normalizeChromeAssignment(assignment, projectPath);
+    if (!normalized) continue;
+    assignments[projectPath] = {
+      ...normalized,
+      migratedFrom: CHROME_TWEAK_ID,
+      migratedAt: new Date().toISOString(),
+    };
+    migrated = true;
+  }
+  if (migrated) {
+    value[CHROME_ASSIGNMENTS_KEY] = assignments;
+    value.updatedAt = new Date().toISOString();
+    writeStorageFile(TWEAK_ID, value, storageOptions);
+  }
   return {
     ...value,
-    assignments: isPlainObject(value.assignments) ? value.assignments : {},
+    assignments,
+    legacyAssignments,
+    defaultProfile: value.defaultProfile || legacy.defaultProfile || null,
+  };
+}
+
+function normalizeChromeAssignment(assignment, projectPathFallback = "") {
+  if (!assignment || typeof assignment !== "object" || Array.isArray(assignment)) return null;
+  const projectPath = String(assignment.projectPath || projectPathFallback || "").trim();
+  if (!projectPath) return null;
+  const preferredProfiles = normalizeChromePreferredProfiles(assignment);
+  const primary = preferredProfiles[0] || null;
+  return {
+    ...assignment,
+    projectPath,
+    profileDirectory: String(assignment.profileDirectory || primary?.profileDirectory || "").trim(),
+    profileName: String(assignment.profileName || primary?.profileName || "").trim(),
+    preferencesPath: String(assignment.preferencesPath || primary?.preferencesPath || "").trim(),
+    userDataDir: String(assignment.userDataDir || primary?.userDataDir || "").trim(),
+    profileDirectories: preferredProfiles.map((profile) => profile.profileDirectory).filter(Boolean),
+    profileNames: preferredProfiles.map((profile) => profile.profileName).filter(Boolean),
+    preferencesPaths: preferredProfiles.map((profile) => profile.preferencesPath).filter(Boolean),
+    preferredProfiles,
+    allowedProfiles: Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length
+      ? assignment.allowedProfiles
+      : preferredProfiles,
   };
 }
 
@@ -1361,8 +1422,11 @@ function saveChromeAssignmentToStorage(input, options = {}) {
     };
   });
   const primary = preferredProfiles[0];
-  const storage = readChromeStorage(options.userRoot);
-  storage.assignments[projectPath] = {
+  const storage = readStorageFile(TWEAK_ID, options);
+  const assignments = isPlainObject(storage[CHROME_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_ASSIGNMENTS_KEY] } : {};
+  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] } : {};
+  delete cleared[projectPath];
+  assignments[projectPath] = {
     projectPath,
     profileDirectory: primary.profileDirectory,
     profileName: primary.profileName,
@@ -1372,22 +1436,118 @@ function saveChromeAssignmentToStorage(input, options = {}) {
     profileNames: preferredProfiles.map((profile) => profile.profileName),
     preferencesPaths: preferredProfiles.map((profile) => profile.preferencesPath),
     preferredProfiles,
+    allowedProfiles: preferredProfiles,
     updatedAt: new Date().toISOString(),
   };
+  storage[CHROME_ASSIGNMENTS_KEY] = assignments;
+  storage[CHROME_CLEARED_ASSIGNMENTS_KEY] = cleared;
   storage.updatedAt = new Date().toISOString();
-  writeStorageFile(CHROME_TWEAK_ID, storage, options);
-  return storage.assignments[projectPath];
+  writeStorageFile(TWEAK_ID, storage, options);
+  return assignments[projectPath];
 }
 
 function clearChromeAssignmentFromStorage(projectPathInput, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(projectPathInput, { home, path });
-  const storage = readChromeStorage(options.userRoot);
-  delete storage.assignments[projectPath];
+  const storage = readStorageFile(TWEAK_ID, options);
+  const assignments = isPlainObject(storage[CHROME_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_ASSIGNMENTS_KEY] } : {};
+  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] } : {};
+  delete assignments[projectPath];
+  cleared[projectPath] = new Date().toISOString();
+  storage[CHROME_ASSIGNMENTS_KEY] = assignments;
+  storage[CHROME_CLEARED_ASSIGNMENTS_KEY] = cleared;
   storage.updatedAt = new Date().toISOString();
-  writeStorageFile(CHROME_TWEAK_ID, storage, options);
+  writeStorageFile(TWEAK_ID, storage, options);
   return true;
+}
+
+function createChromeProfileAssignmentForProject(input, options = {}) {
+  const path = options.path || require("node:path");
+  const fs = options.fs || require("node:fs");
+  const os = options.os || require("node:os");
+  const childProcess = options.childProcess || require("node:child_process");
+  const home = options.home || os.homedir();
+  const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
+  const projectName = String(input?.projectName || input?.name || projectLabel(projectPath, path)).trim();
+  const userDataDir = chromeUserDataDir({ os, path });
+  const profileDirectory = nextChromeProfileDirectory({ fs, os, path });
+  const preferencesPath = path.join(userDataDir, profileDirectory, "Preferences");
+  const launch = openChromeProfileSettings(profileDirectory, { childProcess });
+  const storage = readStorageFile(TWEAK_ID, options);
+  const assignments = isPlainObject(storage[CHROME_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_ASSIGNMENTS_KEY] } : {};
+  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] } : {};
+  const preferredProfiles = [{
+    profileDirectory,
+    profileName: projectName || profileDirectory,
+    preferencesPath,
+    userDataDir,
+  }];
+  delete cleared[projectPath];
+  assignments[projectPath] = {
+    projectPath,
+    profileDirectory,
+    profileName: projectName || profileDirectory,
+    preferencesPath,
+    userDataDir,
+    profileDirectories: [profileDirectory],
+    profileNames: [projectName || profileDirectory],
+    preferencesPaths: [preferencesPath],
+    preferredProfiles,
+    allowedProfiles: preferredProfiles,
+    pendingCreation: true,
+    launch,
+    updatedAt: new Date().toISOString(),
+  };
+  storage[CHROME_ASSIGNMENTS_KEY] = assignments;
+  storage[CHROME_CLEARED_ASSIGNMENTS_KEY] = cleared;
+  storage.updatedAt = new Date().toISOString();
+  writeStorageFile(TWEAK_ID, storage, options);
+  return assignments[projectPath];
+}
+
+function nextChromeProfileDirectory(options = {}) {
+  const fs = options.fs || require("node:fs");
+  const os = options.os || require("node:os");
+  const path = options.path || require("node:path");
+  const userDataDir = chromeUserDataDir({ os, path });
+  const names = new Set();
+  const localState = readJson(path.join(userDataDir, "Local State"), fs);
+  for (const value of [
+    ...(Array.isArray(localState?.profile?.profiles_order) ? localState.profile.profiles_order : []),
+    ...Object.keys(localState?.profile?.info_cache || {}),
+  ]) {
+    if (typeof value === "string") names.add(value);
+  }
+  try {
+    for (const entry of fs.readdirSync(userDataDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) names.add(entry.name);
+    }
+  } catch {}
+  const max = [...names].reduce((highest, name) => {
+    const match = /^Profile (\d+)$/.exec(name);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0);
+  return `Profile ${max + 1}`;
+}
+
+function openChromeProfileSettings(profileDirectory, options = {}) {
+  const childProcess = options.childProcess || require("node:child_process");
+  const args = [`--profile-directory=${profileDirectory}`, "--new-window", "chrome://settings/manageProfile"];
+  try {
+    if (process.platform === "darwin") {
+      childProcess.spawn("open", ["-n", "-a", "Google Chrome", "--args", ...args], {
+        detached: true,
+        stdio: "ignore",
+      }).unref();
+      return { attempted: true, command: "open", args };
+    }
+    const command = process.platform === "win32" ? "chrome.exe" : "google-chrome";
+    childProcess.spawn(command, args, { detached: true, stdio: "ignore" }).unref();
+    return { attempted: true, command, args };
+  } catch (error) {
+    return { attempted: true, error: error?.message || String(error) };
+  }
 }
 
 function normalizePreferencesPaths(input) {
@@ -2078,7 +2238,6 @@ function startRenderer(api, cleanup) {
   cleanup.push(projectScan);
   const projectReorder = startSidebarProjectReorder(api);
   cleanup.push(projectReorder);
-  const projectPageHandles = new Map();
 
   if (typeof api.settings?.registerPage !== "function") {
     api.log?.warn?.("[projects] registerPage unavailable; settings UI not mounted.");
@@ -2102,53 +2261,6 @@ function startRenderer(api, cleanup) {
   });
   if (handle && typeof handle.dispose === "function") cleanup.push(() => handle.dispose());
   if (handle && typeof handle.unregister === "function") cleanup.push(() => handle.unregister());
-  cleanup.push(() => {
-    for (const childHandle of projectPageHandles.values()) unregisterSettingsHandle(childHandle);
-    projectPageHandles.clear();
-  });
-  syncProjectSettingsPages(api, projectPageHandles);
-  const pageSyncTimer = setInterval(() => syncProjectSettingsPages(api, projectPageHandles), 4000);
-  cleanup.push(() => clearInterval(pageSyncTimer));
-}
-
-async function syncProjectSettingsPages(api, handles) {
-  try {
-    const projects = await api.ipc.invoke("listProjects");
-    const wanted = new Set();
-    for (const project of projects) {
-      const pageId = `project-${slugify(project.name || project.projectPath)}`;
-      wanted.add(pageId);
-      if (handles.has(pageId)) continue;
-      const handle = api.settings.registerPage({
-        id: pageId,
-        title: project.name,
-        groupTitle: "Projects",
-        description: project.projectPath,
-        iconSvg:
-          '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
-          '<path d="M3.5 5.5A1.5 1.5 0 0 1 5 4h3l1.2 1.5H15A1.5 1.5 0 0 1 16.5 7v7A1.5 1.5 0 0 1 15 15.5H5A1.5 1.5 0 0 1 3.5 14v-8.5Z" stroke="currentColor" stroke-width="1.5"/>' +
-          "</svg>",
-        render(root) {
-          renderProjectSettingsPage(root, api, project);
-        },
-      });
-      handles.set(pageId, handle);
-    }
-    for (const [pageId, handle] of handles) {
-      if (wanted.has(pageId)) continue;
-      unregisterSettingsHandle(handle);
-      handles.delete(pageId);
-    }
-  } catch (error) {
-    api.log?.warn?.("[projects] failed to sync project settings pages", error?.message || String(error));
-  }
-}
-
-function unregisterSettingsHandle(handle) {
-  try {
-    if (handle && typeof handle.unregister === "function") handle.unregister();
-    else if (handle && typeof handle.dispose === "function") handle.dispose();
-  } catch {}
 }
 
 async function renderProjectsPage(root, api) {
@@ -2159,7 +2271,7 @@ async function renderProjectsPage(root, api) {
   root.appendChild(styles);
 
   const frame = el("div", "projects-frame");
-  frame.appendChild(sectionTitle("Projects", "Select a project sub-page in the Settings sidebar to edit its connections and environment fields."));
+  frame.appendChild(sectionTitle("Projects", "Open a project row to edit its connections and environment fields."));
   const chromeHeaderSlot = el("div", "projects-header-chrome-status", "Loading Chrome profile assignments...");
   frame.appendChild(chromeHeaderSlot);
   frame.appendChild(envScanTimeoutSettings(api));
@@ -2186,37 +2298,10 @@ async function renderProjectsPage(root, api) {
     chromeHealthSlot.replaceWith(chromeHealthDashboard(projects, api));
     list.innerHTML = "";
     for (const project of projects) {
-      list.appendChild(projectSummaryCard(project, { api, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles }));
+      list.appendChild(projectAccordionRow(project, { api, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles }));
     }
   } catch (error) {
     status.textContent = error?.message || "Projects failed to load.";
-    status.classList.add("is-error");
-  }
-}
-
-async function renderProjectSettingsPage(root, api, project) {
-  root.innerHTML = "";
-  root.className = "shadgpt-projects-settings";
-  const styles = document.createElement("style");
-  styles.textContent = projectsCss();
-  root.appendChild(styles);
-  const frame = el("div", "projects-frame");
-  const status = el("div", "projects-status", "Loading project fields...");
-  frame.appendChild(status);
-  root.appendChild(frame);
-  try {
-    const [overview, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles] = await Promise.all([
-      api.ipc.invoke("getProjectOverview", project),
-      api.ipc.invoke("listChromeProfiles"),
-      api.ipc.invoke("listGoogleWorkspaceAccounts"),
-      api.ipc.invoke("listModalWorkspaceAccounts"),
-      api.ipc.invoke("listDecodoAccounts"),
-      api.ipc.invoke("listSupabaseProfiles"),
-    ]);
-    status.remove();
-    frame.appendChild(projectPanel(project, overview, { api, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles }));
-  } catch (error) {
-    status.textContent = error?.message || "Project failed to load.";
     status.classList.add("is-error");
   }
 }
@@ -2683,7 +2768,7 @@ function projectColorRow(project, overview, context) {
 }
 
 function chromeConnectionRow(project, overview, context) {
-  const row = settingRow("Chrome Profile", "Uses the existing Plugin Profiles assignment store.");
+  const row = settingRow("Chrome Profile", "Project-local default for Chrome-backed browser tools.");
   const selected = new Set(overview.chromeAssignment?.preferencesPaths || []);
   const dropdown = el("details", "profile-dropdown");
   const summary = el("summary", "profile-dropdown-summary");
@@ -2741,8 +2826,19 @@ function chromeConnectionRow(project, overview, context) {
     const verifier = await runProjectChromeVerifier(project, context.api);
     instructionStatus.textContent = [agentsInstructionStatusText(result?.agentsInstruction), chromeVerifierStatusText(verifier)].filter(Boolean).join("; ");
   }, "secondary");
+  const create = actionButton("Create profile", async () => {
+    const result = await context.api.ipc.invoke("createChromeProfileForProject", {
+      projectPath: project.projectPath,
+      projectName: project.name,
+    });
+    instructionStatus.textContent = [
+      "Chrome profile creation opened",
+      agentsInstructionStatusText(result?.agentsInstruction),
+    ].filter(Boolean).join("; ");
+    refreshAgentsPreview(project, context.api);
+  }, "secondary");
   const instructionStatus = el("span", "inline-help", "");
-  row.querySelector(".row-control").append(dropdown, chromeRoutingDetail(overview.chromeRouting), save, clear, instructionStatus);
+  row.querySelector(".row-control").append(dropdown, chromeRoutingDetail(overview.chromeRouting), save, clear, create, instructionStatus);
   return row;
 }
 

@@ -1,6 +1,8 @@
 const TWEAK_ID = "co.thomashulihan.thread-summary-profiles";
 const PROJECTS_TWEAK_ID = "co.thomashulihan.projects";
 const CHROME_TWEAK_ID = "co.thomashulihan.project-chrome-profile";
+const CHROME_ASSIGNMENTS_KEY = "chromeAssignments";
+const CHROME_CLEARED_ASSIGNMENTS_KEY = "chromeAssignmentClears";
 const IPC_GET_SUMMARY = "getThreadProfileSummary";
 const IPC_OPEN_ACTION = "openThreadProfileAction";
 const SECTION_ATTR = "data-codexpp-thread-summary-profiles";
@@ -38,6 +40,8 @@ module.exports = {
     injectProfilesSection,
     findThreadSummaryPanels,
     createProfilesSection,
+    registerSettingsPage,
+    renderSettingsPage,
   },
 };
 
@@ -63,6 +67,7 @@ function startMain(api, cleanup) {
 
 function startRenderer(api, cleanup) {
   installStyles();
+  registerSettingsPage(api, cleanup);
 
   let scheduled = false;
   let raf = 0;
@@ -88,6 +93,77 @@ function startRenderer(api, cleanup) {
     if (raf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(raf);
     document.querySelectorAll(`[${SECTION_ATTR}="true"]`).forEach((node) => node.remove());
   });
+}
+
+function registerSettingsPage(api, cleanup = []) {
+  if (typeof api.settings?.registerPage !== "function") {
+    api.log?.warn?.("[thread-summary-profiles] registerPage unavailable; settings UI not mounted.");
+    return null;
+  }
+
+  const handle = api.settings.registerPage({
+    id: "main",
+    title: "Thread Summary Profiles",
+    description: "Shows connected project services in the thread summary.",
+    iconSvg:
+      '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
+      '<path d="M4 5h12M4 10h12M4 15h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
+      '<path d="M14 13.5 16 15.5 18.5 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+      "</svg>",
+    render(root) {
+      renderSettingsPage(root);
+    },
+  });
+  if (handle && typeof handle.unregister === "function") cleanup.push(() => handle.unregister());
+  else if (handle && typeof handle.dispose === "function") cleanup.push(() => handle.dispose());
+  return handle || null;
+}
+
+function renderSettingsPage(root) {
+  root.innerHTML = "";
+  root.className = "codexpp-thread-summary-profiles-settings";
+
+  const style = document.createElement("style");
+  style.textContent = `
+    .codexpp-thread-summary-profiles-settings { display: flex; flex-direction: column; gap: 12px; }
+    .codexpp-thread-summary-profiles-settings__card { border: 1px solid var(--border-subtle, rgba(128,128,128,.25)); border-radius: 8px; background: var(--background-primary, transparent); }
+    .codexpp-thread-summary-profiles-settings__row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.18)); }
+    .codexpp-thread-summary-profiles-settings__row:last-child { border-bottom: 0; }
+    .codexpp-thread-summary-profiles-settings__text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .codexpp-thread-summary-profiles-settings__text strong { font-size: 13px; line-height: 18px; font-weight: 600; }
+    .codexpp-thread-summary-profiles-settings__text span { color: var(--text-secondary, rgba(0,0,0,.56)); font-size: 12px; line-height: 1.35; }
+    .codexpp-thread-summary-profiles-settings__badge { flex: 0 0 auto; border: 1px solid rgba(22,163,74,.35); border-radius: 999px; color: #15803d; background: rgba(22,163,74,.08); padding: 2px 8px; font-size: 12px; line-height: 18px; }
+    @media (max-width: 520px) {
+      .codexpp-thread-summary-profiles-settings__row { align-items: flex-start; flex-direction: column; }
+    }
+  `;
+  root.appendChild(style);
+
+  const card = document.createElement("section");
+  card.className = "codexpp-thread-summary-profiles-settings__card";
+  card.appendChild(settingsStatusRow("Profiles section", "Active in thread summaries", "Enabled"));
+  card.appendChild(settingsStatusRow("Source", "Uses existing Projects and Chrome profile assignments", "Read-only"));
+  root.appendChild(card);
+}
+
+function settingsStatusRow(title, description, status) {
+  const row = document.createElement("div");
+  row.className = "codexpp-thread-summary-profiles-settings__row";
+
+  const text = document.createElement("div");
+  text.className = "codexpp-thread-summary-profiles-settings__text";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const span = document.createElement("span");
+  span.textContent = description;
+  text.append(strong, span);
+
+  const badge = document.createElement("span");
+  badge.className = "codexpp-thread-summary-profiles-settings__badge";
+  badge.textContent = status;
+
+  row.append(text, badge);
+  return row;
 }
 
 function buildThreadProfileSummary(input = {}, options = {}) {
@@ -441,8 +517,24 @@ function sanitizeAction(action) {
 }
 
 function readChromeStorage(options = {}) {
-  const value = readStorageFile(CHROME_TWEAK_ID, options);
-  return { ...value, assignments: isPlainObject(value.assignments) ? value.assignments : {} };
+  const projects = readStorageFile(PROJECTS_TWEAK_ID, options);
+  const legacy = readStorageFile(CHROME_TWEAK_ID, options);
+  const assignments = isPlainObject(projects[CHROME_ASSIGNMENTS_KEY])
+    ? { ...projects[CHROME_ASSIGNMENTS_KEY] }
+    : {};
+  const cleared = isPlainObject(projects[CHROME_CLEARED_ASSIGNMENTS_KEY])
+    ? projects[CHROME_CLEARED_ASSIGNMENTS_KEY]
+    : {};
+  const legacyAssignments = isPlainObject(legacy.assignments) ? legacy.assignments : {};
+  for (const [projectPath, assignment] of Object.entries(legacyAssignments)) {
+    if (Object.prototype.hasOwnProperty.call(assignments, projectPath)) continue;
+    if (Object.prototype.hasOwnProperty.call(cleared, projectPath)) continue;
+    assignments[projectPath] = assignment;
+  }
+  return {
+    ...projects,
+    assignments,
+  };
 }
 
 function readProjectsStorage(options = {}) {

@@ -40,6 +40,18 @@ test("pinned chat project labels use main-process project lookup and live color 
   assert.match(source, /window\.addEventListener\(BRIDGE_EVENT, scheduleApply\)/);
 });
 
+test("sidebar project backgrounds do not default-hide cloud or personal projects", () => {
+  assert.doesNotMatch(source, /div\[role="listitem"\]\[aria-label="trr-app"\]/);
+  assert.doesNotMatch(source, /div\[role="listitem"\]\[aria-label="screenalytics"\]/);
+  assert.doesNotMatch(source, /data-app-action-sidebar-project-id\^="cloud:"/);
+  assert.doesNotMatch(source, /cloud:therealityreport\/(?:trr-app|screenalytics)/);
+  assert.doesNotMatch(source, /EXCLUDED_PROJECT_IDS/);
+  assert.doesNotMatch(source, /EXCLUDED_PROJECT_LABELS/);
+  assert.doesNotMatch(source, /CLOUD_PROJECT_PREFIX/);
+  assert.doesNotMatch(source, /isExcludedProjectRow/);
+  assert.doesNotMatch(source, /isCloudProjectId/);
+});
+
 test("legacy ShadGPT branding scrubber covers interactive app chrome", () => {
   assert.match(source, /startMainLegacyBrandUiScrubber\(api\)/);
   assert.match(source, /MAIN_LEGACY_BRAND_SCRUBBER_KEY/);
