@@ -1660,7 +1660,7 @@ function knownProjectPaths(home, path) {
     PLUGINS: path.join(home, "Projects", "PLUGINS"),
     "SKILLS MANAGER": path.join(home, "Projects", "SKILLS MANAGER"),
     Codex: path.join(home, "Applications", "codex"),
-    ShadGPT: path.join(home, "Applications", ["codex", "plusplus"].join("-")),
+    ShadGPT: path.join(home, "Projects", "shadgpt"),
   };
 }
 
@@ -3764,17 +3764,31 @@ function projectsCss() {
 
 function startSidebarProjectScanner(api) {
   let lastKey = "";
-  const scan = () => {
+  let scheduled = false;
+  const runScan = () => {
     const projects = scanSidebarProjectsFromDom();
     const key = JSON.stringify(projects);
     if (!projects.length || key === lastKey) return;
     lastKey = key;
     api.ipc.invoke("cacheSidebarProjects", projects).catch(() => {});
   };
+  // Coalesce bursts of DOM mutations into one scan per animation frame, and
+  // drop characterData entirely: sidebar project names only change via
+  // structural (childList) updates, never per streamed character. Without
+  // this guard every streamed token fired a full-document querySelectorAll +
+  // getBoundingClientRect sweep — a primary source of the streaming lag.
+  const scan = () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      runScan();
+    });
+  };
   const observer = new MutationObserver(scan);
-  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-  scan();
-  const timer = setInterval(scan, 2000);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  runScan();
+  const timer = setInterval(runScan, 2000);
   return () => {
     observer.disconnect();
     clearInterval(timer);

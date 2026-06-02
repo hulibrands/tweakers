@@ -190,7 +190,18 @@ function startRenderer(api) {
   installStyles();
   scanForProjectMenus(state);
 
-  state.observer = new MutationObserver(() => scanForProjectMenus(state));
+  // Coalesce mutation bursts into one scan per animation frame. Previously the
+  // observer ran a full document.body TreeWalker synchronously on EVERY
+  // mutation, so each streamed token blocked the main thread on an O(n) walk.
+  let scanScheduled = false;
+  state.observer = new MutationObserver(() => {
+    if (scanScheduled || state.disposed) return;
+    scanScheduled = true;
+    requestAnimationFrame(() => {
+      scanScheduled = false;
+      if (!state.disposed) scanForProjectMenus(state);
+    });
+  });
   state.observer.observe(document.documentElement, { childList: true, subtree: true });
   api.log.info("[add-project-by-path] renderer menu hook active");
 }

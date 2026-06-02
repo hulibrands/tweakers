@@ -752,7 +752,7 @@ function clearObserverTimer(state) {
   state.observerTimer = null;
 }
 
-async function loadPluginStatuses(state) {
+async function loadPluginStatuses(state, attempt = 0) {
   if (nativePatchesSafeMode(state)) return state.pluginStatuses;
   const token = state.pluginStatusToken + 1;
   state.pluginStatusToken = token;
@@ -762,10 +762,21 @@ async function loadPluginStatuses(state) {
     state.pluginStatuses = normalizePluginStatuses(result);
     return state.pluginStatuses;
   } catch (error) {
-    if (state.pluginStatusToken === token) {
-      state.pluginStatuses = { status: "error", items: [], byKey: Object.create(null), message: errorMessage(error) };
-      state.api.log.warn(`Tweaks Directory plugin status load failed: ${errorMessage(error)}`);
+    if (state.pluginStatusToken !== token) return state.pluginStatuses;
+    // The main-process IPC handler registers a few ms after the renderer first
+    // calls during cold start / hot reload. Treat an early "no handler" miss as
+    // transient and retry briefly before surfacing an error badge, so the first
+    // status load doesn't get stuck in a hard-error state until a DOM mutation
+    // happens to retrigger it.
+    const transient = /no handler registered/i.test(errorMessage(error));
+    const timerHost = getTimerHost();
+    if (transient && attempt < 5 && timerHost) {
+      await new Promise((resolve) => timerHost.setTimeout(resolve, 200));
+      if (state.pluginStatusToken !== token) return state.pluginStatuses;
+      return loadPluginStatuses(state, attempt + 1);
     }
+    state.pluginStatuses = { status: "error", items: [], byKey: Object.create(null), message: errorMessage(error) };
+    state.api.log.warn(`Tweaks Directory plugin status load failed: ${errorMessage(error)}`);
     return state.pluginStatuses;
   }
 }

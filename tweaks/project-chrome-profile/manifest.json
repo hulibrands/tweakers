@@ -33,6 +33,7 @@
     "command": "node",
     "args": [
       "./mcp-server.js"
-    ]
+    ],
+    "enabledByDefault": false
   }
 }

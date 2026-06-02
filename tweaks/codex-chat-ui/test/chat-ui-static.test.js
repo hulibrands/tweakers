@@ -54,6 +54,14 @@ test("payload parsing stays data-only and hides source only after render", () =>
   assert.match(source, /hideSourceBlocks\(record\.sourceBlocks\)/);
 });
 
+test("renderer observer ignores streaming character updates", () => {
+  const observeCall = source.match(/state\.observer\.observe\(document\.documentElement, \{([\s\S]*?)\n  \}\);/);
+  assert.ok(observeCall);
+  assert.match(observeCall[1], /childList: true/);
+  assert.match(observeCall[1], /subtree: true/);
+  assert.doesNotMatch(observeCall[1], /characterData/);
+});
+
 test("fallback behavior and file tree rendering are present", () => {
   assert.match(source, /showFallbacks/);
   assert.match(source, /Unsupported block/);
