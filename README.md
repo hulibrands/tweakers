@@ -35,6 +35,12 @@ ln -s "$PWD/tweaks/followup" "$HOME/Library/Application Support/codex-plusplus/t
 
 Then reload Codex++ or use Force Reload from the Tweaks page.
 
+## ShadGPT Update Readiness
+
+Standalone tweaks depend on the host ShadGPT runtime to survive official Codex
+app updates. The expected Doctor/Watcher/Patcher surface is documented in
+[`docs/shadgpt-update-readiness.md`](docs/shadgpt-update-readiness.md).
+
 ## Compatibility
 
 These folders are copied from the Codex++ project and kept usable as ordinary Codex++ tweaks. The public repository metadata points back to `hulibrands/tweakers`, while individual manifests retain their tweak ids so existing Codex++ installs can continue to recognize them.
