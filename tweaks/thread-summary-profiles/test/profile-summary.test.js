@@ -5,18 +5,13 @@ const path = require("node:path");
 const test = require("node:test");
 
 const tweak = require("../index.js").__test;
-const manifest = require("../manifest.json");
 
-test("manifest declares settings permission for the registered settings page", () => {
-  assert.ok(Array.isArray(manifest.permissions));
-  assert.ok(manifest.permissions.includes("settings"));
-});
-
-test("resolver emits all six profile rows in stable order with local metadata", () => {
+test("resolver emits project-scoped profile rows in stable order with local metadata", () => {
   const root = tempDir();
   const projectPath = path.join(root, "repo");
   const userRoot = path.join(root, "codex-plusplus");
   fs.mkdirSync(path.join(projectPath, ".codex"), { recursive: true });
+  fs.mkdirSync(path.join(projectPath, ".railway"), { recursive: true });
   fs.mkdirSync(path.join(projectPath, ".git"), { recursive: true });
   fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
   fs.writeFileSync(path.join(projectPath, ".codex", "config.toml"), [
@@ -25,8 +20,12 @@ test("resolver emits all six profile rows in stable order with local metadata", 
     "url = \"https://mcp.supabase.com/mcp?project_ref=abc123&features=database,docs\"",
     "bearer_token_env_var = \"SUPABASE_ACCESS_TOKEN\"",
   ].join("\n"), "utf8");
-  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
-    chromeAssignments: {
+  fs.writeFileSync(path.join(projectPath, ".railway", "project.json"), JSON.stringify({
+    projectId: "railway-project-1",
+    projectName: "Railway Project",
+  }), "utf8");
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify({
+    assignments: {
       [projectPath]: {
         profileName: "Work",
         profileDirectory: "Profile 7",
@@ -34,6 +33,8 @@ test("resolver emits all six profile rows in stable order with local metadata", 
         updatedAt: "2026-05-28T12:00:00.000Z",
       },
     },
+  }), "utf8");
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
     googleWorkspaceAssignments: {
       [projectPath]: {
         gmail: { email: "mail@example.test", source: "manual", updatedAt: "2026-05-28T12:00:00.000Z" },
@@ -44,6 +45,13 @@ test("resolver emits all six profile rows in stable order with local metadata", 
       [projectPath]: {
         profile: "admin-56995",
         workspace: "admin-56995",
+        updatedAt: "2026-05-28T12:00:00.000Z",
+      },
+    },
+    decodoAssignments: {
+      [projectPath]: {
+        accountName: "Repo Decodo",
+        username: "repo-decodo",
         updatedAt: "2026-05-28T12:00:00.000Z",
       },
     },
@@ -72,7 +80,7 @@ test("resolver emits all six profile rows in stable order with local metadata", 
   });
 
   assert.deepEqual(summary.rows.map((row) => row.id), tweak.ROW_ORDER);
-  assert.deepEqual(summary.rows.map((row) => row.label), ["Chrome", "Supabase", "GitHub", "Google Drive", "Gmail", "Modal"]);
+  assert.deepEqual(summary.rows.map((row) => row.label), ["Chrome", "Supabase", "GitHub", "Google Drive", "Gmail", "Modal", "Decodo", "Railway"]);
   assert.equal(summary.rows[0].value, "Work");
   assert.equal(summary.rows[1].value, "abc123");
   assert.equal(summary.rows[1].detail, "database, docs");
@@ -80,6 +88,8 @@ test("resolver emits all six profile rows in stable order with local metadata", 
   assert.equal(summary.rows[3].value, "drive@example.test");
   assert.equal(summary.rows[4].value, "mail@example.test");
   assert.equal(summary.rows[5].status, "CLI checked");
+  assert.equal(summary.rows[6].value, "Repo Decodo");
+  assert.equal(summary.rows[7].value, "Railway Project");
   assert.ok(summary.rows.every((row) => row.action));
   assert.doesNotMatch(JSON.stringify(summary), /SUPABASE_ACCESS_TOKEN|bearer|token/i);
 });
@@ -101,6 +111,58 @@ test("resolver uses safe fallback rows when nothing is configured", () => {
   });
 
   assert.deepEqual(summary.rows, []);
+});
+
+test("resolver hides saved provider accounts without project assignment or project config", () => {
+  const root = tempDir();
+  const projectPath = path.join(root, "repo");
+  const userRoot = path.join(root, "codex-plusplus");
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    supabaseProfiles: [{ name: "Saved Supabase", projectRef: "global-supabase", bearerTokenEnvVar: "SUPABASE_ACCESS_TOKEN" }],
+    modalWorkspaceAccounts: [{ id: "modal-global", name: "Global Modal", profile: "global", workspace: "global" }],
+    decodoAccounts: [{ id: "decodo-global", name: "Global Decodo", username: "global-decodo" }],
+  }), "utf8");
+
+  const summary = tweak.buildThreadProfileSummary({ projectPath }, {
+    fs,
+    os,
+    path,
+    userRoot,
+    home: root,
+    skipModalCli: true,
+    childProcess: { execFileSync: () => "" },
+  });
+
+  assert.deepEqual(summary.rows, []);
+  assert.doesNotMatch(JSON.stringify(summary), /Global|global-supabase|global-decodo/);
+});
+
+test("resolver shows Railway only from project-local Railway config", () => {
+  const root = tempDir();
+  const projectPath = path.join(root, "repo");
+  const userRoot = path.join(root, "codex-plusplus");
+  fs.mkdirSync(path.join(projectPath, ".railway"), { recursive: true });
+  fs.writeFileSync(path.join(projectPath, ".railway", "environment.json"), JSON.stringify({
+    projectId: "railway-project-1",
+    environmentName: "production",
+  }), "utf8");
+
+  const summary = tweak.buildThreadProfileSummary({ projectPath }, {
+    fs,
+    os,
+    path,
+    userRoot,
+    home: root,
+    skipModalCli: true,
+    childProcess: { execFileSync: () => "" },
+  });
+  const railway = summary.rows.find((row) => row.id === "railway");
+
+  assert.equal(railway.value, "railway-project-1");
+  assert.equal(railway.detail, "production");
+  assert.equal(railway.status, "Project config detected");
 });
 
 test("resolver infers the only configured project when renderer context is missing", () => {
@@ -132,59 +194,40 @@ test("resolver infers the only configured project when renderer context is missi
   assert.equal(summary.rows[0].value, "Only Profile");
 });
 
-test("Chrome summary prefers Projects storage and ignores cleared legacy assignments", () => {
+test("resolver uses the current working directory when renderer context is missing and multiple projects exist", () => {
   const root = tempDir();
-  const projectPath = path.join(root, "repo");
+  const firstProject = path.join(root, "Projects", "first");
+  const secondProject = path.join(root, "Projects", "second");
   const userRoot = path.join(root, "codex-plusplus");
   fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
-  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(firstProject, { recursive: true });
+  fs.mkdirSync(secondProject, { recursive: true });
   fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify({
     assignments: {
-      [projectPath]: {
-        profileName: "Legacy Profile",
-        profileDirectory: "Profile 1",
-      },
+      [firstProject]: { profileName: "First Profile", profileDirectory: "Profile 1" },
+      [secondProject]: { profileName: "Second Profile", profileDirectory: "Profile 2" },
     },
   }), "utf8");
   fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
-    chromeAssignments: {
-      [projectPath]: {
-        profileName: "Projects Profile",
-        profileDirectory: "Profile 9",
-      },
-    },
+    sidebarProjects: [
+      { name: "First", projectPath: firstProject },
+      { name: "Second", projectPath: secondProject },
+    ],
   }), "utf8");
 
-  const summary = tweak.buildThreadProfileSummary({ projectPath }, {
+  const summary = tweak.buildThreadProfileSummary({}, {
     fs,
     os,
     path,
     userRoot,
     home: root,
+    cwd: path.join(secondProject, "nested"),
     skipModalCli: true,
     childProcess: { execFileSync: () => "" },
   });
 
-  assert.equal(summary.rows[0].value, "Projects Profile");
-
-  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
-    chromeAssignments: {},
-    chromeAssignmentClears: {
-      [projectPath]: "2026-06-01T00:00:00.000Z",
-    },
-  }), "utf8");
-
-  const cleared = tweak.buildThreadProfileSummary({ projectPath }, {
-    fs,
-    os,
-    path,
-    userRoot,
-    home: root,
-    skipModalCli: true,
-    childProcess: { execFileSync: () => "" },
-  });
-
-  assert.deepEqual(cleared.rows, []);
+  assert.equal(summary.projectPath, secondProject);
+  assert.equal(summary.rows[0].value, "Second Profile");
 });
 
 test("modal row warns when active CLI context differs from assignment", () => {
@@ -281,12 +324,11 @@ test("resolver maps visible TRR workspace context to configured rows only", () =
   });
 
   assert.equal(summary.projectPath, projectPath);
-  assert.deepEqual(summary.rows.map((row) => row.id), ["chrome", "supabase", "github", "modal"]);
+  assert.deepEqual(summary.rows.map((row) => row.id), ["chrome", "supabase", "github"]);
   assert.deepEqual(summary.rows.map((row) => row.value), [
     "admin@thereality.report",
     "vwxfvzutyufrkhfgoeaa",
     "therealityreport/trr-workspace",
-    "trr-backend-jobs",
   ]);
 });
 

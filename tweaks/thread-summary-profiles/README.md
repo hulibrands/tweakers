@@ -11,7 +11,7 @@ The tweak displays the existing local connection truth for the active project:
 - Gmail
 - Modal
 
-It does not create account settings or write profile assignments. Chrome, Google Workspace, and Modal data are read from the existing `co.thomashulihan.projects` storage file, with legacy Chrome fallback reads from `co.thomashulihan.project-chrome-profile`. Supabase data is read from the project `.codex/config.toml`, and GitHub data is read from local git remotes.
+It does not create account settings or write profile assignments. Chrome data is read from the existing `co.thomashulihan.project-chrome-profile` storage file, Google Workspace and Modal data are read from the existing `co.thomashulihan.projects` storage file, Supabase data is read from the project `.codex/config.toml`, and GitHub data is read from local git remotes.
 
 Privacy rules:
 
@@ -23,5 +23,5 @@ Privacy rules:
 Focused tests can be run with:
 
 ```sh
-node --test tweaks/thread-summary-profiles/test/*.js
+node --test tweaks/base/thomashulihan-thread-summary-profiles/test/*.test.js
 ```

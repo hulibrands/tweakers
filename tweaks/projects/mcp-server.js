@@ -20,7 +20,7 @@ const CHROME_CLEARED_ASSIGNMENTS_KEY = "chromeAssignmentClears";
 const tools = [
   {
     name: "projects_google_workspace_resolve",
-    description: "Resolve project-local Gmail, Google Drive, and Chrome account assignments before using those plugins.",
+    description: "Resolve project-local Gmail and Google Drive account assignments before using those plugins.",
     inputSchema: {
       type: "object",
       properties: {
@@ -31,20 +31,13 @@ const tools = [
     },
   },
   {
-    name: "projects_connections_resolve",
-    description: "Resolve all project-local connection assignments, including Chrome profile routing and Google Workspace accounts.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectPath: { type: "string", description: "Absolute project path or cwd." },
-        service: { type: "string", enum: ["chrome", "gmail", "google-drive"], description: "Optional service to resolve." },
-      },
-      required: ["projectPath"],
-    },
+    name: "projects_google_workspace_list_assignments",
+    description: "List configured per-project Gmail and Google Drive assignments.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "projects_chrome_profile_resolve",
-    description: "Resolve the Projects-owned Chrome profile assignment for a project path.",
+    description: "Resolve the Chrome profile assignment for a project path from Projects-managed Chrome assignments.",
     inputSchema: {
       type: "object",
       properties: {
@@ -54,23 +47,15 @@ const tools = [
     },
   },
   {
-    name: "projects_google_workspace_list_assignments",
-    description: "List configured per-project Gmail, Google Drive, and Chrome assignments.",
+    name: "projects_chrome_profile_list_assignments",
+    description: "List configured project-to-Chrome-profile assignments.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
 
-function readStore() {
+function readStore(file = STORAGE_FILE) {
   try {
-    return JSON.parse(fs.readFileSync(STORAGE_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function readLegacyChromeStore() {
-  try {
-    return JSON.parse(fs.readFileSync(LEGACY_CHROME_STORAGE_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return {};
   }
@@ -86,11 +71,16 @@ function assignments() {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+function chromeStore() {
+  const value = readStore();
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
 function chromeAssignments() {
-  const store = readStore();
+  const store = chromeStore();
   const value = store[CHROME_ASSIGNMENTS_KEY];
   const cleared = store[CHROME_CLEARED_ASSIGNMENTS_KEY];
-  const legacy = readLegacyChromeStore().assignments;
+  const legacy = readStore(LEGACY_CHROME_STORAGE_FILE).assignments;
   const merged = value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
   const clearedMap = cleared && typeof cleared === "object" && !Array.isArray(cleared) ? cleared : {};
   const legacyMap = legacy && typeof legacy === "object" && !Array.isArray(legacy) ? legacy : {};
@@ -100,6 +90,11 @@ function chromeAssignments() {
     merged[projectPath] = assignment;
   }
   return merged;
+}
+
+function defaultChromeProfile() {
+  const value = chromeStore().defaultProfile || readStore(LEGACY_CHROME_STORAGE_FILE).defaultProfile;
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 
 function normalizeService(service) {
@@ -135,35 +130,10 @@ function resolveProject(projectPath, service = "") {
   return { projectPath: match[0], services: resolved };
 }
 
-function resolveChromeProject(projectPath) {
-  if (typeof projectPath !== "string" || projectPath.trim() === "") return null;
-  const normalized = path.resolve(projectPath.trim());
-  const entries = Object.values(chromeAssignments())
-    .filter((entry) => entry && typeof entry.projectPath === "string")
-    .filter((entry) => normalized === entry.projectPath || normalized.startsWith(`${entry.projectPath}${path.sep}`))
-    .sort((a, b) => b.projectPath.length - a.projectPath.length);
-  return entries[0] || null;
-}
-
-function resolveConnections(projectPath, service = "") {
-  const requested = normalizeConnectionService(service);
-  const includeChrome = !requested || requested === "chrome";
-  const includeGoogle = !requested || requested === "gmail" || requested === "google-drive";
-  return {
-    projectPath: typeof projectPath === "string" ? path.resolve(projectPath.trim()) : "",
-    chrome: includeChrome ? resolveChromeProject(projectPath) : undefined,
-    googleWorkspace: includeGoogle ? resolveProject(projectPath, requested === "chrome" ? "" : requested) : undefined,
-  };
-}
-
 function envFor(result) {
   const env = {};
-  const chrome = result?.chrome || result?.assignment?.chrome;
-  const chromeProfiles = normalizeChromeProfiles(chrome);
-  const preferencesPath = chromeProfiles[0]?.preferencesPath || chrome?.preferencesPath || "";
-  if (preferencesPath) env.CODEX_CHROME_PREFERENCES_PATH = preferencesPath;
-  const gmail = result?.services?.gmail || result?.googleWorkspace?.services?.gmail;
-  const drive = result?.services?.["google-drive"] || result?.googleWorkspace?.services?.["google-drive"];
+  const gmail = result?.services?.gmail;
+  const drive = result?.services?.["google-drive"];
   if (gmail?.email) {
     env.CODEX_PROJECT_GMAIL_ACCOUNT = gmail.email;
     env.GMAIL_ACCOUNT_EMAIL = gmail.email;
@@ -177,14 +147,8 @@ function envFor(result) {
 
 function instructionsFor(result) {
   const lines = [];
-  const chrome = result?.chrome || result?.assignment?.chrome;
-  const chromeProfiles = normalizeChromeProfiles(chrome);
-  if (chromeProfiles.length) {
-    const profileList = chromeProfiles.map((profile) => `"${profile.profileName || profile.profileDirectory}" (${profile.profileDirectory})`).join(", ");
-    lines.push(`Before using [@Chrome](plugin://chrome@openai-bundled) for this project, prefer ${profileList}.`);
-  }
-  const gmail = result?.services?.gmail || result?.googleWorkspace?.services?.gmail;
-  const drive = result?.services?.["google-drive"] || result?.googleWorkspace?.services?.["google-drive"];
+  const gmail = result?.services?.gmail;
+  const drive = result?.services?.["google-drive"];
   if (gmail?.email) {
     lines.push(`Before using [@gmail](plugin://gmail@openai-curated) for this project, use the Gmail connector account ${gmail.email}.`);
   }
@@ -194,40 +158,9 @@ function instructionsFor(result) {
   return lines;
 }
 
-function normalizeConnectionService(service) {
-  const value = String(service || "").trim().toLowerCase();
-  if (!value) return "";
-  if (value === "chrome") return "chrome";
-  return normalizeService(value);
-}
-
-function normalizeChromeProfiles(assignment) {
-  if (!assignment) return [];
-  if (Array.isArray(assignment.preferredProfiles) && assignment.preferredProfiles.length) return assignment.preferredProfiles;
-  if (Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length) return assignment.allowedProfiles;
-  if (Array.isArray(assignment.preferencesPaths) && assignment.preferencesPaths.length) {
-    return assignment.preferencesPaths.map((preferencesPath, index) => ({
-      profileDirectory: Array.isArray(assignment.profileDirectories)
-        ? assignment.profileDirectories[index]
-        : path.basename(path.dirname(preferencesPath)),
-      profileName: Array.isArray(assignment.profileNames)
-        ? assignment.profileNames[index]
-        : path.basename(path.dirname(preferencesPath)),
-      preferencesPath,
-      userDataDir: path.dirname(path.dirname(preferencesPath)),
-    }));
-  }
-  return [{
-    profileDirectory: assignment.profileDirectory,
-    profileName: assignment.profileName,
-    preferencesPath: assignment.preferencesPath,
-    userDataDir: assignment.userDataDir,
-  }].filter((profile) => profile.profileDirectory || profile.preferencesPath);
-}
-
 function listAssignments() {
   const accountList = accounts();
-  const google = Object.entries(assignments()).map(([projectPath, services]) => ({
+  return Object.entries(assignments()).map(([projectPath, services]) => ({
     projectPath,
     services: Object.fromEntries(Object.entries(services || {}).map(([service, assignment]) => [
       service,
@@ -237,10 +170,61 @@ function listAssignments() {
       },
     ])),
   }));
-  return {
-    googleWorkspace: google,
-    chrome: Object.values(chromeAssignments()),
-  };
+}
+
+function resolveChromeProject(projectPath) {
+  if (typeof projectPath !== "string" || projectPath.trim() === "") return null;
+  const normalized = path.resolve(projectPath.trim());
+  const entries = Object.values(chromeAssignments())
+    .filter((entry) => entry && typeof entry.projectPath === "string")
+    .filter((entry) => normalized === entry.projectPath || normalized.startsWith(`${entry.projectPath}${path.sep}`))
+    .sort((a, b) => b.projectPath.length - a.projectPath.length);
+  return entries[0] || null;
+}
+
+function normalizePreferredProfiles(assignment) {
+  if (!assignment) return [];
+  if (Array.isArray(assignment.preferredProfiles) && assignment.preferredProfiles.length) {
+    return assignment.preferredProfiles;
+  }
+  if (Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length) {
+    return assignment.allowedProfiles;
+  }
+  if (Array.isArray(assignment.preferencesPaths) && assignment.preferencesPaths.length) {
+    return assignment.preferencesPaths.map((preferencesPath, index) => ({
+      profileDirectory: Array.isArray(assignment.profileDirectories)
+        ? assignment.profileDirectories[index]
+        : path.basename(path.dirname(preferencesPath)),
+      profileName: Array.isArray(assignment.profileNames)
+        ? assignment.profileNames[index]
+        : path.basename(path.dirname(preferencesPath)),
+      profileAliases: profileAliasesAtIndex(assignment, index),
+      preferencesPath,
+      userDataDir: path.dirname(path.dirname(preferencesPath)),
+    }));
+  }
+  return assignment.profileDirectory || assignment.preferencesPath ? [{
+    profileDirectory: assignment.profileDirectory,
+    profileName: assignment.profileName,
+    profileAliases: normalizeProfileAliases(assignment.profileAliases),
+    preferencesPath: assignment.preferencesPath,
+    userDataDir: assignment.userDataDir,
+  }] : [];
+}
+
+function normalizeProfileAliases(input) {
+  const values = Array.isArray(input) ? input : typeof input === "string" ? [input] : [];
+  return [...new Set(values
+    .filter((value) => typeof value === "string")
+    .map((value) => value.trim())
+    .filter(Boolean))];
+}
+
+function profileAliasesAtIndex(assignment, index) {
+  const aliases = assignment?.profileAliases;
+  if (Array.isArray(aliases?.[index])) return normalizeProfileAliases(aliases[index]);
+  if (index === 0) return normalizeProfileAliases(aliases);
+  return [];
 }
 
 function text(value) {
@@ -261,36 +245,31 @@ async function handle(message) {
     const args = message.params?.arguments || {};
     if (name === "projects_google_workspace_resolve") {
       const result = resolveProject(args.projectPath, args.service);
-      const chrome = resolveChromeProject(args.projectPath);
       return text({
-        matched: Boolean(result || chrome),
-        assignment: result,
-        chromeAssignment: chrome,
-        env: envFor({ googleWorkspace: result, chrome }),
-        instructions: instructionsFor({ googleWorkspace: result, chrome }),
-      });
-    }
-    if (name === "projects_connections_resolve") {
-      const result = resolveConnections(args.projectPath, args.service);
-      return text({
-        matched: Boolean(result.chrome || result.googleWorkspace),
+        matched: Boolean(result),
         assignment: result,
         env: envFor(result),
         instructions: instructionsFor(result),
       });
     }
+    if (name === "projects_google_workspace_list_assignments") {
+      return text({ storageFile: STORAGE_FILE, assignments: listAssignments() });
+    }
     if (name === "projects_chrome_profile_resolve") {
       const match = resolveChromeProject(args.projectPath);
+      const fallback = match ? null : defaultChromeProfile();
+      const resolved = match || fallback;
+      const preferredProfiles = normalizePreferredProfiles(resolved);
       return text({
         matched: Boolean(match),
         assignment: match,
-        allowedProfiles: normalizeChromeProfiles(match),
-        env: envFor({ chrome: match }),
-        instructions: instructionsFor({ chrome: match }),
+        defaultProfile: fallback,
+        preferredProfiles,
+        env: resolved ? { CODEX_CHROME_PREFERENCES_PATH: preferredProfiles[0]?.preferencesPath || resolved.preferencesPath } : {},
       });
     }
-    if (name === "projects_google_workspace_list_assignments") {
-      return text({ storageFile: STORAGE_FILE, legacyChromeStorageFile: LEGACY_CHROME_STORAGE_FILE, assignments: listAssignments() });
+    if (name === "projects_chrome_profile_list_assignments") {
+      return text({ storageFile: STORAGE_FILE, legacyStorageFile: LEGACY_CHROME_STORAGE_FILE, assignments: Object.values(chromeAssignments()) });
     }
     throw new Error(`Unknown tool: ${name}`);
   }

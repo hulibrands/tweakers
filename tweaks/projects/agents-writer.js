@@ -1,7 +1,6 @@
 const PROJECTS_TWEAK_ID = "co.thomashulihan.projects";
 const CHROME_TWEAK_ID = "co.thomashulihan.project-chrome-profile";
 const CHROME_ASSIGNMENTS_KEY = "chromeAssignments";
-const CHROME_CLEARED_ASSIGNMENTS_KEY = "chromeAssignmentClears";
 const GOOGLE_WORKSPACE_ASSIGNMENTS_KEY = "googleWorkspaceAssignments";
 const MODAL_WORKSPACE_ASSIGNMENTS_KEY = "modalWorkspaceAssignments";
 const DECODO_ASSIGNMENTS_KEY = "decodoAssignments";
@@ -36,11 +35,13 @@ function projectConnectionInstructionSummary(input, options = {}) {
   const path = options.path || require("node:path");
   const projectPath = normalizeProjectPath(input?.projectPath || input, options);
   const projectStorage = readStorageFile(PROJECTS_TWEAK_ID, options);
-  const chromeStorage = readChromeStorage(options);
+  const chromeStorage = readStorageFile(CHROME_TWEAK_ID, options);
+  const projectChromeAssignments = projectStorage[CHROME_ASSIGNMENTS_KEY] || {};
+  const legacyChromeAssignments = chromeStorage.assignments || {};
   return {
     projectPath,
     projectName: String(input?.projectName || input?.name || path.basename(projectPath)).trim(),
-    chromeAssignment: chromeStorage.assignments?.[projectPath] || null,
+    chromeAssignment: projectChromeAssignments[projectPath] || legacyChromeAssignments[projectPath] || null,
     googleWorkspaceAssignments: projectStorage[GOOGLE_WORKSPACE_ASSIGNMENTS_KEY]?.[projectPath] || {},
     modalWorkspaceAssignment: projectStorage[MODAL_WORKSPACE_ASSIGNMENTS_KEY]?.[projectPath] || null,
     decodoAssignment: projectStorage[DECODO_ASSIGNMENTS_KEY]?.[projectPath] || null,
@@ -159,8 +160,8 @@ function buildProjectConnectionInstructionBlock(summary, options = {}) {
   return {
     text: [
       AGENTS_BLOCK_START,
-      "## Project Connections",
-      `Project Settings manages these project connection defaults for ${projectName}.`,
+      "## Project Settings",
+      `Project Settings manages these plugin account defaults for ${projectName}.`,
       ...lines,
       AGENTS_BLOCK_END,
     ].join("\n"),
@@ -271,25 +272,6 @@ function normalizePreferredProfiles(assignment) {
     profileDirectory: String(profileDirectories[index] || "").trim(),
     profileName: String(profileNames[index] || profileDirectories[index] || "Chrome profile").trim(),
   })).filter((profile) => profile.profileDirectory || profile.preferencesPath);
-}
-
-function readChromeStorage(options = {}) {
-  const projectStorage = readStorageFile(PROJECTS_TWEAK_ID, options);
-  const legacyStorage = readStorageFile(CHROME_TWEAK_ID, options);
-  const assignments = projectStorage[CHROME_ASSIGNMENTS_KEY] && typeof projectStorage[CHROME_ASSIGNMENTS_KEY] === "object" && !Array.isArray(projectStorage[CHROME_ASSIGNMENTS_KEY])
-    ? { ...projectStorage[CHROME_ASSIGNMENTS_KEY] }
-    : {};
-  const cleared = projectStorage[CHROME_CLEARED_ASSIGNMENTS_KEY] && typeof projectStorage[CHROME_CLEARED_ASSIGNMENTS_KEY] === "object" && !Array.isArray(projectStorage[CHROME_CLEARED_ASSIGNMENTS_KEY])
-    ? projectStorage[CHROME_CLEARED_ASSIGNMENTS_KEY]
-    : {};
-  const legacyAssignments = legacyStorage.assignments && typeof legacyStorage.assignments === "object" && !Array.isArray(legacyStorage.assignments)
-    ? legacyStorage.assignments
-    : {};
-  for (const [projectPath, assignment] of Object.entries(legacyAssignments)) {
-    if (Object.prototype.hasOwnProperty.call(cleared, projectPath)) continue;
-    if (!Object.prototype.hasOwnProperty.call(assignments, projectPath)) assignments[projectPath] = assignment;
-  }
-  return { assignments };
 }
 
 function readSupabaseBinding(projectPathInput, options = {}) {

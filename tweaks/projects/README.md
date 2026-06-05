@@ -5,7 +5,7 @@ Adds a Projects settings page for per-project connection review and assignment.
 ## What It Shows
 
 - Sidebar project color controls shared with ShadGPT UI Improvements.
-- Chrome profile assignments owned by Projects, with one-time fallback import from legacy Plugin Profiles storage.
+- Chrome profile assignments managed by ShadGPT Projects.
 - Read-only GitHub repository and local Git identity links for each project.
 - Project-local Gmail account assignments.
 - Project-local Google Drive account assignments for Drive, Docs, Sheets, and Slides plugin work.
@@ -19,7 +19,7 @@ Adds a Projects settings page for per-project connection review and assignment.
 
 Chrome profile choices are filtered to profiles where the configured Codex Chrome Extension is installed and enabled. The dropdown shows the profile avatar and email, and intentionally hides Chrome profile directory numbers from the visible label.
 
-Projects replaces the old Plugin Profiles settings page. Existing `co.thomashulihan.project-chrome-profile` assignments are read as legacy fallback data and copied into Projects storage the first time Projects resolves them.
+Each project page also shows an Active Chrome Profile tile above the editable connection rows. The tile is read-only: it shows whether the current project is using its own saved Chrome route, inheriting the default route, or missing a route. Opening a project page refreshes the active Chrome profile signal used by bundled `@Chrome` scripts when they launch outside the project directory.
 
 ## GitHub Repositories
 

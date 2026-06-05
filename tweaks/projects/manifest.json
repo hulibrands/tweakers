@@ -3,7 +3,7 @@
   "name": "Projects",
   "version": "1.0.0",
   "githubRepo": "hulibrands/tweakers",
-  "description": "Adds a Projects settings page that coordinates project Chrome profiles, Google Workspace, Supabase, and environment inventory.",
+  "description": "Adds a Projects settings page that coordinates project Chrome, Google Workspace, Supabase, and environment inventory.",
   "author": {
     "name": "Thomas Hulihan",
     "url": "https://github.com/hulibrands"
@@ -12,8 +12,6 @@
   "tags": [
     "projects",
     "chrome",
-    "profiles",
-    "google",
     "supabase",
     "env"
   ],

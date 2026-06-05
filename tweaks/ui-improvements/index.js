@@ -66,11 +66,6 @@ const FEATURE_DEFS = Object.freeze([
       "Remove the rounded inner corners on the main content panel so it sits flush against the sidebar.",
   },
   {
-    id: "settings-search",
-    title: "Settings search",
-    description: "Add a search field above Settings tabs so sections can be filtered quickly.",
-  },
-  {
     id: "match-sidebar-width",
     title: "Match settings sidebar width",
     description:
@@ -126,7 +121,6 @@ const DEFAULT_FEATURE_FLAGS = Object.freeze({
   "show-usage-in-sidebar": false,
   "show-message-metrics-on-hover": true,
   "square-sidebar": false,
-  "settings-search": false,
   "match-sidebar-width": true,
   "sidebar-action-grid": true,
   "sidebar-project-backgrounds": true,
@@ -805,6 +799,24 @@ const FEATURES = {
      *     at:number }
      * `pct` is REMAINING (Codex displays remaining %, e.g. "100%").
      * `resetAt` is whatever Codex shows verbatim (typically "HH:MM").
+     *
+     * Data strategy (single usage-fetch path):
+     * -----------------------------------------
+     * When the analytics tweak (co.thomashulihan.usage-analytics) is present,
+     * its main-process IPC handler owns the single "/wham/usage" reader. We
+     * source data through the same `api.ipc.invoke("usage-fetch")` IPC channel
+     * instead of maintaining a second independent polling loop with a separate
+     * renderer bridge. Once IPC succeeds (`ipcUsageConfirmed`), the renderer
+     * bridge injection and `window.message` listener are never activated —
+     * eliminating the observer-storm risk of a second fetch path.
+     *
+     * Backward-compat fallback:
+     * When IPC fails (analytics absent, older runtime), behaviour is unchanged:
+     * DOM scanning (breakdown grid + compact node) and the renderer bridge
+     * fallback remain active. No regression, no thrown errors.
+     *
+     * No characterData observers in this feature. rAF-debounced. Observer-storm
+     * rule compliant.
      */
     let snapshot = readSnapshot(api);
     let mounted = null; // HTMLElement currently rendered in the sidebar
@@ -813,6 +825,11 @@ const FEATURES = {
     let directUsageLastAttemptAt = 0;
     let directUsageFailureLogged = false;
     let directUsageSuccessLogged = false;
+    // Set true the first time api.ipc.invoke("usage-fetch") succeeds.
+    // When true the renderer bridge + message listener are not activated,
+    // keeping this tweak on the same single fetch path as usage-analytics.
+    let ipcUsageConfirmed = false;
+    // Bridge state — only used when IPC is unavailable.
     let usageBridgeReady = false;
     let usageBridgeReadyLogged = false;
     let usageBridgeScriptInjected = false;
@@ -854,6 +871,8 @@ const FEATURES = {
       }
       return changed;
     };
+
+    // ── bridge fallback (only activated when IPC path is unavailable) ──
 
     const ensureUsageBridgeScript = () => {
       if (usageBridgeScriptInjected) return;
@@ -950,14 +969,11 @@ const FEATURES = {
       window.dispatchEvent(event);
     };
 
-    const fetchCodexAppServerJson = async (url, timeoutMs = 10_000) => {
-      try {
-        return await api.ipc.invoke("usage-fetch", url);
-      } catch {
-        // Older runtimes or a failed main-webview probe fall through to the
-        // renderer bridge attempt below.
-      }
-
+    /**
+     * Fetch /wham/usage via the renderer bridge (fallback when IPC unavailable).
+     * Only called when ipcUsageConfirmed is false and api.ipc.invoke fails.
+     */
+    const fetchViaRendererBridge = (url, timeoutMs = 10_000) => {
       const hostId =
         new URL(window.location.href).searchParams.get("hostId")?.trim() ||
         "local";
@@ -1161,6 +1177,16 @@ const FEATURES = {
       applyUsageEvent(data);
     };
 
+    /**
+     * Fetch /wham/usage and update the snapshot.
+     *
+     * Single-path strategy: try `api.ipc.invoke("usage-fetch")` first — this
+     * is the same channel the usage-analytics tweak uses, so when both tweaks
+     * are active there is exactly ONE /wham/usage reader (the IPC handler in
+     * main). Only when IPC is unavailable do we fall back to the renderer
+     * bridge (legacy runtime or analytics tweak absent). Once IPC has succeeded
+     * once, `ipcUsageConfirmed` is set and the bridge path is never entered.
+     */
     const refreshUsageFromApi = async () => {
       if (directUsageInFlight) return false;
       const now = Date.now();
@@ -1170,14 +1196,32 @@ const FEATURES = {
       directUsageLastAttemptAt = now;
       directUsageInFlight = true;
       try {
-        const status = await fetchCodexAppServerJson("/wham/usage");
+        let status;
+        // ── primary: shared IPC path (usage-analytics or built-in handler) ──
+        try {
+          status = await api.ipc.invoke("usage-fetch", "/wham/usage");
+          // IPC succeeded — remember this so the bridge is never activated.
+          ipcUsageConfirmed = true;
+        } catch {
+          // ── fallback: renderer bridge (only when IPC unavailable) ──
+          if (ipcUsageConfirmed) {
+            // IPC was working before; a transient error — don't re-activate
+            // the bridge path. Treat as a temporary unavailability.
+            return false;
+          }
+          try {
+            status = await fetchViaRendererBridge("/wham/usage");
+          } catch {
+            status = null;
+          }
+        }
         const partial = snapshotFromUsageStatus(status);
         if (partial.fiveHour || partial.weekly) {
           directUsageAvailable = true;
           directUsageFailureLogged = false;
           if (!directUsageSuccessLogged) {
             directUsageSuccessLogged = true;
-            log("api active", partial);
+            log("api active (ipc=" + ipcUsageConfirmed + ")", partial);
           }
           applySnapshot(partial, "api");
           return true;
@@ -1378,6 +1422,8 @@ const FEATURES = {
     // We throttle to one tick per animation frame so a flood of React
     // re-renders can't tank the renderer (Codex mutates the DOM heavily
     // while typing). Coalesces N onMutate() calls into one scan.
+    //
+    // No characterData — rAF-debounced — observer-storm rule compliant.
     let scheduled = false;
     const onMutate = () => {
       if (scheduled) return;
@@ -1399,6 +1445,12 @@ const FEATURES = {
     obs.observe(document.documentElement, { childList: true, subtree: true });
     const interval = window.setInterval(onMutate, 15_000);
     window.addEventListener("focus", onMutate);
+    // The window "message" listener for usage events is part of the renderer
+    // bridge fallback path. When ipcUsageConfirmed becomes true (IPC path is
+    // active — i.e. usage-analytics tweak is present), this listener is a
+    // no-op because the bridge is never injected and `onUsageMessage` only
+    // processes data that arrives via that bridge. We still attach it so
+    // the fallback works on the first load before IPC is confirmed.
     window.addEventListener("message", onUsageMessage);
     document.addEventListener("visibilitychange", onMutate);
 
@@ -1507,6 +1559,11 @@ const FEATURES = {
    * stays inside the sidebar/nav surface and marks itself with
    * `data-codexpp-settings-search` so the runtime Settings injector can ignore
    * search clicks instead of treating them as navigation.
+   *
+   * DORMANT: delisted from FEATURE_DEFS + DEFAULT_FEATURE_FLAGS because the
+   * native Codex app now ships its own settings search, so this is never
+   * activated. The handler is intentionally retained so the feature can be
+   * revived (re-add the id to both registries) without re-implementing it.
    */
   "settings-search"(api) {
     const STYLE_ID = "codexpp-settings-search-style";
@@ -3873,6 +3930,12 @@ const FEATURES = {
     const ATTR = "data-codexpp-sidebar-project-backgrounds";
     const MENU_ATTR = "data-codexpp-sidebar-project-color-menu";
     const COLOR_STORAGE_KEY = PROJECT_COLOR_STORAGE_KEY;
+    const EXCLUDED_PROJECT_IDS = new Set([
+      "cloud:therealityreport/trr-app",
+      "cloud:therealityreport/screenalytics",
+    ]);
+    const CLOUD_PROJECT_PREFIX = "cloud:";
+    const EXCLUDED_PROJECT_LABELS = new Set(["trr-app", "screenalytics"]);
     const ASIDE_SELECTOR = [
       "aside.pointer-events-auto.relative.flex.overflow-hidden",
       "aside.pointer-events-auto.relative.flex.overflow-visible",
@@ -4171,6 +4234,14 @@ const FEATURES = {
       [${MENU_ATTR}="trigger"] {
         color: var(--color-token-foreground);
       }
+
+      div[role="listitem"][aria-label="trr-app"],
+      div[role="listitem"][aria-label="screenalytics"],
+      div[role="listitem"]:has([data-app-action-sidebar-project-id^="cloud:"]),
+      div[role="listitem"]:has([data-app-action-sidebar-project-id="cloud:therealityreport/trr-app"]),
+      div[role="listitem"]:has([data-app-action-sidebar-project-id="cloud:therealityreport/screenalytics"]) {
+        display: none !important;
+      }
     `;
     document.head.appendChild(style);
 
@@ -4214,10 +4285,24 @@ const FEATURES = {
       const text = labelFor(node);
       if (!text || text.length < 2 || text.length > 80) return false;
       if (EXCLUDED_LABELS.has(text)) return false;
+      if (isExcludedProjectRow(node)) return false;
 
       const action = node.querySelector("[role='button'][aria-label]");
       return action instanceof HTMLElement && labelFor(action) === text;
     };
+
+    const isExcludedProjectRow = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (EXCLUDED_PROJECT_LABELS.has(labelFor(node))) return true;
+      const action = node.querySelector("[data-app-action-sidebar-project-id]");
+      const projectId = action instanceof HTMLElement
+        ? action.getAttribute("data-app-action-sidebar-project-id")
+        : null;
+      return Boolean(projectId && (isCloudProjectId(projectId) || EXCLUDED_PROJECT_IDS.has(projectId)));
+    };
+
+    const isCloudProjectId = (projectId) =>
+      typeof projectId === "string" && projectId.trim().toLowerCase().startsWith(CLOUD_PROJECT_PREFIX);
 
     const candidateRows = (sidebar) =>
       Array.from(sidebar.querySelectorAll("div[role='listitem'][aria-label]"))
@@ -5147,6 +5232,10 @@ const FEATURES = {
       if (!sidebar) {
         return;
       }
+
+      sidebar.querySelectorAll("div[role='listitem'][aria-label]").forEach((row) => {
+        if (isExcludedProjectRow(row)) clearRowMarks(row);
+      });
 
       let rows = candidateRows(sidebar);
       rows = rows.filter((node, index) => rows.indexOf(node) === index);

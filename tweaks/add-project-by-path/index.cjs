@@ -24,12 +24,6 @@ module.exports = {
   },
 };
 
-module.exports.__test = {
-  cleanProjectPathInput,
-  expandPath,
-  validateProjectPath,
-};
-
 function startMain(api) {
   if (!globalThis[MAIN_HANDLER_KEY]) {
     api.ipc.handle(IPC_VALIDATE_PATH, (rawPath) => validateProjectPath(rawPath));
@@ -50,8 +44,16 @@ function validateProjectPath(rawPath) {
   try {
     stat = fs.statSync(resolved);
   } catch (error) {
-    if (error?.code === "ENOENT") return { ok: false, error: "That folder does not exist." };
-    return { ok: false, error: statErrorMessage(error, "read") };
+    if (error?.code !== "ENOENT") {
+      return { ok: false, error: statErrorMessage(error, "read") };
+    }
+
+    try {
+      fs.mkdirSync(resolved, { recursive: true });
+      stat = fs.statSync(resolved);
+    } catch (createError) {
+      return { ok: false, error: statErrorMessage(createError, "create") };
+    }
   }
 
   if (!stat.isDirectory()) {
