@@ -67,6 +67,7 @@ function sortOptionsForMode(mode) {
 }
 const NATIVE_DIRECTORY_MODES = ["plugins", "skills"];
 const NATIVE_DIRECTORY_CONTROLS_ENABLED = false;
+const NATIVE_DIRECTORY_META_CACHE_TTL_MS = 2000;
 
 const DOM_SCAN_LIMIT = 650;
 const DEBUG_NODE_SAMPLE_LIMIT = 8;
@@ -145,6 +146,8 @@ module.exports.__test = {
   isNativeDirectoryRowCandidate,
   isInsideAppSidebar,
   groupNativeSkillRowsByPlugin,
+  createNativeDirectoryMetaCache,
+  pluginStatusesSignature,
 };
 
 function startMain(api) {
@@ -160,12 +163,35 @@ function startMain(api) {
     api.log.warn("Tweaks Directory native plugin Files insertion is newer than the loaded ShadGPT runtime; restart Codex to enable plugin file trees.");
   }
 
+  const nativeMetaCache = createNativeDirectoryMetaCache();
+  let lastPluginStatusSignature = "";
+  const clearNativeMetaCache = () => nativeMetaCache.clear();
+  const pluginStatuses = () => {
+    const result = getRuntimePluginStatuses();
+    const signature = pluginStatusesSignature(result);
+    if (lastPluginStatusSignature && signature !== lastPluginStatusSignature) clearNativeMetaCache();
+    lastPluginStatusSignature = signature;
+    return result;
+  };
+
   const cleanups = [
     api.ipc.handle(CHANNELS.listInstalled, () => listInstalledWithStats(manager)),
     api.ipc.handle(CHANNELS.getStore, (force) => manager.getStore(Boolean(force))),
-    api.ipc.handle(CHANNELS.installStoreTweak, (id) => manager.installStoreTweak(String(id || ""))),
-    api.ipc.handle(CHANNELS.setEnabled, (id, enabled) => manager.setEnabled(String(id || ""), Boolean(enabled))),
-    api.ipc.handle(CHANNELS.reload, () => manager.reload()),
+    api.ipc.handle(CHANNELS.installStoreTweak, async (id) => {
+      const result = await manager.installStoreTweak(String(id || ""));
+      clearNativeMetaCache();
+      return result;
+    }),
+    api.ipc.handle(CHANNELS.setEnabled, async (id, enabled) => {
+      const result = await manager.setEnabled(String(id || ""), Boolean(enabled));
+      clearNativeMetaCache();
+      return result;
+    }),
+    api.ipc.handle(CHANNELS.reload, async () => {
+      const result = await manager.reload();
+      clearNativeMetaCache();
+      return result;
+    }),
     api.ipc.handle(CHANNELS.readIconAsset, (id, relPath) => readInstalledTweakIconAsset(manager, id, relPath)),
     api.ipc.handle(CHANNELS.revealTweaksFolder, () => manager.revealTweaksFolder()),
     api.ipc.handle(CHANNELS.openExternal, (url) => manager.openExternal(String(url || ""))),
@@ -193,8 +219,8 @@ function startMain(api) {
       }
       return manager.getPluginFileTree(String(id || ""), options && typeof options === "object" ? options : {});
     }),
-    api.ipc.handle(CHANNELS.getPluginStatuses, () => getRuntimePluginStatuses()),
-    api.ipc.handle(CHANNELS.getDirectoryMeta, () => getNativeDirectoryMeta()),
+    api.ipc.handle(CHANNELS.getPluginStatuses, () => pluginStatuses()),
+    api.ipc.handle(CHANNELS.getDirectoryMeta, (options) => nativeMetaCache.get(options)),
   ];
 
   return () => cleanups.forEach((cleanup) => cleanup());
@@ -296,6 +322,35 @@ function getNativeDirectoryMeta(options = {}) {
     bySkill: indexDirectoryMeta(dedupedSkills, ["name", "displayName", "slash"]),
     byPluginSlug: indexDirectoryMetaSlug(dedupedPlugins, ["id", "name", "displayName", "label"]),
     bySkillSlug: indexDirectoryMetaSlug(dedupedSkills, ["name", "displayName", "slash"]),
+  };
+}
+
+function createNativeDirectoryMetaCache(options = {}) {
+  const ttlMs = Number.isFinite(Number(options.ttlMs)) ? Math.max(0, Number(options.ttlMs)) : NATIVE_DIRECTORY_META_CACHE_TTL_MS;
+  const now = typeof options.now === "function" ? options.now : () => Date.now();
+  const scan = typeof options.scan === "function" ? options.scan : getNativeDirectoryMeta;
+  let entry = null;
+  return {
+    get(request = {}) {
+      const force = Boolean(
+        request === true ||
+        request && typeof request === "object" && (request.force || request.refresh || request.reload)
+      );
+      const currentTime = Number(now());
+      if (!force && entry && Number.isFinite(currentTime) && currentTime - entry.createdAtMs < ttlMs) {
+        return entry.value;
+      }
+      const scanOptions = request && typeof request === "object" ? request : {};
+      const value = scan(scanOptions);
+      entry = {
+        createdAtMs: Number.isFinite(currentTime) ? currentTime : Date.now(),
+        value,
+      };
+      return value;
+    },
+    clear() {
+      entry = null;
+    },
   };
 }
 
@@ -581,6 +636,14 @@ function getRuntimePluginStatuses(options = {}) {
   return { status: "ok", configPath, items, byKey };
 }
 
+function pluginStatusesSignature(result) {
+  const items = Array.isArray(result && result.items) ? result.items : [];
+  return JSON.stringify(items.map((item) => ({
+    key: String(item && item.key || ""),
+    enabled: item && item.enabled !== false,
+  })).sort((a, b) => a.key.localeCompare(b.key)));
+}
+
 function parseConfiguredPlugins(config) {
   const text = String(config || "");
   const entries = [];
@@ -757,7 +820,7 @@ function startRenderer(api) {
   scanForMount(state);
   syncNativePluginIncludesIcons(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
-  void loadNativeDirectoryMeta(state).then(() => syncNativeDirectoryControls(state));
+  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => syncNativeDirectoryControls(state));
   state.observer = new MutationObserver((mutations) => {
     if (mutations && mutations.length > 0 && mutations.every((mutation) => isOwnedPanelMutation(state, mutation))) return;
     scheduleObserverWork(state);
@@ -1129,11 +1192,14 @@ function readDirectoryState(api) {
 
 function normalizeDirectoryState(value) {
   const state = value && typeof value === "object" ? value : {};
-  return {
+  const normalized = {
     tweaks: normalizeDirectoryControls(state.tweaks, DEFAULT_DIRECTORY_STATE.tweaks),
-    plugins: { ...DEFAULT_DIRECTORY_STATE.plugins },
-    skills: { ...DEFAULT_DIRECTORY_STATE.skills },
   };
+  if (NATIVE_DIRECTORY_CONTROLS_ENABLED) {
+    normalized.plugins = normalizeDirectoryControls(state.plugins, DEFAULT_DIRECTORY_STATE.plugins);
+    normalized.skills = normalizeDirectoryControls(state.skills, DEFAULT_DIRECTORY_STATE.skills);
+  }
+  return normalized;
 }
 
 function normalizeDirectoryControls(value, fallback) {
@@ -1151,15 +1217,18 @@ function normalizeDirectoryControls(value, fallback) {
 }
 
 function persistDirectoryState(state) {
-  const next = normalizeDirectoryState({
+  const value = {
     tweaks: {
       filter: state.filter,
       sort: state.sort,
       installedEnabledOnly: state.installedEnabledOnly,
     },
-    plugins: state.nativeDirectoryControls && state.nativeDirectoryControls.plugins,
-    skills: state.nativeDirectoryControls && state.nativeDirectoryControls.skills,
-  });
+  };
+  if (NATIVE_DIRECTORY_CONTROLS_ENABLED) {
+    value.plugins = state.nativeDirectoryControls && state.nativeDirectoryControls.plugins;
+    value.skills = state.nativeDirectoryControls && state.nativeDirectoryControls.skills;
+  }
+  const next = normalizeDirectoryState(value);
   state.directoryState = next;
   writeStoredObject(state.api, PREF_KEYS.directoryState, next, state, "directory filters");
 }
@@ -1232,7 +1301,7 @@ function applyNativePatchPreferences(state) {
   syncNativePluginFilesSection(state, true);
   syncNativePluginIncludesIcons(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
-  void loadNativeDirectoryMeta(state).then(() => syncNativeDirectoryControls(state));
+  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => syncNativeDirectoryControls(state));
 }
 
 function shouldAutoDeactivate(state) {
@@ -1305,12 +1374,12 @@ async function loadPluginStatuses(state, attempt = 0) {
   }
 }
 
-async function loadNativeDirectoryMeta(state, attempt = 0) {
+async function loadNativeDirectoryMeta(state, attempt = 0, request = {}) {
   if (nativePatchesSafeMode(state)) return state.nativeDirectoryMeta;
   const token = state.nativeDirectoryMetaToken + 1;
   state.nativeDirectoryMetaToken = token;
   try {
-    const result = await state.api.ipc.invoke(CHANNELS.getDirectoryMeta);
+    const result = await state.api.ipc.invoke(CHANNELS.getDirectoryMeta, request);
     if (state.nativeDirectoryMetaToken !== token) return state.nativeDirectoryMeta;
     state.nativeDirectoryMeta = applyPluginUsageToNativeMeta(state, normalizeNativeDirectoryMeta(result));
     return state.nativeDirectoryMeta;
@@ -1321,7 +1390,7 @@ async function loadNativeDirectoryMeta(state, attempt = 0) {
     if (transient && attempt < 5 && timerHost) {
       await new Promise((resolve) => timerHost.setTimeout(resolve, 200));
       if (state.nativeDirectoryMetaToken !== token) return state.nativeDirectoryMeta;
-      return loadNativeDirectoryMeta(state, attempt + 1);
+      return loadNativeDirectoryMeta(state, attempt + 1, request);
     }
     state.nativeDirectoryMeta = {
       status: "error",

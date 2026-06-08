@@ -96,6 +96,14 @@ test("broad mutation observers use a scheduler or documented cheap callback", ()
   );
 });
 
+test("message metrics only invokes session scanning after message DOM is visible", () => {
+  const metricsFeature = extractFeatureSource("show-message-metrics-on-hover");
+  assert.match(metricsFeature, /const hasMetricMessageSurface = \(\) =>/);
+  assert.match(metricsFeature, /if \(disposed \|\| !hasMetricMessageSurface\(\)\) return false;/);
+  assert.match(metricsFeature, /const timer = window\.setInterval\(scheduleRefresh, 15_000\);/);
+  assert.doesNotMatch(metricsFeature, /window\.setInterval\(refreshMetrics, 5_000\)/);
+});
+
 function assertCanonicalRegistry(name, ids, expectedIds) {
   assert.equal(ids.length, new Set(ids).size, `${name} should not contain duplicate feature ids`);
 
@@ -109,6 +117,15 @@ function assertCanonicalRegistry(name, ids, expectedIds) {
     { missing: [], extra: [] },
     `${name} should contain exactly its expected feature ids`,
   );
+}
+
+function extractFeatureSource(name) {
+  const marker = `"${name}"(api)`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `Could not find feature ${name}`);
+  const open = source.indexOf("{", start);
+  const close = findMatchingBrace(source, open);
+  return source.slice(start, close + 1);
 }
 
 function extractFeatureDefIds(text) {

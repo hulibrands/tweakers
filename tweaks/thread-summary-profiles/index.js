@@ -6,8 +6,12 @@ const IPC_OPEN_ACTION = "openThreadProfileAction";
 const SECTION_ATTR = "data-codexpp-thread-summary-profiles";
 const OPEN_STATE_KEY = "profiles-section:open";
 const ROW_ORDER = Object.freeze(["chrome", "supabase", "github", "google-drive", "gmail", "modal", "decodo", "railway"]);
+const SUMMARY_CACHE_TTL_MS = 5000;
+const MODAL_CLI_CACHE_TTL_MS = 60000;
 
 let activeCleanup = [];
+let summaryCache = new Map();
+let modalCliCache = new Map();
 
 module.exports = {
   start(api) {
@@ -29,17 +33,23 @@ module.exports = {
     SECTION_ATTR,
     OPEN_STATE_KEY,
     ROW_ORDER,
+    SUMMARY_CACHE_TTL_MS,
+    MODAL_CLI_CACHE_TTL_MS,
+    getCachedThreadProfileSummary,
     buildThreadProfileSummary,
+    resolveThreadSummaryContext,
     buildProfileRows,
     normalizeProfileRow,
     parseGithubRemote,
     parseSupabaseConfigToml,
     sanitizeAction,
+    activeModalWorkspaceContextCached,
     inferRendererProjectContext,
     extractProjectPathFromVisibleText,
     injectProfilesSection,
     findThreadSummaryPanels,
     createProfilesSection,
+    clearThreadProfileCaches,
   },
 };
 
@@ -51,7 +61,7 @@ function startMain(api, cleanup) {
   const home = os.homedir();
   const userRoot = userRootForPlatform(home, path);
 
-  cleanup.push(api.ipc.handle(IPC_GET_SUMMARY, (input = {}) => buildThreadProfileSummary(input, {
+  cleanup.push(api.ipc.handle(IPC_GET_SUMMARY, (input = {}) => getCachedThreadProfileSummary(input, {
     fs,
     os,
     path,
@@ -61,6 +71,7 @@ function startMain(api, cleanup) {
     env: process.env,
   })));
   cleanup.push(api.ipc.handle(IPC_OPEN_ACTION, (action) => openProfileAction(action, { childProcess })));
+  cleanup.push(() => clearThreadProfileCaches());
 }
 
 function startRenderer(api, cleanup) {
@@ -93,6 +104,29 @@ function startRenderer(api, cleanup) {
 }
 
 function buildThreadProfileSummary(input = {}, options = {}) {
+  return buildThreadProfileSummaryFromContext(resolveThreadSummaryContext(input, options), options);
+}
+
+function getCachedThreadProfileSummary(input = {}, options = {}) {
+  const context = resolveThreadSummaryContext(input, options);
+  const cache = options.summaryCache === false ? null : (options.summaryCache || summaryCache);
+  const ttlMs = cacheTtlMs(options.summaryCacheTtlMs, SUMMARY_CACHE_TTL_MS);
+  const now = currentTimeMs(options);
+  const key = context.projectPath || "__unknown__";
+  if (cache && ttlMs > 0 && !input.forceRefresh && !input.refresh) {
+    const cached = cache.get(key);
+    if (cached && now - cached.cachedAt <= ttlMs) {
+      const summary = cloneSummary(cached.summary);
+      if (context.projectName) summary.projectName = context.projectName;
+      return summary;
+    }
+  }
+  const summary = buildThreadProfileSummaryFromContext(context, options);
+  if (cache && ttlMs > 0) cache.set(key, { cachedAt: now, summary: cloneSummary(summary) });
+  return summary;
+}
+
+function resolveThreadSummaryContext(input = {}, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const rawProjectPath = resolveProjectPathInput(input, options);
@@ -100,6 +134,12 @@ function buildThreadProfileSummary(input = {}, options = {}) {
   const requestedPath = resolveStoredProjectPrefix(normalizedProjectPath, options) || normalizedProjectPath;
   const projectPath = requestedPath || inferCurrentWorkingDirectoryProjectPath(options) || inferSingleConfiguredProjectPath(options);
   const projectName = cleanText(input.projectName || (projectPath ? path.basename(projectPath) : ""), 120) || "Unknown project";
+  return { projectPath, projectName };
+}
+
+function buildThreadProfileSummaryFromContext(context = {}, options = {}) {
+  const projectPath = context.projectPath || "";
+  const projectName = context.projectName || "Unknown project";
   return {
     projectPath,
     projectName,
@@ -215,18 +255,19 @@ function modalRow(projectPath, options = {}) {
       action: settingsAction("projects"),
     });
   }
-  const cliContext = activeModalWorkspaceContext(projectPath, options);
+  const cliContext = activeModalWorkspaceContextCached(projectPath, options);
   const conflict = modalWorkspaceConflict(assignment, cliContext);
   const value = assignment.workspace || assignment.accountName || assignment.profile || "Set";
-  let detail = "Active CLI unavailable";
+  const checked = modalCliCheckedSuffix(cliContext);
+  let detail = checked ? `Active CLI unavailable${checked}` : "Active CLI unavailable";
   let status = assignment.updatedAt ? `Assigned ${shortDate(assignment.updatedAt)}` : "Assigned locally";
   let state = "set";
   if (conflict) {
-    detail = `Active CLI: ${conflict.activeProfile} / ${conflict.activeWorkspace}`;
+    detail = `Active CLI: ${conflict.activeProfile} / ${conflict.activeWorkspace}${checked}`;
     status = "CLI conflict";
     state = "warning";
   } else if (cliContext.profile || cliContext.workspace) {
-    detail = assignment.profile ? `Profile ${assignment.profile}` : "Active CLI matches";
+    detail = assignment.profile ? `Profile ${assignment.profile}${checked}` : `Active CLI matches${checked}`;
     status = "CLI checked";
   } else if (assignment.profile) {
     detail = `Profile ${assignment.profile}`;
@@ -1255,6 +1296,41 @@ function activeModalWorkspaceContext(projectPathInput, options = {}) {
   return { profile: null, workspace: null, source: null, error: lastError || "Modal CLI profile unavailable." };
 }
 
+function activeModalWorkspaceContextCached(projectPathInput, options = {}) {
+  const path = options.path || require("node:path");
+  const projectPath = normalizeProjectPath(projectPathInput, { path, home: options.home, allowEmpty: true });
+  const now = currentTimeMs(options);
+  if (options.skipModalCli) {
+    return { ...activeModalWorkspaceContext(projectPath, options), checkedAt: now, ageMs: 0, cached: false };
+  }
+  const cache = options.modalCliCache === false ? null : (options.modalCliCache || modalCliCache);
+  const ttlMs = cacheTtlMs(options.modalCliCacheTtlMs, MODAL_CLI_CACHE_TTL_MS);
+  const key = projectPath || "__unknown__";
+  if (cache && ttlMs > 0 && !options.refreshModalCli) {
+    const cached = cache.get(key);
+    if (cached && now - cached.checkedAt <= ttlMs) {
+      return { ...cached.context, checkedAt: cached.checkedAt, ageMs: Math.max(0, now - cached.checkedAt), cached: true };
+    }
+  }
+  const context = activeModalWorkspaceContext(projectPath, options);
+  if (cache && ttlMs > 0) cache.set(key, { checkedAt: now, context: { ...context } });
+  return { ...context, checkedAt: now, ageMs: 0, cached: false };
+}
+
+function modalCliCheckedSuffix(cliContext) {
+  if (!cliContext || cliContext.checkedAt == null || cliContext.error === "Modal CLI skipped.") return "";
+  return ` - checked ${formatAge(cliContext.ageMs || 0)} ago`;
+}
+
+function formatAge(ageMs) {
+  const seconds = Math.max(0, Math.floor(Number(ageMs || 0) / 1000));
+  if (seconds < 2) return "just now";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
 function modalPythonCommandCandidates(projectPath, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
@@ -1544,6 +1620,29 @@ function fileAction(target) {
 
 function externalAction(target) {
   return { type: "external", target };
+}
+
+function currentTimeMs(options = {}) {
+  return Number.isFinite(options.now) ? Number(options.now) : Date.now();
+}
+
+function cacheTtlMs(value, fallback) {
+  if (value == null) return fallback;
+  const ttl = Number(value);
+  return Number.isFinite(ttl) ? Math.max(0, ttl) : fallback;
+}
+
+function cloneSummary(summary) {
+  return {
+    projectPath: summary?.projectPath || "",
+    projectName: summary?.projectName || "",
+    rows: Array.isArray(summary?.rows) ? summary.rows.map((row) => ({ ...row, action: row.action ? { ...row.action } : null })) : [],
+  };
+}
+
+function clearThreadProfileCaches() {
+  summaryCache = new Map();
+  modalCliCache = new Map();
 }
 
 function safeExternalUrl(value) {

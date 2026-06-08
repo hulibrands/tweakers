@@ -163,6 +163,16 @@ const BROWSER_ANNOTATION_DEFAULT_MODE_REWRITES = Object.freeze([
     reason: "thread-panel-direct-submit",
   },
 ]);
+const SESSION_SCAN_LIMITS = Object.freeze({
+  projectLabelActiveFiles: 600,
+  projectLabelArchivedFiles: 80,
+  projectLabelTotalFiles: 680,
+  messageMetricsActiveFiles: 20,
+  messageMetricsArchivedFiles: 4,
+  messageMetricsTotalFiles: 24,
+  messageMetricsMaxFileBytes: 12 * 1024 * 1024,
+  messageMetricsTotalBytes: 24 * 1024 * 1024,
+});
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
@@ -172,11 +182,11 @@ module.exports = {
         startMainLegacyBrandUiScrubber(api),
         startMainBrowserAnnotationComposerModePatch(api),
         startMainTweakMentionProvider(api),
+        startMainMetricsProvider(api),
+        startMainUsageProvider(api),
+        startMainProjectLabelProvider(api),
+        startMainSidebarBatchMenuProvider(api),
       ].filter(Boolean);
-      startMainMetricsProvider(api);
-      startMainUsageProvider(api);
-      startMainProjectLabelProvider(api);
-      startMainSidebarBatchMenuProvider(api);
       return;
     }
 
@@ -257,6 +267,7 @@ module.exports = {
  * `flex flex-col gap-2` section per group, rounded card with rows.
  */
 function renderSettings(root, state) {
+  root.replaceChildren();
   const section = el("section", "flex flex-col gap-2");
   section.appendChild(sectionTitle("Features"));
 
@@ -5390,22 +5401,40 @@ const FEATURES = {
    * `token_count` + `task_complete` JSONL events.
    */
   "show-message-metrics-on-hover"(api) {
+    const MESSAGE_NODE_SELECTOR = "div.group.flex.min-w-0.flex-col";
+    const MESSAGE_MARKDOWN_SELECTOR = "._markdownContent_1rhk1_42";
     const mounted = new Map();
     const streamStats = new WeakMap();
     let metrics = [];
     let disposed = false;
     let scanScheduled = false;
+    let refreshScheduled = false;
+
+    const hasMetricMessageSurface = () =>
+      Boolean(document.querySelector(`${MESSAGE_NODE_SELECTOR} ${MESSAGE_MARKDOWN_SELECTOR}`));
 
     const refreshMetrics = async () => {
+      if (disposed || !hasMetricMessageSurface()) return false;
       try {
         const next = await api.ipc.invoke("message-metrics");
         if (Array.isArray(next)) {
           metrics = next;
           scheduleScan();
+          return true;
         }
       } catch (e) {
         api.log.warn("[message-metrics] metrics unavailable", e);
       }
+      return false;
+    };
+
+    const scheduleRefresh = () => {
+      if (refreshScheduled || disposed) return;
+      refreshScheduled = true;
+      requestAnimationFrame(() => {
+        refreshScheduled = false;
+        refreshMetrics();
+      });
     };
 
     const scheduleScan = () => {
@@ -5424,10 +5453,10 @@ const FEATURES = {
     const lastTextLen = new WeakMap();
     const scanMessages = () => {
       if (disposed || metrics.length === 0) return;
-      const nodes = document.querySelectorAll("div.group.flex.min-w-0.flex-col");
+      const nodes = document.querySelectorAll(MESSAGE_NODE_SELECTOR);
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
-        const markdown = node.querySelector("._markdownContent_1rhk1_42");
+        const markdown = node.querySelector(MESSAGE_MARKDOWN_SELECTOR);
         if (!markdown) continue;
         const rawText = markdown.textContent || "";
         trackVisibleStream(streamStats, markdown, rawText);
@@ -5450,11 +5479,15 @@ const FEATURES = {
       }
     };
 
-    const observer = new MutationObserver(scheduleScan);
+    const onMutate = () => {
+      scheduleScan();
+      scheduleRefresh();
+    };
+    const observer = new MutationObserver(onMutate);
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    refreshMetrics();
-    const timer = window.setInterval(refreshMetrics, 5_000);
+    scheduleRefresh();
+    const timer = window.setInterval(scheduleRefresh, 15_000);
 
     return () => {
       disposed = true;
@@ -5916,6 +5949,7 @@ function startMainMetricsProvider(api) {
   }
 
   api.log.info("[message-metrics] main provider active");
+  return () => disposeMainService(METRICS_GLOBAL_KEY, service);
 }
 
 function startMainUsageProvider(api) {
@@ -5931,6 +5965,7 @@ function startMainUsageProvider(api) {
   }
 
   api.log.info("[usage] main provider active");
+  return () => disposeMainService(USAGE_GLOBAL_KEY, service);
 }
 
 function startMainProjectLabelProvider(api) {
@@ -5946,12 +5981,18 @@ function startMainProjectLabelProvider(api) {
   }
 
   api.log.info("[pinned-chat-project-names] main provider active");
+  return () => disposeMainService(PROJECT_LABEL_GLOBAL_KEY, service);
 }
 
 function startMainSidebarBatchMenuProvider(api) {
-  globalThis[SIDEBAR_BATCH_MENU_GLOBAL_KEY] = {
-    show: showSidebarBatchMenu,
+  const service = {
+    disposed: false,
+    show(payload) {
+      if (service.disposed) return null;
+      return showSidebarBatchMenu(payload);
+    },
   };
+  globalThis[SIDEBAR_BATCH_MENU_GLOBAL_KEY] = service;
 
   if (!globalThis[SIDEBAR_BATCH_MENU_HANDLER_KEY]) {
     api.ipc.handle("sidebar-chat-batch-menu", (payload = {}) => {
@@ -5962,6 +6003,16 @@ function startMainSidebarBatchMenuProvider(api) {
   }
 
   api.log.info("[sidebar-chat-multi-select] main menu provider active");
+  return () => disposeMainService(SIDEBAR_BATCH_MENU_GLOBAL_KEY, service);
+}
+
+function disposeMainService(key, service) {
+  try {
+    service.dispose?.();
+  } finally {
+    service.disposed = true;
+    if (globalThis[key] === service) delete globalThis[key];
+  }
 }
 
 function showSidebarBatchMenu(payload) {
@@ -6013,11 +6064,13 @@ function showSidebarBatchMenu(payload) {
 }
 
 function createProjectLabelService(api) {
-  let cache = { at: 0, labels: new Map() };
+  let cache = { at: 0, labels: new Map(), covered: new Set() };
+  let disposed = false;
   const TTL_MS = 30_000;
 
   return {
     getLabels(ids) {
+      if (disposed) return {};
       const requested = Array.isArray(ids)
         ? ids.map(normalizeConversationId).filter(Boolean)
         : [];
@@ -6025,10 +6078,26 @@ function createProjectLabelService(api) {
       const now = Date.now();
       if (now - cache.at > TTL_MS) {
         try {
-          cache = { at: now, labels: readConversationProjectLabels() };
+          cache = {
+            at: now,
+            labels: readConversationProjectLabels(requested),
+            covered: new Set(requested),
+          };
         } catch (e) {
           api.log.warn("[pinned-chat-project-names] scan failed", e);
-          cache = { at: now, labels: new Map() };
+          cache = { at: now, labels: new Map(), covered: new Set(requested) };
+        }
+      } else {
+        const missing = requested.filter((id) => !cache.covered.has(id));
+        if (missing.length) {
+          try {
+            const labels = readConversationProjectLabels(missing);
+            for (const [id, record] of labels) cache.labels.set(id, record);
+          } catch (e) {
+            api.log.warn("[pinned-chat-project-names] scan failed", e);
+          }
+          for (const id of missing) cache.covered.add(id);
+          cache.at = now;
         }
       }
       const out = {};
@@ -6038,29 +6107,42 @@ function createProjectLabelService(api) {
       }
       return out;
     },
+    dispose() {
+      disposed = true;
+      cache = { at: 0, labels: new Map(), covered: new Set() };
+    },
   };
 }
 
-function readConversationProjectLabels() {
+function readConversationProjectLabels(requestedIds = []) {
   const fs = require("node:fs");
   const path = require("node:path");
   const home = process.env.HOME || require("node:os").homedir();
-  const roots = [
-    path.join(home, ".codex", "sessions"),
-    path.join(home, ".codex", "archived_sessions"),
-  ];
-  const files = [];
-  for (const root of roots) collectJsonlFiles(fs, root, files);
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const requested = new Set(
+    requestedIds.map(normalizeConversationId).filter(Boolean),
+  );
+  if (requested.size === 0) return new Map();
+  const files = collectBoundedSessionFiles(fs, [
+    {
+      dir: path.join(home, ".codex", "sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.projectLabelActiveFiles,
+    },
+    {
+      dir: path.join(home, ".codex", "archived_sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.projectLabelArchivedFiles,
+    },
+  ], SESSION_SCAN_LIMITS.projectLabelTotalFiles);
 
   const labels = new Map();
-  for (const file of files.slice(0, 5000)) {
+  for (const file of files) {
     const meta = readSessionMeta(fs, file.path);
     const id = normalizeConversationId(meta?.id);
+    if (!id || !requested.has(id) || labels.has(id)) continue;
     const cwd = typeof meta?.cwd === "string" ? meta.cwd : null;
-    if (!id || !cwd || labels.has(id)) continue;
+    if (!cwd) continue;
     const label = projectLabelForPath(path, cwd);
     if (label) labels.set(id, { label, cwd });
+    if (labels.size >= requested.size) break;
   }
   return labels;
 }
@@ -6102,15 +6184,21 @@ function normalizeConversationId(value) {
 
 function createUsageService(api) {
   let cache = { at: 0, value: null };
+  let disposed = false;
   const TTL_MS = 10_000;
 
   return {
     async fetchUsage() {
+      if (disposed) return null;
       const now = Date.now();
       if (cache.value && now - cache.at < TTL_MS) return cache.value;
       const value = await fetchUsageInCodexWebview();
       cache = { at: Date.now(), value };
       return value;
+    },
+    dispose() {
+      disposed = true;
+      cache = { at: 0, value: null };
     },
   };
 
@@ -6187,10 +6275,12 @@ function createUsageService(api) {
 
 function createMetricsService(api) {
   let cache = { at: 0, items: [] };
-  const TTL_MS = 2_000;
+  let disposed = false;
+  const TTL_MS = 10_000;
 
   return {
     getMetrics() {
+      if (disposed) return [];
       const now = Date.now();
       if (now - cache.at < TTL_MS) return cache.items;
       try {
@@ -6201,6 +6291,10 @@ function createMetricsService(api) {
       }
       return cache.items;
     },
+    dispose() {
+      disposed = true;
+      cache = { at: 0, items: [] };
+    },
   };
 }
 
@@ -6208,20 +6302,25 @@ function readRecentMessageMetrics() {
   const fs = require("node:fs");
   const path = require("node:path");
   const home = process.env.HOME || require("node:os").homedir();
-  const roots = [
-    path.join(home, ".codex", "sessions"),
-    path.join(home, ".codex", "archived_sessions"),
-  ];
-  const files = [];
-  for (const root of roots) collectJsonlFiles(fs, root, files);
-
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const files = collectBoundedSessionFiles(fs, [
+    {
+      dir: path.join(home, ".codex", "sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.messageMetricsActiveFiles,
+    },
+    {
+      dir: path.join(home, ".codex", "archived_sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.messageMetricsArchivedFiles,
+    },
+  ], SESSION_SCAN_LIMITS.messageMetricsTotalFiles);
 
   const byKey = new Map();
-  for (const file of files.slice(0, 20)) {
+  let bytesRead = 0;
+  for (const file of files) {
     // Some long-running archived rollouts can be huge; recent visible
     // conversations are covered by the smaller active session files.
-    if (file.size > 12 * 1024 * 1024) continue;
+    if (file.size > SESSION_SCAN_LIMITS.messageMetricsMaxFileBytes) continue;
+    if (bytesRead + file.size > SESSION_SCAN_LIMITS.messageMetricsTotalBytes) break;
+    bytesRead += file.size;
     for (const item of parseMetricsFile(fs, file.path)) {
       const key = item.turnId || `${item.completedAt}:${item.clean.slice(0, 80)}`;
       if (!byKey.has(key)) byKey.set(key, item);
@@ -6234,7 +6333,20 @@ function readRecentMessageMetrics() {
     .slice(0, 300);
 }
 
-function collectJsonlFiles(fs, dir, out) {
+function collectBoundedSessionFiles(fs, roots, totalLimit) {
+  const files = [];
+  for (const root of roots) {
+    const bucket = [];
+    collectJsonlFiles(fs, root.dir, bucket, root.maxFiles);
+    files.push(...bucket);
+  }
+  return files
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, totalLimit);
+}
+
+function collectJsonlFiles(fs, dir, out, maxFiles = Infinity) {
+  if (out.length >= maxFiles) return;
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -6242,10 +6354,12 @@ function collectJsonlFiles(fs, dir, out) {
     return;
   }
 
+  entries.sort((a, b) => b.name.localeCompare(a.name));
   for (const entry of entries) {
+    if (out.length >= maxFiles) return;
     const full = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      collectJsonlFiles(fs, full, out);
+      collectJsonlFiles(fs, full, out, maxFiles);
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
       try {
         const stat = fs.statSync(full);

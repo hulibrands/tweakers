@@ -105,6 +105,7 @@ test("file previews render typed file and status icons with list semantics", () 
                 children: [
                   { path: "src/index.ts", status: "done" },
                   { path: "README.md", status: "warning" },
+                  { path: "/Users/thomashulihan/Projects/shadgpt/package.json", status: "ready" },
                 ],
               },
             ],
@@ -129,19 +130,83 @@ test("file previews render typed file and status icons with list semantics", () 
     assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-icon")[1].textContent, "TS");
     assert.match(message.querySelectorAll(".codexpp-chat-ui-file-icon")[1].className, /codexpp-chat-ui-file-ext-ts/);
     assert.match(message.querySelectorAll(".codexpp-chat-ui-file-icon")[2].className, /codexpp-chat-ui-file-ext-md/);
+    assert.match(message.querySelectorAll(".codexpp-chat-ui-file-icon")[3].className, /codexpp-chat-ui-file-ext-json/);
     assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-status-icon")[0].textContent, "OK");
     assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-status-icon")[1].textContent, "!");
+    assert.match(message.textContent, /Copy only/);
+    assert.match(message.textContent, /untrusted relative path/);
 
     const rows = message.querySelectorAll(".codexpp-chat-ui-file-row-clickable");
-    assert.equal(rows.length, 3);
-    assert.equal(rows[1].getAttribute("role"), "button");
-    assert.equal(rows[1].getAttribute("tabindex"), "0");
-    rows[1].click();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].getAttribute("role"), "button");
+    assert.equal(rows[0].getAttribute("tabindex"), "0");
+    rows[0].click();
     assert.equal(fetchCalls[0][0], "vscode://codex/open-file");
     assert.deepEqual(JSON.parse(fetchCalls[0][1].body), {
-      path: "src/index.ts",
+      path: "/Users/thomashulihan/Projects/shadgpt/package.json",
       openMode: "workspace",
     });
+  } finally {
+    global.fetch = previousFetch;
+    restore();
+  }
+});
+
+test("file preview path validation rejects unsafe relative paths unless a trusted root resolves them", () => {
+  assert.deepEqual(tweak.validateLocalFilePath("src/index.ts").canOpen, false);
+  assert.equal(
+    tweak.validateLocalFilePath("src/index.ts", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).openPath,
+    "/Users/thomashulihan/Projects/shadgpt/src/index.ts",
+  );
+  assert.equal(
+    tweak.validateLocalFilePath("../outside.txt", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).canOpen,
+    false,
+  );
+  assert.equal(
+    tweak.validateLocalFilePath("file:///Users/thomashulihan/Projects/shadgpt/README.md").openPath,
+    "/Users/thomashulihan/Projects/shadgpt/README.md",
+  );
+  assert.equal(tweak.validateLocalFilePath("/Users/thomashulihan/../../etc/passwd").canOpen, false);
+  assert.equal(tweak.validateLocalFilePath("file://example.com/Users/thomashulihan/README.md").canOpen, false);
+});
+
+test("file preview rows show visible failed-open state when the bridge rejects", async () => {
+  const restore = installFakeDom();
+  const previousFetch = global.fetch;
+  global.fetch = () => Promise.reject(new Error("bridge unavailable"));
+  try {
+    const message = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [
+        {
+          kind: "file_preview",
+          props: {
+            files: [{ path: "/Users/thomashulihan/Projects/shadgpt/README.md" }],
+          },
+        },
+      ],
+    });
+    document.body.append(message);
+
+    tweak.scanMessages({
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: { file_preview: true },
+      api: { log: { warn: () => {} } },
+    });
+
+    const row = message.querySelector(".codexpp-chat-ui-file-row-clickable");
+    assert.ok(row);
+    row.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.match(row.textContent, /Open failed/);
   } finally {
     global.fetch = previousFetch;
     restore();

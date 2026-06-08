@@ -34,10 +34,37 @@ test("pinned chat project labels use main-process project lookup and live color 
   assert.match(source, /"show-pinned-chat-project-names"\(api\)/);
   assert.match(source, /api\.ipc\.invoke\("pinned-chat-project-labels", ids\)/);
   assert.match(source, /function createProjectLabelService\(api\)/);
-  assert.match(source, /function readConversationProjectLabels\(\)/);
+  assert.match(source, /function readConversationProjectLabels\(requestedIds = \[\]\)/);
+  assert.match(source, /readConversationProjectLabels\(requested\)/);
   assert.match(source, /data-codexpp-pinned-chat-project-name/);
   assert.match(source, /--codexpp-pinned-chat-project-color/);
   assert.match(source, /window\.addEventListener\(BRIDGE_EVENT, scheduleApply\)/);
+});
+
+test("settings render is idempotent and main providers become inert on stop", () => {
+  assert.match(source, /function renderSettings\(root, state\) \{\n\s+root\.replaceChildren\(\);/);
+  assert.match(source, /startMainMetricsProvider\(api\)/);
+  assert.match(source, /startMainUsageProvider\(api\)/);
+  assert.match(source, /startMainProjectLabelProvider\(api\)/);
+  assert.match(source, /startMainSidebarBatchMenuProvider\(api\)/);
+  assert.match(source, /return \(\) => disposeMainService\(METRICS_GLOBAL_KEY, service\);/);
+  assert.match(source, /return \(\) => disposeMainService\(USAGE_GLOBAL_KEY, service\);/);
+  assert.match(source, /return \(\) => disposeMainService\(PROJECT_LABEL_GLOBAL_KEY, service\);/);
+  assert.match(source, /return \(\) => disposeMainService\(SIDEBAR_BATCH_MENU_GLOBAL_KEY, service\);/);
+  assert.match(source, /function disposeMainService\(key, service\)/);
+});
+
+test("session-log readers use bounded recent scans", () => {
+  assert.match(source, /const SESSION_SCAN_LIMITS = Object\.freeze\(\{/);
+  assert.match(source, /projectLabelActiveFiles: 600/);
+  assert.match(source, /projectLabelArchivedFiles: 80/);
+  assert.match(source, /messageMetricsActiveFiles: 20/);
+  assert.match(source, /messageMetricsArchivedFiles: 4/);
+  assert.match(source, /messageMetricsTotalBytes: 24 \* 1024 \* 1024/);
+  assert.match(source, /collectBoundedSessionFiles\(fs,/);
+  assert.match(source, /collectJsonlFiles\(fs, dir, out, maxFiles = Infinity\)/);
+  assert.doesNotMatch(source, /files\.slice\(0,\s*5000\)/);
+  assert.doesNotMatch(source, /files\.slice\(0,\s*20\)/);
 });
 
 test("legacy ShadGPT branding scrubber covers interactive app chrome", () => {

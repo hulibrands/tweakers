@@ -1,4 +1,5 @@
 const IPC_VALIDATE_PATH = "validate-project-path";
+const IPC_CREATE_PATH = "create-project-path";
 const STATE_KEY = "__codexppAddProjectByPath";
 const MAIN_HANDLER_KEY = "__codexppAddProjectByPathMainHandler";
 const INJECTED_ATTR = "data-codexpp-add-project-by-path";
@@ -8,6 +9,13 @@ let nodeModules = null;
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
+  __test: {
+    cleanProjectPathInput,
+    createProjectPath,
+    expandPath,
+    validateProjectPath,
+  },
+
   start(api) {
     if (api.process === "main") {
       startMain(api);
@@ -27,40 +35,116 @@ module.exports = {
 function startMain(api) {
   if (!globalThis[MAIN_HANDLER_KEY]) {
     api.ipc.handle(IPC_VALIDATE_PATH, (rawPath) => validateProjectPath(rawPath));
+    api.ipc.handle(IPC_CREATE_PATH, (rawPath) => createProjectPath(rawPath));
     globalThis[MAIN_HANDLER_KEY] = true;
   }
   api.log.info("[add-project-by-path] main validation handler active");
 }
 
 function validateProjectPath(rawPath) {
+  const normalized = normalizeProjectPath(rawPath);
+  if (!normalized.ok) return normalized;
+  return validateExistingDirectory(normalized.path);
+}
+
+function createProjectPath(rawPath) {
   const { fs, path } = getNodeModules();
+  const normalized = normalizeProjectPath(rawPath);
+  if (!normalized.ok) return normalized;
+
+  const checked = validateExistingDirectory(normalized.path);
+  if (checked.ok) return { ...checked, created: false };
+  if (checked.code !== "missing") return checked;
+
+  const parentCheck = validateExistingAncestors(normalized.path);
+  if (!parentCheck.ok && parentCheck.code !== "missing") return parentCheck;
+
+  try {
+    fs.mkdirSync(normalized.path, { recursive: true });
+  } catch (createError) {
+    return { ok: false, error: statErrorMessage(createError, "create") };
+  }
+
+  const created = validateExistingDirectory(path.resolve(normalized.path));
+  if (!created.ok) return created;
+  return { ...created, created: true };
+}
+
+function normalizeProjectPath(rawPath) {
+  const { path } = getNodeModules();
   const cleaned = cleanProjectPathInput(rawPath);
   const expanded = expandPath(cleaned);
   if (!expanded) return { ok: false, error: "Enter a project path." };
   if (!path.isAbsolute(expanded)) return { ok: false, error: "Use an absolute path." };
 
-  const resolved = path.resolve(expanded);
+  return { ok: true, path: path.resolve(expanded) };
+}
+
+function validateExistingDirectory(resolvedPath) {
+  const { fs } = getNodeModules();
+  const symlinkCheck = validateExistingAncestors(resolvedPath);
+  if (!symlinkCheck.ok) return symlinkCheck;
+
   let stat;
   try {
-    stat = fs.statSync(resolved);
+    stat = fs.lstatSync(resolvedPath);
   } catch (error) {
     if (error?.code !== "ENOENT") {
       return { ok: false, error: statErrorMessage(error, "read") };
     }
+    return {
+      ok: false,
+      code: "missing",
+      canCreate: true,
+      path: resolvedPath,
+      error: "That folder does not exist. Choose Create folder to make it.",
+    };
+  }
 
-    try {
-      fs.mkdirSync(resolved, { recursive: true });
-      stat = fs.statSync(resolved);
-    } catch (createError) {
-      return { ok: false, error: statErrorMessage(createError, "create") };
-    }
+  if (stat.isSymbolicLink()) {
+    return { ok: false, error: "That path is a symlink. Use the real folder path." };
   }
 
   if (!stat.isDirectory()) {
     return { ok: false, error: "A file already exists at that path." };
   }
 
-  return { ok: true, path: resolved };
+  try {
+    fs.accessSync(resolvedPath, fs.constants.R_OK | fs.constants.X_OK);
+  } catch (error) {
+    return { ok: false, error: statErrorMessage(error, "read") };
+  }
+
+  return { ok: true, path: resolvedPath };
+}
+
+function validateExistingAncestors(resolvedPath) {
+  const { fs, path } = getNodeModules();
+  const root = path.parse(resolvedPath).root;
+  const relative = path.relative(root, resolvedPath);
+  if (!relative) return { ok: true };
+
+  let current = root;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === "ENOENT") return { ok: true, code: "missing", path: current };
+      return { ok: false, error: statErrorMessage(error, "read") };
+    }
+
+    if (stat.isSymbolicLink()) {
+      return { ok: false, error: "That path contains a symlink. Use the real folder path." };
+    }
+
+    if (current !== resolvedPath && !stat.isDirectory()) {
+      return { ok: false, error: "Part of that path is a file, not a folder." };
+    }
+  }
+
+  return { ok: true };
 }
 
 function expandPath(value) {
@@ -430,6 +514,13 @@ function openModal(state) {
     "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 whitespace-nowrap rounded-lg border bg-token-bg-fog px-4 py-1.5 text-base leading-[18px] text-token-button-tertiary-foreground focus:outline-none enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
   cancel.textContent = "Cancel";
 
+  const create = document.createElement("button");
+  create.type = "button";
+  create.className =
+    "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 whitespace-nowrap rounded-lg border bg-token-bg-fog px-4 py-1.5 text-base leading-[18px] text-token-button-tertiary-foreground focus:outline-none enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
+  create.textContent = "Create folder";
+  create.hidden = true;
+
   const submit = document.createElement("button");
   submit.type = "submit";
   submit.className =
@@ -439,14 +530,14 @@ function openModal(state) {
   headerInner.append(title, copy);
   header.appendChild(headerInner);
   field.append(label, input, error);
-  actionsInner.append(cancel, submit);
+  actionsInner.append(cancel, create, submit);
   actions.appendChild(actionsInner);
   body.append(header, field, actions);
   dialog.appendChild(body);
   backdrop.appendChild(dialog);
   document.body.appendChild(backdrop);
 
-  state.modal = { backdrop, input, error, submit };
+  state.modal = { backdrop, input, error, submit, create };
 
   const onCancel = () => closeModal(state);
   const onBackdropPointerDown = (event) => {
@@ -458,6 +549,9 @@ function openModal(state) {
   const onSubmit = async (event) => {
     event.preventDefault();
     await submitProjectPath(state);
+  };
+  const onCreate = async () => {
+    await createAndSubmitProjectPath(state);
   };
   const onPaste = (event) => {
     const text = event.clipboardData?.getData("text");
@@ -496,6 +590,7 @@ function openModal(state) {
   };
 
   cancel.addEventListener("click", onCancel);
+  create.addEventListener("click", onCreate);
   backdrop.addEventListener("pointerdown", onBackdropPointerDown);
   body.addEventListener("submit", onSubmit);
   input.addEventListener("paste", onPaste);
@@ -507,6 +602,7 @@ function openModal(state) {
 
   state.modal.dispose = () => {
     cancel.removeEventListener("click", onCancel);
+    create.removeEventListener("click", onCreate);
     backdrop.removeEventListener("pointerdown", onBackdropPointerDown);
     body.removeEventListener("submit", onSubmit);
     input.removeEventListener("paste", onPaste);
@@ -537,6 +633,7 @@ function setInputPath(state, value) {
   const cleaned = cleanProjectPathInput(value);
   modal.input.value = cleaned;
   modal.error.textContent = "";
+  modal.create.hidden = true;
   state.lastPath = cleaned;
   modal.input.focus();
   modal.input.select();
@@ -575,27 +672,19 @@ async function submitProjectPath(state) {
   modal.input.value = rawPath;
   state.lastPath = rawPath;
   modal.error.textContent = "";
+  modal.create.hidden = true;
   modal.submit.disabled = true;
   modal.submit.textContent = "Adding...";
 
   try {
     const result = await state.api.ipc.invoke(IPC_VALIDATE_PATH, rawPath);
     if (!result?.ok) {
+      modal.create.hidden = !result?.canCreate;
       modal.error.textContent = result?.error || "Could not use that path.";
       return;
     }
 
-    const bridge = window.electronBridge;
-    if (!bridge || typeof bridge.sendMessageFromView !== "function") {
-      modal.error.textContent = "Codex workspace bridge is not ready.";
-      return;
-    }
-
-    await bridge.sendMessageFromView({
-      type: "electron-add-new-workspace-root-option",
-      root: result.path,
-    });
-    closeModal(state);
+    await addValidatedProjectRoot(state, result.path);
   } catch (error) {
     state.api.log.warn("[add-project-by-path] failed to add project path", error);
     modal.error.textContent = "Could not add that project path.";
@@ -605,4 +694,54 @@ async function submitProjectPath(state) {
       modal.submit.textContent = "Add";
     }
   }
+}
+
+async function createAndSubmitProjectPath(state) {
+  const modal = state.modal;
+  if (!modal) return;
+
+  const rawPath = cleanProjectPathInput(modal.input.value);
+  modal.input.value = rawPath;
+  state.lastPath = rawPath;
+  modal.error.textContent = "";
+  modal.submit.disabled = true;
+  modal.create.disabled = true;
+  modal.create.textContent = "Creating...";
+
+  try {
+    const result = await state.api.ipc.invoke(IPC_CREATE_PATH, rawPath);
+    if (!result?.ok) {
+      modal.create.hidden = !result?.canCreate;
+      modal.error.textContent = result?.error || "Could not create that folder.";
+      return;
+    }
+
+    await addValidatedProjectRoot(state, result.path);
+  } catch (error) {
+    state.api.log.warn("[add-project-by-path] failed to create project path", error);
+    modal.error.textContent = "Could not create that folder.";
+  } finally {
+    if (state.modal === modal) {
+      modal.submit.disabled = false;
+      modal.create.disabled = false;
+      modal.create.textContent = "Create folder";
+    }
+  }
+}
+
+async function addValidatedProjectRoot(state, root) {
+  const modal = state.modal;
+  if (!modal) return;
+
+  const bridge = window.electronBridge;
+  if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+    modal.error.textContent = "Codex workspace bridge is not ready.";
+    return;
+  }
+
+  await bridge.sendMessageFromView({
+    type: "electron-add-new-workspace-root-option",
+    root,
+  });
+  closeModal(state);
 }

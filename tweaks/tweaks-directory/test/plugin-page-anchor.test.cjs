@@ -43,6 +43,8 @@ const {
   isNativeDirectoryRowCandidate,
   isInsideAppSidebar,
   groupNativeSkillRowsByPlugin,
+  createNativeDirectoryMetaCache,
+  pluginStatusesSignature,
 } = require("../index.cjs").__test;
 
 // ---------------------------------------------------------------------------
@@ -829,15 +831,64 @@ test("native directory Date Used uses persisted plugin usage timestamps", () => 
   assert.equal(updated.skills[0].lastUsedAtMs, 12345);
 });
 
-test("directory state preferences keep valid controls and repair invalid values", () => {
+test("directory state preferences persist tweaks state and omit gated native controls", () => {
   const normalized = normalizeDirectoryState({
     tweaks: { filter: "store", sort: "used", installedEnabledOnly: true },
-    plugins: { sort: "missing", installedEnabledOnly: true },
+    plugins: { sort: "updated", installedEnabledOnly: true },
     skills: { sort: "created", groupBy: "plugin", installedEnabledOnly: true },
   });
   assert.deepEqual(normalized.tweaks, { filter: "store", sort: "used", installedEnabledOnly: true });
-  assert.deepEqual(normalized.plugins, { sort: "default", installedEnabledOnly: false });
-  assert.deepEqual(normalized.skills, { sort: "default", installedEnabledOnly: false, groupBy: "category" });
+  assert.equal(Object.hasOwn(normalized, "plugins"), false);
+  assert.equal(Object.hasOwn(normalized, "skills"), false);
+});
+
+test("native directory metadata cache bounds scans and supports explicit refresh", () => {
+  let calls = 0;
+  let now = 1000;
+  const cache = createNativeDirectoryMetaCache({
+    ttlMs: 100,
+    now: () => now,
+    scan: () => ({ status: "ok", plugins: [{ id: `plugin-${calls += 1}` }], skills: [] }),
+  });
+
+  const first = cache.get();
+  const second = cache.get();
+  assert.equal(calls, 1);
+  assert.equal(second, first);
+
+  now += 101;
+  const afterTtl = cache.get();
+  assert.equal(calls, 2);
+  assert.notEqual(afterTtl, first);
+
+  cache.get({ force: true });
+  assert.equal(calls, 3);
+  cache.clear();
+  cache.get();
+  assert.equal(calls, 4);
+});
+
+test("plugin status signatures change when configured plugin state changes", () => {
+  const enabled = pluginStatusesSignature({
+    items: [
+      { key: "debugpro@local-plugins", enabled: true },
+      { key: "plan-grader@local-plugins", enabled: false },
+    ],
+  });
+  const reordered = pluginStatusesSignature({
+    items: [
+      { key: "plan-grader@local-plugins", enabled: false },
+      { key: "debugpro@local-plugins", enabled: true },
+    ],
+  });
+  const changed = pluginStatusesSignature({
+    items: [
+      { key: "debugpro@local-plugins", enabled: false },
+      { key: "plan-grader@local-plugins", enabled: false },
+    ],
+  });
+  assert.equal(reordered, enabled);
+  assert.notEqual(changed, enabled);
 });
 
 test("native directory metadata marks installed from Codex plugin config, not cache presence", () => {

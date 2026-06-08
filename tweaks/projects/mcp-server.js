@@ -185,10 +185,10 @@ function resolveChromeProject(projectPath) {
 function normalizePreferredProfiles(assignment) {
   if (!assignment) return [];
   if (Array.isArray(assignment.preferredProfiles) && assignment.preferredProfiles.length) {
-    return assignment.preferredProfiles;
+    return assignment.preferredProfiles.map((profile, index) => normalizePreferredProfileEntry(assignment, profile, index));
   }
   if (Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length) {
-    return assignment.allowedProfiles;
+    return assignment.allowedProfiles.map((profile, index) => normalizePreferredProfileEntry(assignment, profile, index));
   }
   if (Array.isArray(assignment.preferencesPaths) && assignment.preferencesPaths.length) {
     return assignment.preferencesPaths.map((preferencesPath, index) => ({
@@ -210,6 +210,21 @@ function normalizePreferredProfiles(assignment) {
     preferencesPath: assignment.preferencesPath,
     userDataDir: assignment.userDataDir,
   }] : [];
+}
+
+function normalizePreferredProfileEntry(assignment, profile, index) {
+  const preferencesPath = typeof profile?.preferencesPath === "string" ? profile.preferencesPath : "";
+  return {
+    ...profile,
+    profileDirectory: profile?.profileDirectory || (preferencesPath ? path.basename(path.dirname(preferencesPath)) : ""),
+    profileName: profile?.profileName || profile?.profileDirectory || (preferencesPath ? path.basename(path.dirname(preferencesPath)) : ""),
+    profileAliases: normalizeProfileAliases([
+      ...profileAliasesAtIndex(assignment, index),
+      ...normalizeProfileAliases(profile?.profileAliases),
+    ]),
+    preferencesPath,
+    userDataDir: profile?.userDataDir || (preferencesPath ? path.dirname(path.dirname(preferencesPath)) : ""),
+  };
 }
 
 function normalizeProfileAliases(input) {

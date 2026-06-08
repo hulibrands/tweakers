@@ -256,6 +256,75 @@ test("modal row warns when active CLI context differs from assignment", () => {
   assert.match(modal.detail, /actual \/ actual-workspace/);
 });
 
+test("summary cache reuses project rows during short renderer reinjection bursts", () => {
+  const root = tempDir();
+  const projectPath = path.join(root, "repo");
+  const userRoot = path.join(root, "codex-plusplus");
+  const summaryCache = new Map();
+  let modalCalls = 0;
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    modalWorkspaceAssignments: {
+      [projectPath]: { profile: "expected", workspace: "expected-workspace" },
+    },
+  }), "utf8");
+  const childProcess = {
+    execFileSync(command, args) {
+      if (args.includes("modal")) {
+        modalCalls += 1;
+        return JSON.stringify([{ name: "expected", workspace: "expected-workspace", active: true }]);
+      }
+      return "";
+    },
+  };
+  const options = { fs, os, path, userRoot, home: root, childProcess, summaryCache, modalCliCache: false, now: 1000 };
+
+  const first = tweak.getCachedThreadProfileSummary({ projectPath }, options);
+  options.now = 2000;
+  const second = tweak.getCachedThreadProfileSummary({ projectPath }, options);
+  options.now = 8000;
+  const third = tweak.getCachedThreadProfileSummary({ projectPath }, options);
+
+  assert.equal(modalCalls, 2);
+  assert.deepEqual(first.rows, second.rows);
+  assert.equal(third.rows.find((row) => row.id === "modal").status, "CLI checked");
+});
+
+test("modal CLI cache keeps conflict checks out of summary rebuilds and shows age", () => {
+  const root = tempDir();
+  const projectPath = path.join(root, "repo");
+  const userRoot = path.join(root, "codex-plusplus");
+  const modalCliCache = new Map();
+  let modalCalls = 0;
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    modalWorkspaceAssignments: {
+      [projectPath]: { profile: "expected", workspace: "expected-workspace" },
+    },
+  }), "utf8");
+  const childProcess = {
+    execFileSync(command, args) {
+      if (args.includes("modal")) {
+        modalCalls += 1;
+        return JSON.stringify([{ name: "actual", workspace: "actual-workspace", active: true }]);
+      }
+      return "";
+    },
+  };
+  const options = { fs, os, path, userRoot, home: root, childProcess, modalCliCache, now: 1000 };
+
+  tweak.buildThreadProfileSummary({ projectPath }, options);
+  options.now = 12000;
+  const summary = tweak.buildThreadProfileSummary({ projectPath }, options);
+  const modal = summary.rows.find((row) => row.id === "modal");
+
+  assert.equal(modalCalls, 1);
+  assert.equal(modal.state, "warning");
+  assert.match(modal.detail, /checked 11s ago/);
+});
+
 test("GitHub remote parsing supports common local remote formats", () => {
   assert.deepEqual(tweak.parseGithubRemote("https://github.com/hulibrands/codex-plusplus.git"), {
     owner: "hulibrands",
@@ -352,6 +421,41 @@ test("action normalization rejects unsafe external and secret-looking targets", 
   assert.equal(tweak.sanitizeAction({ type: "file", target: "/tmp/oauth-token.txt" }), null);
 });
 
+test("source and packaged default thread summary profile copies stay in sync", () => {
+  const repoRoot = findRepoRoot(__dirname);
+  const sourceRoot = path.join(repoRoot, "tweaks", "base", "thomashulihan-thread-summary-profiles");
+  const defaultRoot = path.join(repoRoot, "packages", "installer", "assets", "default-tweaks", "co.thomashulihan.thread-summary-profiles");
+
+  assert.deepEqual(snapshotDirectory(defaultRoot), snapshotDirectory(sourceRoot));
+});
+
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "thread-summary-profiles-"));
+}
+
+function findRepoRoot(start) {
+  let current = start;
+  while (current && current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, "package.json")) && fs.existsSync(path.join(current, "tweaks"))) return current;
+    current = path.dirname(current);
+  }
+  throw new Error("Could not find repository root.");
+}
+
+function snapshotDirectory(root) {
+  const entries = {};
+  const visit = (dir) => {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const filePath = path.join(dir, name);
+      const rel = path.relative(root, filePath).replace(/\\/g, "/");
+      const stat = fs.statSync(filePath);
+      if (stat.isDirectory()) {
+        visit(filePath);
+      } else {
+        entries[rel] = fs.readFileSync(filePath, "utf8");
+      }
+    }
+  };
+  visit(root);
+  return entries;
 }

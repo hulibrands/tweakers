@@ -134,8 +134,13 @@ test("Projects MCP resolves Chrome profile assignments from the legacy Chrome st
           projectPath,
           profileDirectory: "Profile 7",
           profileName: "TRR",
+          profileAliases: ["codex@thereality.report", "TRR"],
           preferencesPath,
-          preferencesPaths: [preferencesPath],
+          preferredProfiles: [{
+            profileDirectory: "Profile 7",
+            profileName: "TRR",
+            preferencesPath,
+          }],
         },
       },
     },
@@ -146,6 +151,7 @@ test("Projects MCP resolves Chrome profile assignments from the legacy Chrome st
   assert.equal(payload.matched, true);
   assert.equal(payload.assignment.projectPath, projectPath);
   assert.equal(payload.preferredProfiles[0].preferencesPath, preferencesPath);
+  assert.deepEqual(payload.preferredProfiles[0].profileAliases, ["codex@thereality.report", "TRR"]);
   assert.equal(payload.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
 });
 
@@ -170,8 +176,13 @@ test("Projects MCP resolves Chrome profile assignments from Projects storage", a
           projectPath,
           profileDirectory: "Profile 9",
           profileName: "Projects Owned",
+          profileAliases: ["projects@example.com", "Projects Alias"],
           preferencesPath,
-          preferencesPaths: [preferencesPath],
+          preferredProfiles: [{
+            profileDirectory: "Profile 9",
+            profileName: "Projects Owned",
+            preferencesPath,
+          }],
         },
       },
     },
@@ -182,5 +193,6 @@ test("Projects MCP resolves Chrome profile assignments from Projects storage", a
   assert.equal(payload.matched, true);
   assert.equal(payload.assignment.projectPath, projectPath);
   assert.equal(payload.preferredProfiles[0].preferencesPath, preferencesPath);
+  assert.deepEqual(payload.preferredProfiles[0].profileAliases, ["projects@example.com", "Projects Alias"]);
   assert.equal(payload.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
 });

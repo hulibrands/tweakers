@@ -67,6 +67,7 @@ module.exports = {
     normalizeRenderableBlocks,
     renderChatUiPanel,
     sanitizeDataObject,
+    validateLocalFilePath,
     cleanText,
     PANEL_ATTR,
     HIDDEN_ATTR,
@@ -111,6 +112,7 @@ function startRenderer(api) {
     pageHandle: null,
     statusEl: null,
     probeEl: null,
+    trustedWorkspaceRoots: trustedWorkspaceRootsFromApi(api),
   };
 
   if (typeof api.settings?.registerPage === "function") {
@@ -218,7 +220,7 @@ function scanMessages(state) {
 
 function syncMentionedFilesPanel(messageNode, markdown, state) {
   const existing = messageNode.querySelector(`[${MENTIONED_FILES_ATTR}]`);
-  const files = collectMentionedLocalFiles(markdown);
+  const files = collectMentionedLocalFiles(markdown, state);
   if (files.length === 0 || !state.clickableActions) {
     existing?.remove();
     return;
@@ -233,19 +235,19 @@ function syncMentionedFilesPanel(messageNode, markdown, state) {
   else messageNode.insertBefore(panel, markdown);
 }
 
-function collectMentionedLocalFiles(markdown) {
+function collectMentionedLocalFiles(markdown, state) {
   const files = [];
   const seen = new Set();
   for (const link of markdown.querySelectorAll("a")) {
     if (!(link instanceof HTMLElement)) continue;
-    const path = localFilePathFromLink(link);
-    if (!path || seen.has(path)) continue;
-    seen.add(path);
+    const pathInfo = localFilePathFromLink(link, state);
+    if (!pathInfo.canOpen || seen.has(pathInfo.openPath)) continue;
+    seen.add(pathInfo.openPath);
     files.push({
-      name: basenameFromPath(path),
-      path,
+      name: basenameFromPath(pathInfo.openPath),
+      path: pathInfo.openPath,
       kind: "file",
-      description: fileTypeDescription(path),
+      description: fileTypeDescription(pathInfo.openPath),
       children: [],
       depth: 0,
     });
@@ -254,31 +256,128 @@ function collectMentionedLocalFiles(markdown) {
   return files;
 }
 
-function localFilePathFromLink(link) {
+function localFilePathFromLink(link, state) {
   const candidates = [
     link.getAttribute("href") || "",
     link.getAttribute("data-href") || "",
     link.textContent || "",
   ];
   for (const candidate of candidates) {
-    const path = normalizeLocalFileLink(candidate);
-    if (path) return path;
+    const pathInfo = validateLocalFilePath(candidate, state);
+    if (pathInfo.canOpen) return pathInfo;
+  }
+  return copyOnlyPathInfo("");
+}
+
+function validateLocalFilePath(value, state = {}) {
+  const raw = cleanText(value, 360);
+  if (!raw) return copyOnlyPathInfo("");
+  if (raw.startsWith("file://")) {
+    const path = pathFromFileUrl(raw);
+    const normalized = normalizeAbsoluteLocalPath(path);
+    if (path && isSafeAbsoluteLocalPath(path) && isSafeAbsoluteLocalPath(normalized)) {
+      return openablePathInfo(normalized, "file-url", raw);
+    }
+    return copyOnlyPathInfo(raw, "Invalid file URL");
+  }
+  if (isSafeAbsoluteLocalPath(raw)) {
+    const normalized = normalizeAbsoluteLocalPath(raw);
+    if (isSafeAbsoluteLocalPath(normalized)) return openablePathInfo(normalized, "absolute", raw);
+    return copyOnlyPathInfo(raw, "Copy only - invalid local path");
+  }
+  const resolved = resolveTrustedRelativePath(raw, state);
+  if (resolved) return openablePathInfo(resolved, "trusted-relative", raw);
+  return copyOnlyPathInfo(raw, "Copy only - untrusted relative path");
+}
+
+function openablePathInfo(path, source, raw) {
+  return {
+    rawPath: raw || path,
+    displayPath: raw || path,
+    copyPath: raw || path,
+    openPath: path,
+    source,
+    reason: "",
+    canOpen: true,
+  };
+}
+
+function copyOnlyPathInfo(raw, reason = "Copy only") {
+  return {
+    rawPath: raw,
+    displayPath: raw,
+    copyPath: raw,
+    openPath: "",
+    source: "",
+    reason,
+    canOpen: false,
+  };
+}
+
+function pathFromFileUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "file:" || (url.hostname && url.hostname !== "localhost")) return "";
+    return decodeURIComponent(url.pathname || "");
+  } catch {
+    return "";
+  }
+}
+
+function isSafeAbsoluteLocalPath(value) {
+  return /^\/(?:Users|Volumes|private|tmp|var)\//.test(String(value || ""));
+}
+
+function normalizeAbsoluteLocalPath(value) {
+  const path = String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/");
+  const trailingSlash = path.endsWith("/");
+  const parts = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  const normalized = `/${parts.join("/")}`;
+  return trailingSlash && normalized !== "/" ? `${normalized}/` : normalized;
+}
+
+function resolveTrustedRelativePath(value, state) {
+  const relative = String(value || "").replace(/\\/g, "/").trim();
+  if (!relative || relative.startsWith("/") || relative.startsWith("~") || /^[a-z][a-z0-9+.-]*:/i.test(relative)) return "";
+  const roots = trustedWorkspaceRoots(state);
+  for (const root of roots) {
+    const resolved = normalizeAbsoluteLocalPath(`${root}/${relative}`);
+    const normalizedRoot = normalizeAbsoluteLocalPath(root).replace(/\/+$/, "");
+    if (resolved === normalizedRoot || resolved.startsWith(`${normalizedRoot}/`)) return resolved;
   }
   return "";
 }
 
-function normalizeLocalFileLink(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (raw.startsWith("file://")) {
-    try {
-      return decodeURIComponent(new URL(raw).pathname);
-    } catch {
-      return "";
-    }
+function trustedWorkspaceRoots(state = {}) {
+  const candidates = [];
+  for (const value of [
+    state.trustedWorkspaceRoot,
+    state.workspaceRoot,
+    state.projectRoot,
+    state.cwd,
+    state.api?.workspaceRoot,
+    state.api?.projectRoot,
+    state.api?.cwd,
+    state.api?.workspace?.root,
+    state.api?.workspace?.cwd,
+  ]) {
+    if (value) candidates.push(value);
   }
-  if (/^\/(?:Users|Volumes|private|tmp|var)\//.test(raw)) return raw;
-  return "";
+  for (const list of [state.trustedWorkspaceRoots, state.workspaceRoots, state.api?.workspaceRoots, state.api?.workspace?.roots]) {
+    if (Array.isArray(list)) candidates.push(...list);
+  }
+  return candidates
+    .map((value) => normalizeAbsoluteLocalPath(String(value || "").trim()))
+    .filter(isSafeAbsoluteLocalPath);
+}
+
+function trustedWorkspaceRootsFromApi(api) {
+  return trustedWorkspaceRoots({ api });
 }
 
 function renderMentionedFilesPanel(files, state) {
@@ -850,6 +949,7 @@ function renderFileTreeRow(file, state) {
   const wrap = document.createElement("div");
   wrap.className = "codexpp-chat-ui-file-row-wrap";
   wrap.setAttribute("role", "listitem");
+  const pathInfo = validateLocalFilePath(file.path, state);
 
   const row = document.createElement("div");
   row.className = "codexpp-chat-ui-file-row";
@@ -873,7 +973,8 @@ function renderFileTreeRow(file, state) {
   name.textContent = file.name || file.path;
   content.appendChild(name);
 
-  const metaText = [file.path && file.path !== file.name ? file.path : "", file.description].filter(Boolean).join(" - ");
+  const safetyText = file.path && !pathInfo.canOpen ? pathInfo.reason : "";
+  const metaText = [file.path && file.path !== file.name ? file.path : "", file.description, safetyText].filter(Boolean).join(" - ");
   if (metaText) {
     const meta = document.createElement("span");
     meta.className = "codexpp-chat-ui-file-meta";
@@ -883,27 +984,26 @@ function renderFileTreeRow(file, state) {
 
   row.append(icon, content);
   if (file.status) row.append(fileStatusIcon(file.status), statusBadge(file.status));
-  if (file.path && state.clickableActions) {
+  if (file.path && state.clickableActions && pathInfo.canOpen) {
     row.className = `${row.className} codexpp-chat-ui-file-row-clickable`;
     row.setAttribute("role", "button");
     row.setAttribute("tabindex", "0");
-    row.setAttribute("title", `Open ${file.path}`);
-    row.addEventListener("click", () => openFilePreviewPath(file.path, state));
+    row.setAttribute("title", `Open ${pathInfo.openPath}`);
+    row.addEventListener("click", () => openFilePreviewPath(pathInfo.openPath, state, row));
     row.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault?.();
-      openFilePreviewPath(file.path, state);
+      openFilePreviewPath(pathInfo.openPath, state, row);
     });
 
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "codexpp-chat-ui-file-copy";
-    copy.textContent = "Copy path";
-    copy.addEventListener("click", (event) => {
-      event.stopPropagation?.();
-      navigator.clipboard?.writeText(file.path).catch(() => {});
-    });
-    row.appendChild(copy);
+    row.appendChild(renderCopyPathButton(pathInfo.copyPath));
+  } else if (file.path && state.clickableActions) {
+    row.className = `${row.className} codexpp-chat-ui-file-row-copy-only`;
+    row.setAttribute("title", pathInfo.reason || "Copy path");
+    const stateLabel = document.createElement("span");
+    stateLabel.className = "codexpp-chat-ui-file-open-state codexpp-chat-ui-file-open-state-copy";
+    stateLabel.textContent = "Copy only";
+    row.append(stateLabel, renderCopyPathButton(pathInfo.copyPath));
   }
   wrap.appendChild(row);
 
@@ -917,7 +1017,19 @@ function renderFileTreeRow(file, state) {
   return wrap;
 }
 
-function openFilePreviewPath(filePath, state) {
+function renderCopyPathButton(path) {
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "codexpp-chat-ui-file-copy";
+  copy.textContent = "Copy path";
+  copy.addEventListener("click", (event) => {
+    event.stopPropagation?.();
+    navigator.clipboard?.writeText(path).catch(() => {});
+  });
+  return copy;
+}
+
+function openFilePreviewPath(filePath, state, row) {
   const path = cleanText(filePath, 360);
   if (!path) return;
   const request = {
@@ -928,9 +1040,26 @@ function openFilePreviewPath(filePath, state) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
+  }).then((response) => {
+    if (response && response.ok === false) {
+      throw new Error(`Open bridge returned ${response.status || "not ok"}`);
+    }
   }).catch((error) => {
+    showFileOpenState(row, "Open failed", "failed");
     state.api?.log?.warn?.("[codex-chat-ui] failed to open file preview row", error?.message || String(error));
   });
+}
+
+function showFileOpenState(row, text, tone) {
+  if (!(row instanceof HTMLElement)) return;
+  let status = row.querySelector("[data-codexpp-chat-ui-file-open-state]");
+  if (!(status instanceof HTMLElement)) {
+    status = document.createElement("span");
+    status.setAttribute("data-codexpp-chat-ui-file-open-state", "true");
+    row.appendChild(status);
+  }
+  status.className = `codexpp-chat-ui-file-open-state codexpp-chat-ui-file-open-state-${tone}`;
+  status.textContent = text;
 }
 
 function normalizeFileKind(kind) {
@@ -1718,6 +1847,10 @@ function injectStyles() {
       cursor: pointer;
     }
 
+    .codexpp-chat-ui-file-row-copy-only {
+      background: color-mix(in srgb, var(--muted, #f4f4f5) 42%, transparent);
+    }
+
     .codexpp-chat-ui-file-row-clickable:focus-visible {
       outline: 2px solid color-mix(in srgb, var(--ring, #18181b) 70%, transparent);
       outline-offset: 2px;
@@ -1831,6 +1964,23 @@ function injectStyles() {
       color: var(--muted-foreground, #52525b);
       font-size: 11px;
       overflow-wrap: anywhere;
+    }
+
+    .codexpp-chat-ui-file-open-state {
+      border: 1px solid var(--border, #d4d4d8);
+      border-radius: 999px;
+      background: var(--muted, #f4f4f5);
+      color: var(--muted-foreground, #52525b);
+      font-size: 11px;
+      font-weight: 650;
+      line-height: 1.2;
+      padding: 3px 7px;
+      white-space: nowrap;
+    }
+
+    .codexpp-chat-ui-file-open-state-failed {
+      background: color-mix(in srgb, var(--destructive, #dc2626) 10%, var(--card, #ffffff));
+      color: var(--destructive, #b91c1c);
     }
 
     .codexpp-chat-ui-file-copy {

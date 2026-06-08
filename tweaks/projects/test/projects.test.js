@@ -169,7 +169,7 @@ test("Chrome assignments write Projects storage and mirror legacy storage for ro
       fs,
       path,
       home: userRoot,
-      profiles: [{ preferencesPath, name: "Work", directory: "Profile 7", email: "work@example.com" }],
+      profiles: [{ preferencesPath, name: "Work", directory: "Profile 7", email: "work@example.com", aliases: ["Work Alias"] }],
     },
   );
 
@@ -179,9 +179,11 @@ test("Chrome assignments write Projects storage and mirror legacy storage for ro
   assert.equal(stored.chromeAssignments[projectPath].preferencesPath, preferencesPath);
   assert.deepEqual(stored.chromeAssignments[projectPath].preferencesPaths, [preferencesPath]);
   assert.deepEqual(stored.chromeAssignments[projectPath].preferredProfiles.map((profile) => profile.profileName), ["Work"]);
-  assert.deepEqual(stored.chromeAssignments[projectPath].profileAliases, ["work@example.com"]);
+  assert.deepEqual(stored.chromeAssignments[projectPath].profileAliases, ["work@example.com", "Work Alias"]);
+  assert.deepEqual(stored.chromeAssignments[projectPath].preferredProfiles[0].profileAliases, ["work@example.com", "Work Alias"]);
   assert.equal(legacy.assignments[projectPath].preferencesPath, preferencesPath);
-  assert.deepEqual(legacy.assignments[projectPath].profileAliases, ["work@example.com"]);
+  assert.deepEqual(legacy.assignments[projectPath].profileAliases, ["work@example.com", "Work Alias"]);
+  assert.deepEqual(legacy.assignments[projectPath].preferredProfiles[0].profileAliases, ["work@example.com", "Work Alias"]);
 });
 
 test("active Chrome profile signal writes a validated project route", () => {
@@ -198,7 +200,13 @@ test("active Chrome profile signal writes a validated project route", () => {
         projectPath,
         profileDirectory: "Profile 7",
         profileName: "Work",
+        profileAliases: ["work@example.com", "Work Alias"],
         preferencesPath,
+        preferredProfiles: [{
+          profileDirectory: "Profile 7",
+          profileName: "Work",
+          preferencesPath,
+        }],
       },
     },
   }), "utf8");
@@ -210,6 +218,34 @@ test("active Chrome profile signal writes a validated project route", () => {
   assert.equal(signal.projectPath, projectPath);
   assert.equal(signal.profileDirectory, "Profile 7");
   assert.equal(signal.preferencesPath, preferencesPath);
+  assert.deepEqual(signal.profileAliases, ["work@example.com", "Work Alias"]);
+});
+
+test("Chrome routing normalizes aliases onto preferred profile entries", () => {
+  const userRoot = tempDir();
+  const projectPath = path.join(userRoot, "repo");
+  const preferencesPath = path.join(userRoot, "Library", "Application Support", "Google", "Chrome", "Profile 7", "Preferences");
+  fs.mkdirSync(path.dirname(preferencesPath), { recursive: true });
+  fs.writeFileSync(preferencesPath, "{}", "utf8");
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.project-chrome-profile.json"), JSON.stringify({
+    assignments: {
+      [projectPath]: {
+        projectPath,
+        profileAliases: ["work@example.com", "Work Alias"],
+        preferredProfiles: [{
+          profileDirectory: "Profile 7",
+          profileName: "Work",
+          preferencesPath,
+        }],
+      },
+    },
+  }), "utf8");
+
+  const resolved = routing.resolveChromeRouting(projectPath, { userRoot, home: userRoot });
+
+  assert.deepEqual(resolved.profileAliases, ["work@example.com", "Work Alias"]);
+  assert.deepEqual(resolved.preferredProfiles[0].profileAliases, ["work@example.com", "Work Alias"]);
 });
 
 test("Chrome routing patch prefers cwd project assignment before active signal", () => {
