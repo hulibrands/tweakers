@@ -1,8 +1,8 @@
 /* ShadGPT Projects
  *
- * Coordinates project-local connection assignments. Projects owns Chrome
- * profile routing and reads the legacy Plugin Profiles storage only for
- * migration and compatibility fallback.
+ * Coordinates project-local connection assignments without replacing the
+ * existing Chrome Profile tweak. Chrome writes intentionally target that
+ * tweak's storage file so its MCP helper keeps resolving the same schema.
  */
 
 const TWEAK_ID = "co.thomashulihan.projects";
@@ -73,13 +73,9 @@ const PROJECT_OVERLAY_OPTIONS = Object.freeze([
   { id: "strong", label: "Strong" },
 ]);
 const DEFAULT_PROJECT_OVERLAY_INTENSITY = "medium";
-const DEFAULT_MODAL_WORKSPACE_ACCOUNT = Object.freeze({
-  id: "modal-admin-56995",
-  name: "TRR Modal",
-  profile: "admin-56995",
-  workspace: "admin-56995",
-  source: "default",
-});
+const PROJECT_PAGE_SYNC_INTERVAL_MS = 4000;
+const PROJECT_PAGE_SYNC_UNAVAILABLE_RETRY_MS = 15000;
+const PROJECT_PAGE_SYNC_ERROR_RETRY_MS = 8000;
 const agentsWriter = loadAgentsWriter() || {};
 const chromeRouting = loadChromeRouting();
 
@@ -118,9 +114,6 @@ module.exports = {
     projectCandidates,
     saveChromeAssignmentToStorage,
     clearChromeAssignmentFromStorage,
-    createChromeProfileAssignmentForProject,
-    readChromeStorage,
-    nextChromeProfileDirectory,
     googleWorkspaceAccountsForProject,
     googleWorkspaceConnectorAccountsFromMetadata,
     saveGoogleWorkspaceAccountToStorage,
@@ -146,6 +139,7 @@ module.exports = {
     updateEnvValueOnDisk,
     normalizeProjectColorKey,
     normalizeSidebarProjectOrder,
+    projectPageSyncDelayMs,
     sidebarProjectOrderKey,
     sortProjectsBySavedOrder,
     applySidebarProjectOrder,
@@ -154,11 +148,16 @@ module.exports = {
     sidebarProjectDomKey,
     readProjectColorStorage,
     readProjectOverlayStorage,
+    readChromeStorage,
     saveProjectColorToStorage,
     saveProjectOverlayToStorage,
     readChromeVerifierResult,
     readChromeVerifierHistory,
     saveChromeVerifierResult,
+    normalizeSidebarProjects,
+    detectActiveProjectFromConversationContext,
+    extractProjectPathFromVisibleText,
+    activeChromeProfileTileState,
     buildProjectConnectionInstructionBlock: agentsWriter.buildProjectConnectionInstructionBlock,
     isProjectAgentsInstructionWriteDisabled: agentsWriter.isProjectAgentsInstructionWriteDisabled,
     previewProjectConnectionInstructions: agentsWriter.previewProjectConnectionInstructions,
@@ -175,13 +174,27 @@ module.exports = {
 
 function startMain(api, cleanup) {
   const handlers = createMainHandlers(api);
+  if (chromeRouting?.patchBundledChromeRouting) {
+    try {
+      const results = chromeRouting.patchBundledChromeRouting({ home: require("node:os").homedir(), logger: api.log });
+      const changed = results.filter((result) => result.changed).length;
+      if (changed) api.log?.info?.(`[projects] patched ${changed} bundled Chrome routing scripts at startup`);
+    } catch (error) {
+      api.log?.warn?.("[projects] bundled Chrome routing patch failed at startup", error?.message || String(error));
+    }
+  }
+  if (chromeRouting?.startChromePluginCacheWatcher) {
+    cleanup.push(chromeRouting.startChromePluginCacheWatcher({ home: require("node:os").homedir(), logger: api.log }));
+  }
   cleanup.push(api.ipc.handle("listProjects", () => handlers.listProjects()));
+  cleanup.push(api.ipc.handle("listProjectSettingsPages", () => handlers.listProjectSettingsPages()));
   cleanup.push(api.ipc.handle("cacheSidebarProjects", (projects) => handlers.cacheSidebarProjects(projects)));
   cleanup.push(api.ipc.handle("getSidebarProjectOrder", () => handlers.getSidebarProjectOrder()));
   cleanup.push(api.ipc.handle("saveSidebarProjectOrder", (order) => handlers.saveSidebarProjectOrder(order)));
   cleanup.push(api.ipc.handle("getProjectEnvScanTimeout", () => handlers.getProjectEnvScanTimeout()));
   cleanup.push(api.ipc.handle("saveProjectEnvScanTimeout", (timeoutMs) => handlers.saveProjectEnvScanTimeout(timeoutMs)));
   cleanup.push(api.ipc.handle("getProjectOverview", (projectPath) => handlers.getProjectOverview(projectPath)));
+  cleanup.push(api.ipc.handle("setActiveChromeProject", (projectPath) => handlers.setActiveChromeProject(projectPath)));
   cleanup.push(api.ipc.handle("setAgentsInstructionWritePreference", (input) => handlers.setAgentsInstructionWritePreference(input)));
   cleanup.push(api.ipc.handle("setAgentsInstructionPluginWritePreference", (input) => handlers.setAgentsInstructionPluginWritePreference(input)));
   cleanup.push(api.ipc.handle("previewProjectAgentsInstruction", (input) => handlers.previewProjectAgentsInstruction(input)));
@@ -192,7 +205,6 @@ function startMain(api, cleanup) {
   cleanup.push(api.ipc.handle("listChromeProfiles", () => handlers.listChromeProfiles()));
   cleanup.push(api.ipc.handle("saveChromeAssignment", (input) => handlers.saveChromeAssignment(input)));
   cleanup.push(api.ipc.handle("clearChromeAssignment", (projectPath) => handlers.clearChromeAssignment(projectPath)));
-  cleanup.push(api.ipc.handle("createChromeProfileForProject", (input) => handlers.createChromeProfileForProject(input)));
   cleanup.push(api.ipc.handle("listGoogleWorkspaceAccounts", () => handlers.listGoogleWorkspaceAccounts()));
   cleanup.push(api.ipc.handle("saveGoogleWorkspaceAccount", (input) => handlers.saveGoogleWorkspaceAccount(input)));
   cleanup.push(api.ipc.handle("saveGoogleWorkspaceAssignment", (input) => handlers.saveGoogleWorkspaceAssignment(input)));
@@ -230,6 +242,25 @@ function createMainHandlers(api) {
     sidebarProjects: readSidebarProjects(api),
     projectOrder: readSidebarProjectOrder(api),
   });
+
+  const listProjectSettingsPages = () => {
+    const projectColorStorage = readProjectColorStorage(userRoot);
+    const projectOverlayStorage = readProjectOverlayStorage(userRoot);
+    return listProjects().map((project) => {
+      const projectColorKey = normalizeProjectColorKey(project.name || project.projectPath);
+      const colorId = normalizeProjectColorId(projectColorStorage[projectColorKey]);
+      const liveAccent = projectAccentFields(project);
+      const projectColorValue = liveAccent.projectAccentColor || (colorId === "auto" ? "" : projectColorOption(colorId).value);
+      return {
+        ...project,
+        projectColorKey,
+        projectColor: colorId,
+        projectColorValue,
+        ...liveAccent,
+        projectOverlayIntensity: normalizeProjectOverlayIntensity(projectOverlayStorage[projectColorKey]),
+      };
+    });
+  };
 
   const cacheSidebarProjects = (projects) => {
     const normalized = normalizeSidebarProjects(projects);
@@ -369,7 +400,7 @@ function createMainHandlers(api) {
     const projectName = typeof projectPathInput?.name === "string" ? projectPathInput.name : "";
     const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
     const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
-    const chromeStorage = readChromeStorage(userRoot, { fs, path, home });
+    const chromeStorage = readChromeStorage(userRoot);
     const chromeAssignment = chromeStorage.assignments[projectPath] || null;
     const googleWorkspaceStorage = readGoogleWorkspaceStorage(userRoot);
     const modalWorkspaceStorage = readModalWorkspaceStorage(userRoot);
@@ -386,6 +417,9 @@ function createMainHandlers(api) {
       projectPath,
       chromeAssignment,
       chromeRouting: chromeRoutingSummary(projectPath, chromeStorage, { userRoot, home, path }),
+      activeChromeProfile: chromeRouting?.readActiveChromeProfileSignal
+        ? chromeRouting.readActiveChromeProfileSignal({ userRoot, home })
+        : null,
       chromeVerifierLastResult: readChromeVerifierResult(projectPath, { userRoot }),
       chromeVerifierHistory: readChromeVerifierHistory(projectPath, { userRoot }),
       gitRepositories,
@@ -408,6 +442,20 @@ function createMainHandlers(api) {
     };
   };
 
+  const setActiveChromeProject = (projectPathInput) => {
+    if (!chromeRouting?.writeActiveChromeProfileSignal) {
+      return { changed: false, skipped: true, reason: "chrome-routing-unavailable" };
+    }
+    const projectName = typeof projectPathInput?.name === "string" ? projectPathInput.name : "";
+    const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
+    const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
+    const result = chromeRouting.writeActiveChromeProfileSignal({ projectPath, projectName }, { userRoot, home });
+    return {
+      ...result,
+      overview: getProjectOverview({ projectPath, name: projectName }),
+    };
+  };
+
   const getProjectEnvInventory = (projectPathInput) => {
     const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
     const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
@@ -416,6 +464,7 @@ function createMainHandlers(api) {
 
   return {
     listProjects,
+    listProjectSettingsPages,
     cacheSidebarProjects,
     getSidebarProjectOrder,
     saveSidebarProjectOrder,
@@ -428,6 +477,7 @@ function createMainHandlers(api) {
     getProjectEnvScanTimeout,
     saveProjectEnvScanTimeout,
     getProjectOverview,
+    setActiveChromeProject,
     getProjectEnvInventory,
     listChromeProfiles,
     saveChromeAssignment: (input) => {
@@ -438,10 +488,6 @@ function createMainHandlers(api) {
       const projectPath = normalizeProjectPath(projectPathInput?.projectPath || projectPathInput, { home, path });
       clearChromeAssignmentFromStorage(projectPath, { userRoot, home, path });
       return withAgentsInstruction({ cleared: true }, { projectPath, projectName: projectPathInput?.projectName || projectPathInput?.name });
-    },
-    createChromeProfileForProject: (input) => {
-      const assignment = createChromeProfileAssignmentForProject(input, { userRoot, home, path, fs, os, childProcess });
-      return withAgentsInstruction({ assignment }, { projectPath: assignment.projectPath, projectName: input?.projectName || input?.name });
     },
     listGoogleWorkspaceAccounts,
     listModalWorkspaceAccounts,
@@ -524,6 +570,7 @@ function loadAgentsWriter() {
 function loadChromeRouting() {
   if (typeof require !== "function") return null;
   for (const candidate of [
+    "./chrome-routing",
     "../co.thomashulihan.project-chrome-profile/chrome-routing",
     "../thomashulihan-project-chrome-profile/chrome-routing",
   ]) {
@@ -534,19 +581,19 @@ function loadChromeRouting() {
   return null;
 }
 
-function chromeRoutingSummary(projectPath, chromeStorage, _options = {}) {
-  const path = require("node:path");
-  const normalized = typeof projectPath === "string" ? path.resolve(projectPath) : "";
-  const match = Object.values(chromeStorage.assignments || {})
-    .filter((entry) => entry && typeof entry.projectPath === "string")
-    .filter((entry) => normalized === entry.projectPath || normalized.startsWith(`${entry.projectPath}${path.sep}`))
-    .sort((a, b) => b.projectPath.length - a.projectPath.length)[0] || null;
+function chromeRoutingSummary(projectPath, chromeStorage, options = {}) {
+  if (chromeRouting?.resolveChromeRouting) {
+    try {
+      return chromeRouting.resolveChromeRouting(projectPath, options);
+    } catch {}
+  }
+  const match = chromeStorage.assignments?.[projectPath] || null;
   const fallback = match ? null : chromeStorage.defaultProfile || null;
   const assignment = match || fallback;
   const preferredProfiles = normalizeChromePreferredProfiles(assignment);
   const primary = preferredProfiles[0] || null;
   return {
-    projectPath: match?.projectPath || projectPath,
+    projectPath,
     matched: Boolean(match),
     source: match ? "project" : fallback ? "default" : "none",
     assignment: match,
@@ -561,12 +608,17 @@ function chromeRoutingSummary(projectPath, chromeStorage, _options = {}) {
 function normalizeChromePreferredProfiles(assignment) {
   const path = require("node:path");
   if (!assignment || typeof assignment !== "object") return [];
-  if (Array.isArray(assignment.preferredProfiles) && assignment.preferredProfiles.length) return assignment.preferredProfiles;
-  if (Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length) return assignment.allowedProfiles;
+  if (Array.isArray(assignment.preferredProfiles) && assignment.preferredProfiles.length) {
+    return assignment.preferredProfiles.map((profile, index) => normalizeChromePreferredProfileEntry(assignment, profile, index, path));
+  }
+  if (Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length) {
+    return assignment.allowedProfiles.map((profile, index) => normalizeChromePreferredProfileEntry(assignment, profile, index, path));
+  }
   if (Array.isArray(assignment.preferencesPaths) && assignment.preferencesPaths.length) {
     return assignment.preferencesPaths.map((preferencesPath, index) => ({
       profileDirectory: Array.isArray(assignment.profileDirectories) ? assignment.profileDirectories[index] : path.basename(path.dirname(preferencesPath)),
       profileName: Array.isArray(assignment.profileNames) ? assignment.profileNames[index] : path.basename(path.dirname(preferencesPath)),
+      profileAliases: profileAliasesAtIndex(assignment, index),
       preferencesPath,
       userDataDir: path.dirname(path.dirname(preferencesPath)),
     }));
@@ -574,9 +626,47 @@ function normalizeChromePreferredProfiles(assignment) {
   return assignment.profileDirectory || assignment.preferencesPath ? [{
     profileDirectory: assignment.profileDirectory,
     profileName: assignment.profileName,
+    profileAliases: normalizeProfileAliases(assignment.profileAliases),
     preferencesPath: assignment.preferencesPath,
     userDataDir: assignment.userDataDir || (assignment.preferencesPath ? path.dirname(path.dirname(assignment.preferencesPath)) : ""),
   }] : [];
+}
+
+function normalizeChromePreferredProfileEntry(assignment, profile, index, path) {
+  const preferencesPath = typeof profile?.preferencesPath === "string" ? profile.preferencesPath : "";
+  return {
+    ...profile,
+    profileDirectory: profile?.profileDirectory || (preferencesPath ? path.basename(path.dirname(preferencesPath)) : ""),
+    profileName: profile?.profileName || profile?.profileDirectory || (preferencesPath ? path.basename(path.dirname(preferencesPath)) : ""),
+    profileAliases: normalizeProfileAliases([
+      ...profileAliasesAtIndex(assignment, index),
+      ...normalizeProfileAliases(profile?.profileAliases),
+    ]),
+    preferencesPath,
+    userDataDir: profile?.userDataDir || (preferencesPath ? path.dirname(path.dirname(preferencesPath)) : ""),
+  };
+}
+
+function normalizeProfileAliases(input) {
+  const values = Array.isArray(input) ? input : typeof input === "string" ? [input] : [];
+  return [...new Set(values
+    .filter((value) => typeof value === "string")
+    .map((value) => value.trim())
+    .filter(Boolean))];
+}
+
+function profileAliasesAtIndex(assignment, index) {
+  const aliases = assignment?.profileAliases;
+  if (Array.isArray(aliases?.[index])) return normalizeProfileAliases(aliases[index]);
+  if (index === 0) return normalizeProfileAliases(aliases);
+  return [];
+}
+
+function profileAliasesForAssignment(assignment, preferredProfiles) {
+  return normalizeProfileAliases([
+    ...(Array.isArray(assignment?.profileAliases) ? assignment.profileAliases : []),
+    ...preferredProfiles.flatMap((profile) => normalizeProfileAliases(profile?.profileAliases)),
+  ]);
 }
 
 function storageFileFor(tweakId, options = {}) {
@@ -727,6 +817,7 @@ function normalizeChromeAssignment(assignment, projectPathFallback = "") {
     userDataDir: String(assignment.userDataDir || primary?.userDataDir || "").trim(),
     profileDirectories: preferredProfiles.map((profile) => profile.profileDirectory).filter(Boolean),
     profileNames: preferredProfiles.map((profile) => profile.profileName).filter(Boolean),
+    profileAliases: profileAliasesForAssignment(assignment, preferredProfiles),
     preferencesPaths: preferredProfiles.map((profile) => profile.preferencesPath).filter(Boolean),
     preferredProfiles,
     allowedProfiles: Array.isArray(assignment.allowedProfiles) && assignment.allowedProfiles.length
@@ -844,11 +935,7 @@ function googleWorkspaceAccountsForProject(projectPathInput, options = {}) {
 
 function modalWorkspaceAccountsForProject(_projectPathInput, options = {}) {
   const storage = readModalWorkspaceStorage(options.userRoot);
-  const accounts = [...storage.accounts];
-  if (!accounts.some((account) => account.workspace === DEFAULT_MODAL_WORKSPACE_ACCOUNT.workspace)) {
-    accounts.unshift({ ...DEFAULT_MODAL_WORKSPACE_ACCOUNT });
-  }
-  return accounts;
+  return [...storage.accounts];
 }
 
 function decodoAccountsForProject(_projectPathInput, options = {}) {
@@ -1414,19 +1501,22 @@ function saveChromeAssignmentToStorage(input, options = {}) {
   const preferredProfiles = preferencesPaths.map((preferencesPath) => {
     const profileDirectory = path.basename(path.dirname(preferencesPath));
     const profile = profiles.find((candidate) => candidate.preferencesPath === preferencesPath);
+    const profileAliases = normalizeProfileAliases([
+      profile?.email,
+      ...(Array.isArray(profile?.aliases) ? profile.aliases : []),
+      ...(Array.isArray(profile?.profileAliases) ? profile.profileAliases : []),
+    ]).filter((alias) => alias !== profile?.name && alias !== profileDirectory);
     return {
       profileDirectory,
       profileName: profile?.name || input?.projectName || profileDirectory,
+      profileAliases,
       preferencesPath,
       userDataDir: path.dirname(path.dirname(preferencesPath)),
     };
   });
   const primary = preferredProfiles[0];
-  const storage = readStorageFile(TWEAK_ID, options);
-  const assignments = isPlainObject(storage[CHROME_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_ASSIGNMENTS_KEY] } : {};
-  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] } : {};
-  delete cleared[projectPath];
-  assignments[projectPath] = {
+  const storage = readChromeStorage(options.userRoot);
+  storage.assignments[projectPath] = {
     projectPath,
     profileDirectory: primary.profileDirectory,
     profileName: primary.profileName,
@@ -1434,120 +1524,50 @@ function saveChromeAssignmentToStorage(input, options = {}) {
     userDataDir: primary.userDataDir,
     profileDirectories: preferredProfiles.map((profile) => profile.profileDirectory),
     profileNames: preferredProfiles.map((profile) => profile.profileName),
+    profileAliases: profileAliasesForAssignment({}, preferredProfiles),
     preferencesPaths: preferredProfiles.map((profile) => profile.preferencesPath),
     preferredProfiles,
-    allowedProfiles: preferredProfiles,
     updatedAt: new Date().toISOString(),
   };
-  storage[CHROME_ASSIGNMENTS_KEY] = assignments;
-  storage[CHROME_CLEARED_ASSIGNMENTS_KEY] = cleared;
+  const savedAssignment = storage.assignments[projectPath];
+  storage[CHROME_ASSIGNMENTS_KEY] = storage.assignments;
+  if (isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY])) delete storage[CHROME_CLEARED_ASSIGNMENTS_KEY][projectPath];
   storage.updatedAt = new Date().toISOString();
+  delete storage.assignments;
+  delete storage.legacyAssignments;
   writeStorageFile(TWEAK_ID, storage, options);
-  return assignments[projectPath];
+  const legacyStorage = readStorageFile(CHROME_TWEAK_ID, options);
+  const legacyAssignments = isPlainObject(legacyStorage.assignments) ? { ...legacyStorage.assignments } : {};
+  legacyAssignments[projectPath] = savedAssignment;
+  legacyStorage.assignments = legacyAssignments;
+  legacyStorage.updatedAt = new Date().toISOString();
+  writeStorageFile(CHROME_TWEAK_ID, legacyStorage, options);
+  return savedAssignment;
 }
 
 function clearChromeAssignmentFromStorage(projectPathInput, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(projectPathInput, { home, path });
-  const storage = readStorageFile(TWEAK_ID, options);
-  const assignments = isPlainObject(storage[CHROME_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_ASSIGNMENTS_KEY] } : {};
-  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] } : {};
-  delete assignments[projectPath];
+  const storage = readChromeStorage(options.userRoot);
+  delete storage.assignments[projectPath];
+  storage[CHROME_ASSIGNMENTS_KEY] = storage.assignments;
+  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY])
+    ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] }
+    : {};
   cleared[projectPath] = new Date().toISOString();
-  storage[CHROME_ASSIGNMENTS_KEY] = assignments;
   storage[CHROME_CLEARED_ASSIGNMENTS_KEY] = cleared;
   storage.updatedAt = new Date().toISOString();
+  delete storage.assignments;
+  delete storage.legacyAssignments;
   writeStorageFile(TWEAK_ID, storage, options);
+  const legacyStorage = readStorageFile(CHROME_TWEAK_ID, options);
+  if (isPlainObject(legacyStorage.assignments)) {
+    delete legacyStorage.assignments[projectPath];
+    legacyStorage.updatedAt = new Date().toISOString();
+    writeStorageFile(CHROME_TWEAK_ID, legacyStorage, options);
+  }
   return true;
-}
-
-function createChromeProfileAssignmentForProject(input, options = {}) {
-  const path = options.path || require("node:path");
-  const fs = options.fs || require("node:fs");
-  const os = options.os || require("node:os");
-  const childProcess = options.childProcess || require("node:child_process");
-  const home = options.home || os.homedir();
-  const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
-  const projectName = String(input?.projectName || input?.name || projectLabel(projectPath, path)).trim();
-  const userDataDir = chromeUserDataDir({ os, path });
-  const profileDirectory = nextChromeProfileDirectory({ fs, os, path });
-  const preferencesPath = path.join(userDataDir, profileDirectory, "Preferences");
-  const launch = openChromeProfileSettings(profileDirectory, { childProcess });
-  const storage = readStorageFile(TWEAK_ID, options);
-  const assignments = isPlainObject(storage[CHROME_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_ASSIGNMENTS_KEY] } : {};
-  const cleared = isPlainObject(storage[CHROME_CLEARED_ASSIGNMENTS_KEY]) ? { ...storage[CHROME_CLEARED_ASSIGNMENTS_KEY] } : {};
-  const preferredProfiles = [{
-    profileDirectory,
-    profileName: projectName || profileDirectory,
-    preferencesPath,
-    userDataDir,
-  }];
-  delete cleared[projectPath];
-  assignments[projectPath] = {
-    projectPath,
-    profileDirectory,
-    profileName: projectName || profileDirectory,
-    preferencesPath,
-    userDataDir,
-    profileDirectories: [profileDirectory],
-    profileNames: [projectName || profileDirectory],
-    preferencesPaths: [preferencesPath],
-    preferredProfiles,
-    allowedProfiles: preferredProfiles,
-    pendingCreation: true,
-    launch,
-    updatedAt: new Date().toISOString(),
-  };
-  storage[CHROME_ASSIGNMENTS_KEY] = assignments;
-  storage[CHROME_CLEARED_ASSIGNMENTS_KEY] = cleared;
-  storage.updatedAt = new Date().toISOString();
-  writeStorageFile(TWEAK_ID, storage, options);
-  return assignments[projectPath];
-}
-
-function nextChromeProfileDirectory(options = {}) {
-  const fs = options.fs || require("node:fs");
-  const os = options.os || require("node:os");
-  const path = options.path || require("node:path");
-  const userDataDir = chromeUserDataDir({ os, path });
-  const names = new Set();
-  const localState = readJson(path.join(userDataDir, "Local State"), fs);
-  for (const value of [
-    ...(Array.isArray(localState?.profile?.profiles_order) ? localState.profile.profiles_order : []),
-    ...Object.keys(localState?.profile?.info_cache || {}),
-  ]) {
-    if (typeof value === "string") names.add(value);
-  }
-  try {
-    for (const entry of fs.readdirSync(userDataDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) names.add(entry.name);
-    }
-  } catch {}
-  const max = [...names].reduce((highest, name) => {
-    const match = /^Profile (\d+)$/.exec(name);
-    return match ? Math.max(highest, Number(match[1])) : highest;
-  }, 0);
-  return `Profile ${max + 1}`;
-}
-
-function openChromeProfileSettings(profileDirectory, options = {}) {
-  const childProcess = options.childProcess || require("node:child_process");
-  const args = [`--profile-directory=${profileDirectory}`, "--new-window", "chrome://settings/manageProfile"];
-  try {
-    if (process.platform === "darwin") {
-      childProcess.spawn("open", ["-n", "-a", "Google Chrome", "--args", ...args], {
-        detached: true,
-        stdio: "ignore",
-      }).unref();
-      return { attempted: true, command: "open", args };
-    }
-    const command = process.platform === "win32" ? "chrome.exe" : "google-chrome";
-    childProcess.spawn(command, args, { detached: true, stdio: "ignore" }).unref();
-    return { attempted: true, command, args };
-  } catch (error) {
-    return { attempted: true, error: error?.message || String(error) };
-  }
 }
 
 function normalizePreferencesPaths(input) {
@@ -1587,12 +1607,16 @@ function listChromeProfilesFromDisk(options = {}) {
     if (!chromeProfileHasEnabledCodexExtension(userDataDir, directory, extensionId, { fs, path })) continue;
     const metadata = infoCache[directory] || {};
     const email = typeof metadata.user_name === "string" ? metadata.user_name.trim() : "";
+    const preferences = readJson(preferencesPath, fs);
+    const aliases = chromeProfileAliases(metadata, preferences);
     const avatarPath = path.join(userDataDir, directory, "Google Profile Picture.png");
     profiles.push({
       userDataDir,
       directory,
-      name: email || metadata.name || (directory === "Default" ? "Default" : directory),
+      name: metadata.name || email || (directory === "Default" ? "Default" : directory),
       email,
+      aliases,
+      profileAliases: aliases,
       avatarUrl: fs.existsSync(avatarPath) ? pathToFileURL(avatarPath).href : "",
       preferencesPath,
       isLastUsed: localState?.profile?.last_used === directory,
@@ -1612,6 +1636,8 @@ function listChromeProfilesFromDisk(options = {}) {
         directory: entry.name,
         name: entry.name,
         email: "",
+        aliases: [],
+        profileAliases: [],
         avatarUrl: fs.existsSync(avatarPath) ? pathToFileURL(avatarPath).href : "",
         preferencesPath,
         isLastUsed: false,
@@ -1620,6 +1646,17 @@ function listChromeProfilesFromDisk(options = {}) {
   }
 
   return profiles;
+}
+
+function chromeProfileAliases(metadata, preferences) {
+  const aliases = [];
+  if (typeof metadata?.user_name === "string") aliases.push(metadata.user_name);
+  if (Array.isArray(preferences?.account_info)) {
+    for (const account of preferences.account_info) {
+      if (typeof account?.email === "string") aliases.push(account.email);
+    }
+  }
+  return normalizeProfileAliases(aliases);
 }
 
 function chromeUserDataDir(options = {}) {
@@ -1716,9 +1753,22 @@ function normalizeSidebarProjects(projects) {
         .map((project) => ({
           name: project.name,
           projectPath: typeof project.projectPath === "string" ? project.projectPath : "",
+          ...projectAccentFields(project),
           updatedAt: new Date().toISOString(),
         }))
     : [];
+}
+
+function projectAccentFields(project) {
+  return {
+    projectAccentColor: compactText(project?.projectAccentColor),
+    projectAccentTextColor: compactText(project?.projectAccentTextColor),
+    projectAccentBackgroundTint: compactText(project?.projectAccentBackgroundTint),
+    projectAccentChildLight: compactText(project?.projectAccentChildLight),
+    projectAccentChildDark: compactText(project?.projectAccentChildDark),
+    projectAccentChildHoverLight: compactText(project?.projectAccentChildHoverLight),
+    projectAccentChildHoverDark: compactText(project?.projectAccentChildHoverDark),
+  };
 }
 
 function normalizeSidebarProjectOrder(order) {
@@ -1763,20 +1813,20 @@ function projectCandidates(options = {}) {
   const candidates = [];
   const known = knownProjectPaths(home, path);
 
-  const add = (projectPathInput, name, source) => {
+  const add = (projectPathInput, name, source, metadata = {}) => {
     if (!projectPathInput || typeof projectPathInput !== "string") return;
     if (isCloudProjectPath(projectPathInput)) return;
     if (projectPathInput.startsWith("codex-sidebar://")) return;
     const projectPath = normalizeProjectPath(projectPathInput, { home, path });
     if (!fs.existsSync(projectPath)) return;
     const label = name || path.basename(projectPath);
-    candidates.push({ name: label, projectPath, source });
+    candidates.push({ name: label, projectPath, source, ...projectAccentFields(metadata) });
   };
 
   for (const project of sidebarProjects) {
     if (!project?.name || isExcludedSidebarProjectName(project.name)) continue;
     const projectPath = resolveSidebarProjectPath(project, known, { fs, path, home });
-    add(projectPath, project.name, "sidebar");
+    add(projectPath, project.name, "sidebar", project);
   }
 
   const byPath = new Map();
@@ -2238,6 +2288,9 @@ function startRenderer(api, cleanup) {
   cleanup.push(projectScan);
   const projectReorder = startSidebarProjectReorder(api);
   cleanup.push(projectReorder);
+  const activeProjectContext = startActiveProjectContextDetector(api);
+  cleanup.push(activeProjectContext);
+  const projectPageHandles = new Map();
 
   if (typeof api.settings?.registerPage !== "function") {
     api.log?.warn?.("[projects] registerPage unavailable; settings UI not mounted.");
@@ -2261,6 +2314,258 @@ function startRenderer(api, cleanup) {
   });
   if (handle && typeof handle.dispose === "function") cleanup.push(() => handle.dispose());
   if (handle && typeof handle.unregister === "function") cleanup.push(() => handle.unregister());
+  cleanup.push(() => {
+    for (const entry of projectPageHandles.values()) unregisterSettingsHandle(entry.handle);
+    projectPageHandles.clear();
+  });
+  const pageSyncState = createProjectPageSyncState();
+  syncProjectSettingsPages(api, projectPageHandles, pageSyncState);
+  const syncProjectPagesNow = () => {
+    pageSyncState.nextAllowedAt = 0;
+    syncProjectSettingsPages(api, projectPageHandles, pageSyncState);
+  };
+  window.addEventListener(PROJECT_COLOR_EVENT, syncProjectPagesNow);
+  cleanup.push(() => window.removeEventListener(PROJECT_COLOR_EVENT, syncProjectPagesNow));
+  const pageSyncTimer = setInterval(
+    () => syncProjectSettingsPages(api, projectPageHandles, pageSyncState),
+    PROJECT_PAGE_SYNC_INTERVAL_MS,
+  );
+  cleanup.push(() => clearInterval(pageSyncTimer));
+}
+
+function createProjectPageSyncState() {
+  return {
+    nextAllowedAt: 0,
+    mainUnavailableLogged: false,
+    lastErrorMessage: "",
+  };
+}
+
+async function syncProjectSettingsPages(api, handles, state = createProjectPageSyncState(), now = Date.now()) {
+  if (now < state.nextAllowedAt) return false;
+  try {
+    const projects = await listProjectSettingsPageEntries(api);
+    state.nextAllowedAt = 0;
+    state.mainUnavailableLogged = false;
+    state.lastErrorMessage = "";
+    const wanted = new Set();
+    for (const project of projects) {
+      const pageId = `project-${slugify(project.name || project.projectPath)}`;
+      const signature = projectSettingsPageSignature(project);
+      wanted.add(pageId);
+      const existing = handles.get(pageId);
+      if (existing?.signature === signature) continue;
+      if (existing) unregisterSettingsHandle(existing.handle);
+      const sidebarAccent = projectSettingsSidebarAccent(project);
+      const handle = api.settings.registerPage({
+        id: pageId,
+        title: project.name,
+        groupTitle: "Projects",
+        description: project.projectPath,
+        sidebarProjectKey: sidebarAccent.projectKey,
+        sidebarAccentColorId: sidebarAccent.colorId,
+        sidebarAccentColor: sidebarAccent.color,
+        sidebarAccentTextColor: sidebarAccent.textColor,
+        sidebarAccentBackgroundTint: sidebarAccent.backgroundTint,
+        sidebarAccentChildLight: sidebarAccent.childLight,
+        sidebarAccentChildDark: sidebarAccent.childDark,
+        sidebarAccentChildHoverLight: sidebarAccent.childHoverLight,
+        sidebarAccentChildHoverDark: sidebarAccent.childHoverDark,
+        sidebarOverlayIntensity: sidebarAccent.overlayIntensity,
+        iconSvg:
+          '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
+          '<path d="M3.5 5.5A1.5 1.5 0 0 1 5 4h3l1.2 1.5H15A1.5 1.5 0 0 1 16.5 7v7A1.5 1.5 0 0 1 15 15.5H5A1.5 1.5 0 0 1 3.5 14v-8.5Z" stroke="currentColor" stroke-width="1.5"/>' +
+          "</svg>",
+        render(root) {
+          renderProjectSettingsPage(root, api, project);
+        },
+      });
+      handles.set(pageId, { handle, signature });
+    }
+    for (const [pageId, entry] of handles) {
+      if (wanted.has(pageId)) continue;
+      unregisterSettingsHandle(entry.handle);
+      handles.delete(pageId);
+    }
+    return true;
+  } catch (error) {
+    const message = error?.message || String(error);
+    const delayMs = projectPageSyncDelayMs(message);
+    state.nextAllowedAt = now + delayMs;
+    if (isMissingProjectIpcHandlerError(message)) {
+      if (!state.mainUnavailableLogged) {
+        api.log?.debug?.("[projects] project settings page sync waiting for main handlers");
+        state.mainUnavailableLogged = true;
+      }
+      return false;
+    }
+    if (state.lastErrorMessage !== message) {
+      api.log?.warn?.("[projects] failed to sync project settings pages", message);
+      state.lastErrorMessage = message;
+    }
+    return false;
+  }
+}
+
+async function listProjectSettingsPageEntries(api) {
+  try {
+    return await api.ipc.invoke("listProjectSettingsPages");
+  } catch (error) {
+    const message = error?.message || String(error);
+    if (!/listProjectSettingsPages/.test(message)) throw error;
+    return api.ipc.invoke("listProjects");
+  }
+}
+
+function projectSettingsSidebarAccent(project) {
+  const projectKey = normalizeProjectColorKey(project?.projectColorKey || project?.name || project?.projectPath);
+  const colorId = normalizeProjectColorId(project?.projectColor);
+  const accent = projectAccentFields(project);
+  const color = accent.projectAccentColor || (colorId === "auto" ? "" : (project?.projectColorValue || projectColorOption(colorId).value));
+  return {
+    projectKey,
+    colorId,
+    color,
+    textColor: accent.projectAccentTextColor,
+    backgroundTint: accent.projectAccentBackgroundTint,
+    childLight: accent.projectAccentChildLight,
+    childDark: accent.projectAccentChildDark,
+    childHoverLight: accent.projectAccentChildHoverLight,
+    childHoverDark: accent.projectAccentChildHoverDark,
+    overlayIntensity: normalizeProjectOverlayIntensity(project?.projectOverlayIntensity),
+  };
+}
+
+function projectSettingsPageSignature(project) {
+  const accent = projectSettingsSidebarAccent(project);
+  return [
+    project?.name || "",
+    project?.projectPath || "",
+    accent.projectKey,
+    accent.colorId,
+    accent.color,
+    accent.textColor,
+    accent.backgroundTint,
+    accent.childLight,
+    accent.childDark,
+    accent.childHoverLight,
+    accent.childHoverDark,
+    accent.overlayIntensity,
+  ].join("|");
+}
+
+function projectPageSyncDelayMs(message) {
+  return isMissingProjectIpcHandlerError(message)
+    ? PROJECT_PAGE_SYNC_UNAVAILABLE_RETRY_MS
+    : PROJECT_PAGE_SYNC_ERROR_RETRY_MS;
+}
+
+function isMissingProjectIpcHandlerError(message) {
+  return /No handler registered for 'codexpp:co\.thomashulihan\.projects:listProjects'/.test(String(message || ""));
+}
+
+function unregisterSettingsHandle(handle) {
+  try {
+    if (handle && typeof handle.unregister === "function") handle.unregister();
+    else if (handle && typeof handle.dispose === "function") handle.dispose();
+  } catch {}
+}
+
+function startActiveProjectContextDetector(api) {
+  let disposed = false;
+  let scheduled = false;
+  let lastProjectPath = "";
+
+  const run = async () => {
+    if (disposed) return;
+    try {
+      const activeProject = detectActiveProjectFromConversationContext({
+        visibleText: activeProjectConversationText(),
+        sidebarProjects: scanSidebarProjectsFromDom(),
+      });
+      if (!activeProject?.projectPath || activeProject.projectPath === lastProjectPath) return;
+      lastProjectPath = activeProject.projectPath;
+      await api.ipc.invoke("setActiveChromeProject", activeProject).catch(() => null);
+    } catch (error) {
+      api.log?.debug?.("[projects] active project context detection skipped", error?.message || String(error));
+    }
+  };
+
+  const schedule = () => {
+    if (scheduled || disposed) return;
+    scheduled = true;
+    window.setTimeout(() => {
+      scheduled = false;
+      run();
+    }, 250);
+  };
+
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
+  const timer = window.setInterval(run, 2500);
+  run();
+  return () => {
+    disposed = true;
+    observer.disconnect();
+    window.clearInterval(timer);
+  };
+}
+
+function activeProjectConversationText(rootDocument = document) {
+  const direct = rootDocument.querySelector("[data-codex-cwd], [data-project-path], [data-codexpp-project-path]");
+  const directPath = direct?.getAttribute("data-codex-cwd") ||
+    direct?.getAttribute("data-project-path") ||
+    direct?.getAttribute("data-codexpp-project-path") ||
+    "";
+  if (directPath) return `cwd: ${directPath}`;
+  const roots = Array.from(rootDocument.querySelectorAll("main, [role='main'], [data-testid*='conversation'], [data-testid*='thread']"));
+  const source = roots.find((node) => compactText(node.textContent).length > 0) || rootDocument.body || rootDocument.documentElement;
+  return visibleTextWithSeparators(source).slice(0, 24000);
+}
+
+function detectActiveProjectFromConversationContext(input = {}) {
+  const projects = normalizeSidebarProjects(input.sidebarProjects || [])
+    .filter((project) => project.projectPath && !isCloudProjectPath(project.projectPath))
+    .sort((left, right) => right.projectPath.length - left.projectPath.length);
+  if (!projects.length) return null;
+  const contextPath = extractProjectPathFromVisibleText(input.visibleText || input.text || input.projectPath || "");
+  if (!contextPath) return null;
+  const normalizedContext = normalizeComparablePath(contextPath);
+  return projects.find((project) => {
+    const normalizedProject = normalizeComparablePath(project.projectPath);
+    return normalizedContext === normalizedProject || normalizedContext.startsWith(`${normalizedProject}/`);
+  }) || null;
+}
+
+function extractProjectPathFromVisibleText(text) {
+  const normalized = String(text || "").replace(/\r/g, "\n").replace(/[ \t]+/g, " ");
+  const labeled = /(?:^|\n|\b)(?:cwd|workspace|project(?: path)?)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|`([^`]+)`|((?:~?\/|[A-Za-z]:[\\/])[^\n]+))/i.exec(normalized);
+  if (labeled) return cleanVisiblePathCandidate(labeled[1] || labeled[2] || labeled[3] || labeled[4] || "");
+  const absolute = /((?:~?\/|[A-Za-z]:[\\/])Users\/[^\n]*?\/(?:Projects|Applications|Documents)\/[^\s,;:)]+(?:[^\n,;)]*?))/i.exec(normalized);
+  return absolute ? cleanVisiblePathCandidate(absolute[1]) : "";
+}
+
+function cleanVisiblePathCandidate(value) {
+  let text = String(value || "")
+    .replace(/\s+(?:environment|sources|progress|subagents|changes|local|main|commit|create pull request)\b.*$/i, "")
+    .replace(/[),.;\]]+$/g, "")
+    .trim();
+  text = text.replace(/\/\.{3}.*$/, "");
+  return /^(?:~?\/|[A-Za-z]:[\\/])/.test(text) ? text : "";
+}
+
+function normalizeComparablePath(value) {
+  return String(value || "").replace(/\\/g, "/").replace(/\/+$/g, "").toLowerCase();
+}
+
+function visibleTextWithSeparators(node) {
+  if (!node) return "";
+  const children = Array.from(node.childNodes || []);
+  if (!children.length) return node.textContent || "";
+  return children
+    .map((child) => visibleTextWithSeparators(child))
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function renderProjectsPage(root, api) {
@@ -2271,7 +2576,7 @@ async function renderProjectsPage(root, api) {
   root.appendChild(styles);
 
   const frame = el("div", "projects-frame");
-  frame.appendChild(sectionTitle("Projects", "Open a project row to edit its connections and environment fields."));
+  frame.appendChild(sectionTitle("Projects", "Select a project sub-page in the Settings sidebar to edit its connections and environment fields."));
   const chromeHeaderSlot = el("div", "projects-header-chrome-status", "Loading Chrome profile assignments...");
   frame.appendChild(chromeHeaderSlot);
   frame.appendChild(envScanTimeoutSettings(api));
@@ -2298,10 +2603,39 @@ async function renderProjectsPage(root, api) {
     chromeHealthSlot.replaceWith(chromeHealthDashboard(projects, api));
     list.innerHTML = "";
     for (const project of projects) {
-      list.appendChild(projectAccordionRow(project, { api, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles }));
+      list.appendChild(projectSummaryCard(project, { api, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles }));
     }
   } catch (error) {
     status.textContent = error?.message || "Projects failed to load.";
+    status.classList.add("is-error");
+  }
+}
+
+async function renderProjectSettingsPage(root, api, project) {
+  root.innerHTML = "";
+  root.className = "shadgpt-projects-settings";
+  const styles = document.createElement("style");
+  styles.textContent = projectsCss();
+  root.appendChild(styles);
+  const frame = el("div", "projects-frame");
+  const status = el("div", "projects-status", "Loading project fields...");
+  frame.appendChild(status);
+  root.appendChild(frame);
+  try {
+    let [overview, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles] = await Promise.all([
+      api.ipc.invoke("getProjectOverview", project),
+      api.ipc.invoke("listChromeProfiles"),
+      api.ipc.invoke("listGoogleWorkspaceAccounts"),
+      api.ipc.invoke("listModalWorkspaceAccounts"),
+      api.ipc.invoke("listDecodoAccounts"),
+      api.ipc.invoke("listSupabaseProfiles"),
+    ]);
+    const activeResult = await api.ipc.invoke("setActiveChromeProject", project).catch(() => null);
+    if (activeResult?.overview) overview = activeResult.overview;
+    status.remove();
+    frame.appendChild(projectPanel(project, overview, { api, chromeProfiles, googleWorkspaceAccounts, modalWorkspaceAccounts, decodoAccounts, supabaseProfiles }));
+  } catch (error) {
+    status.textContent = error?.message || "Project failed to load.";
     status.classList.add("is-error");
   }
 }
@@ -2439,9 +2773,62 @@ function compactVerifierAge(checkedAt) {
 
 function projectPanel(project, overview, context) {
   const wrap = el("div", "panel-stack");
+  wrap.appendChild(activeChromeProfileStatusTile(project, overview));
   wrap.appendChild(connectionRows(project, overview, context));
   wrap.appendChild(lazyEnvInventoryView(project, context.api));
   return wrap;
+}
+
+function activeChromeProfileTileState(project, overview) {
+  const routing = overview?.chromeRouting || {};
+  const active = overview?.activeChromeProfile || null;
+  const projectPath = String(project?.projectPath || overview?.projectPath || "");
+  const routeLabel = routing.profileName || routing.profileDirectory || "No Chrome profile";
+  const activeMatches = Boolean(active?.projectPath && projectPath && active.projectPath === projectPath && active.profileDirectory === routing.profileDirectory);
+  if (!routing.profileDirectory) {
+    return {
+      label: "Unset",
+      chipClass: "is-danger",
+      title: "Active Chrome Profile",
+      description: "No Chrome route is saved for this project.",
+      detail: "Choose a Chrome profile below to make @Chrome deterministic here.",
+      activeMatches: false,
+    };
+  }
+  if (routing.source === "default") {
+    return {
+      label: "Default",
+      chipClass: "is-muted",
+      title: "Active Chrome Profile",
+      description: `${routeLabel} is inherited from the default Chrome route.`,
+      detail: activeMatches
+        ? `Active signal is ${routing.profileDirectory}.`
+        : `Opening this project page will refresh the active signal to ${routing.profileDirectory}.`,
+      activeMatches,
+    };
+  }
+  return {
+    label: activeMatches ? "Active" : "Project",
+    chipClass: activeMatches ? "" : "is-warning",
+    title: "Active Chrome Profile",
+    description: `${routeLabel} is assigned to this project.`,
+    detail: activeMatches
+      ? `Active signal is ${routing.profileDirectory}.`
+      : `Opening this project page will refresh the active signal to ${routing.profileDirectory}.`,
+    activeMatches,
+  };
+}
+
+function activeChromeProfileStatusTile(project, overview) {
+  const state = activeChromeProfileTileState(project, overview);
+  const card = el("div", "settings-card compact-settings-card chrome-active-status-card");
+  const row = settingRow(state.title, state.description);
+  const chip = el("span", `status-chip ${state.chipClass || ""}`.trim(), state.label);
+  const detail = el("span", "inline-help", state.detail);
+  const control = row.querySelector(".row-control");
+  control.append(chip, chromeRoutingDetail(overview?.chromeRouting), detail);
+  card.appendChild(row);
+  return card;
 }
 
 function envScanTimeoutSettings(api) {
@@ -2768,7 +3155,7 @@ function projectColorRow(project, overview, context) {
 }
 
 function chromeConnectionRow(project, overview, context) {
-  const row = settingRow("Chrome Profile", "Project-local default for Chrome-backed browser tools.");
+  const row = settingRow("Chrome Profile", "Managed by Projects for this project.");
   const selected = new Set(overview.chromeAssignment?.preferencesPaths || []);
   const dropdown = el("details", "profile-dropdown");
   const summary = el("summary", "profile-dropdown-summary");
@@ -2826,19 +3213,8 @@ function chromeConnectionRow(project, overview, context) {
     const verifier = await runProjectChromeVerifier(project, context.api);
     instructionStatus.textContent = [agentsInstructionStatusText(result?.agentsInstruction), chromeVerifierStatusText(verifier)].filter(Boolean).join("; ");
   }, "secondary");
-  const create = actionButton("Create profile", async () => {
-    const result = await context.api.ipc.invoke("createChromeProfileForProject", {
-      projectPath: project.projectPath,
-      projectName: project.name,
-    });
-    instructionStatus.textContent = [
-      "Chrome profile creation opened",
-      agentsInstructionStatusText(result?.agentsInstruction),
-    ].filter(Boolean).join("; ");
-    refreshAgentsPreview(project, context.api);
-  }, "secondary");
   const instructionStatus = el("span", "inline-help", "");
-  row.querySelector(".row-control").append(dropdown, chromeRoutingDetail(overview.chromeRouting), save, clear, create, instructionStatus);
+  row.querySelector(".row-control").append(dropdown, chromeRoutingDetail(overview.chromeRouting), save, clear, instructionStatus);
   return row;
 }
 
@@ -2974,10 +3350,12 @@ function chromeVerifierDetailsText(result) {
 function chromeRoutingDetail(routing) {
   if (!routing?.profileDirectory) return el("div", "connection-detail-empty", "No active Chrome routing found.");
   const source = routing.source === "default" ? "Default Chrome route" : "Project Chrome route";
+  const aliases = normalizeProfileAliases(routing.profileAliases);
+  const aliasDetail = aliases.length ? ` - aliases: ${aliases.join(", ")}` : "";
   const item = el("div", "connection-detail-item");
   item.append(profileFavicon("chrome.google.com", "Chrome"), twoLineText(
     routing.profileName || routing.profileDirectory,
-    `${source}: ${routing.profileDirectory}`,
+    `${source}: ${routing.profileDirectory}${aliasDetail}`,
   ));
   return item;
 }
@@ -3172,9 +3550,9 @@ function modalWorkspaceInlineEditor(project, assignment, context, select, instru
   const details = el("details", "quick-add modal-workspace-editor");
   const selectedAccount = (context.modalWorkspaceAccounts || []).find((account) => account.id === assignment?.accountId) || assignment || {};
   const summary = el("summary", "", assignment ? "Edit Modal workspace" : "Create Modal workspace");
-  const name = input("Name", selectedAccount.accountName || selectedAccount.name || "TRR Modal");
-  const profile = input("Profile", selectedAccount.profile || "admin-56995");
-  const workspace = input("Workspace", selectedAccount.workspace || "admin-56995");
+  const name = input("Name", selectedAccount.accountName || selectedAccount.name || `${project.name || "Project"} Modal`);
+  const profile = input("Profile", selectedAccount.profile || "");
+  const workspace = input("Workspace", selectedAccount.workspace || "");
   const save = actionButton("Save workspace", async () => {
     const account = await context.api.ipc.invoke("saveModalWorkspaceAccount", {
       name: name.value,
@@ -3198,9 +3576,9 @@ function modalWorkspaceInlineEditor(project, assignment, context, select, instru
 function modalWorkspaceQuickAdd(api, select) {
   const details = el("details", "quick-add");
   const summary = el("summary", "", "Add Modal workspace");
-  const name = input("Name", "TRR Modal");
-  const profile = input("Profile", "admin-56995");
-  const workspace = input("Workspace", "admin-56995");
+  const name = input("Name", "Project Modal");
+  const profile = input("Profile");
+  const workspace = input("Workspace");
   const save = actionButton("Add", async () => {
     const account = await api.ipc.invoke("saveModalWorkspaceAccount", { name: name.value, profile: profile.value, workspace: workspace.value });
     const option = new Option(modalWorkspaceAccountLabel(account), account.id);
@@ -3578,11 +3956,11 @@ function envInventoryErrorState(project, api, error) {
 }
 
 function chromeProfileLabel(profile) {
+  const name = String(profile?.name || "").trim();
+  if (name && name !== profile?.directory && !/^Profile \d+$/i.test(name) && name !== "Default") return name;
   const email = String(profile?.email || "").trim();
   if (email) return email;
-  const name = String(profile?.name || "").trim();
-  if (!name || name === profile?.directory || /^Profile \d+$/i.test(name) || name === "Default") return "Chrome profile";
-  return name;
+  return "Chrome profile";
 }
 
 function profileAvatar(profile) {
@@ -3866,7 +4244,11 @@ function startSidebarProjectScanner(api) {
     const key = JSON.stringify(projects);
     if (!projects.length || key === lastKey) return;
     lastKey = key;
-    api.ipc.invoke("cacheSidebarProjects", projects).catch(() => {});
+    api.ipc.invoke("cacheSidebarProjects", projects)
+      .then(() => {
+        window.dispatchEvent(new CustomEvent(PROJECT_COLOR_EVENT, { detail: { source: "projects-sidebar-scan" } }));
+      })
+      .catch(() => {});
   };
   // Coalesce bursts of DOM mutations into one scan per animation frame, and
   // drop characterData entirely: sidebar project names only change via
@@ -4244,6 +4626,31 @@ function projectFromSidebarNode(node) {
   return {
     name,
     projectPath: projectId && !projectId.startsWith("cloud:") ? projectId : sidebarProjectKey(name),
+    ...sidebarProjectAccentFromNode(node),
+  };
+}
+
+function sidebarProjectAccentFromNode(node) {
+  if (!(node instanceof HTMLElement)) return {};
+  const readVar = (name) => {
+    const inline = typeof node.style?.getPropertyValue === "function"
+      ? node.style.getPropertyValue(name)
+      : "";
+    if (inline) return compactText(inline);
+    try {
+      return compactText(window.getComputedStyle(node).getPropertyValue(name));
+    } catch {
+      return "";
+    }
+  };
+  return {
+    projectAccentColor: readVar("--codexpp-project-tint"),
+    projectAccentTextColor: readVar("--codexpp-project-text-color"),
+    projectAccentBackgroundTint: readVar("--codexpp-project-background-tint"),
+    projectAccentChildLight: readVar("--codexpp-project-child-light"),
+    projectAccentChildDark: readVar("--codexpp-project-child-dark"),
+    projectAccentChildHoverLight: readVar("--codexpp-project-child-hover-light"),
+    projectAccentChildHoverDark: readVar("--codexpp-project-child-hover-dark"),
   };
 }
 

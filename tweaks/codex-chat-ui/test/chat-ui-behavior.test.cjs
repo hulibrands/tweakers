@@ -84,6 +84,12 @@ test("scanMessages renders chat UI, hides source, and action clicks insert safe 
 
 test("file previews render typed file and status icons with list semantics", () => {
   const restore = installFakeDom();
+  const previousFetch = global.fetch;
+  const fetchCalls = [];
+  global.fetch = (...args) => {
+    fetchCalls.push(args);
+    return Promise.resolve({ ok: true });
+  };
   try {
     const message = assistantMessage({
       codex_ui: true,
@@ -99,6 +105,7 @@ test("file previews render typed file and status icons with list semantics", () 
                 children: [
                   { path: "src/index.ts", status: "done" },
                   { path: "README.md", status: "warning" },
+                  { path: "/Users/thomashulihan/Projects/shadgpt/package.json", status: "ready" },
                 ],
               },
             ],
@@ -123,9 +130,138 @@ test("file previews render typed file and status icons with list semantics", () 
     assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-icon")[1].textContent, "TS");
     assert.match(message.querySelectorAll(".codexpp-chat-ui-file-icon")[1].className, /codexpp-chat-ui-file-ext-ts/);
     assert.match(message.querySelectorAll(".codexpp-chat-ui-file-icon")[2].className, /codexpp-chat-ui-file-ext-md/);
+    assert.match(message.querySelectorAll(".codexpp-chat-ui-file-icon")[3].className, /codexpp-chat-ui-file-ext-json/);
     assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-status-icon")[0].textContent, "OK");
     assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-status-icon")[1].textContent, "!");
+    assert.match(message.textContent, /Copy only/);
+    assert.match(message.textContent, /untrusted relative path/);
+
+    const rows = message.querySelectorAll(".codexpp-chat-ui-file-row-clickable");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].getAttribute("role"), "button");
+    assert.equal(rows[0].getAttribute("tabindex"), "0");
+    rows[0].click();
+    assert.equal(fetchCalls[0][0], "vscode://codex/open-file");
+    assert.deepEqual(JSON.parse(fetchCalls[0][1].body), {
+      path: "/Users/thomashulihan/Projects/shadgpt/package.json",
+      openMode: "workspace",
+    });
   } finally {
+    global.fetch = previousFetch;
+    restore();
+  }
+});
+
+test("file preview path validation rejects unsafe relative paths unless a trusted root resolves them", () => {
+  assert.deepEqual(tweak.validateLocalFilePath("src/index.ts").canOpen, false);
+  assert.equal(
+    tweak.validateLocalFilePath("src/index.ts", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).openPath,
+    "/Users/thomashulihan/Projects/shadgpt/src/index.ts",
+  );
+  assert.equal(
+    tweak.validateLocalFilePath("../outside.txt", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).canOpen,
+    false,
+  );
+  assert.equal(
+    tweak.validateLocalFilePath("file:///Users/thomashulihan/Projects/shadgpt/README.md").openPath,
+    "/Users/thomashulihan/Projects/shadgpt/README.md",
+  );
+  assert.equal(tweak.validateLocalFilePath("/Users/thomashulihan/../../etc/passwd").canOpen, false);
+  assert.equal(tweak.validateLocalFilePath("file://example.com/Users/thomashulihan/README.md").canOpen, false);
+});
+
+test("file preview rows show visible failed-open state when the bridge rejects", async () => {
+  const restore = installFakeDom();
+  const previousFetch = global.fetch;
+  global.fetch = () => Promise.reject(new Error("bridge unavailable"));
+  try {
+    const message = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [
+        {
+          kind: "file_preview",
+          props: {
+            files: [{ path: "/Users/thomashulihan/Projects/shadgpt/README.md" }],
+          },
+        },
+      ],
+    });
+    document.body.append(message);
+
+    tweak.scanMessages({
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: { file_preview: true },
+      api: { log: { warn: () => {} } },
+    });
+
+    const row = message.querySelector(".codexpp-chat-ui-file-row-clickable");
+    assert.ok(row);
+    row.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.match(row.textContent, /Open failed/);
+  } finally {
+    global.fetch = previousFetch;
+    restore();
+  }
+});
+
+test("scanMessages renders mentioned local file links as openable preview rows", () => {
+  const restore = installFakeDom();
+  const previousFetch = global.fetch;
+  const fetchCalls = [];
+  global.fetch = (...args) => {
+    fetchCalls.push(args);
+    return Promise.resolve({ ok: true });
+  };
+  try {
+    const message = document.createElement("div");
+    message.className = "group flex min-w-0 flex-col";
+    const markdown = document.createElement("div");
+    markdown.className = "_markdownContent_1rhk1_42";
+
+    const readme = document.createElement("a");
+    readme.setAttribute("href", "/Users/thomashulihan/Projects/shadgpt/README.md");
+    readme.textContent = "README.md";
+    const csv = document.createElement("a");
+    csv.setAttribute("href", "file:///Users/thomashulihan/Projects/shadgpt/schedule-input.csv");
+    csv.textContent = "schedule-input.csv";
+    markdown.append(readme, csv);
+    message.appendChild(markdown);
+    document.body.append(message);
+
+    tweak.scanMessages({
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: {},
+    });
+
+    const panel = message.querySelector("[data-codexpp-chat-ui-mentioned-files]");
+    assert.ok(panel);
+    assert.equal(message.children[0], panel);
+    assert.match(panel.textContent, /README\.md/);
+    assert.match(panel.textContent, /Document · MD/);
+    assert.match(panel.textContent, /schedule-input\.csv/);
+    assert.match(panel.textContent, /Spreadsheet · CSV/);
+
+    const rows = panel.querySelectorAll(".codexpp-chat-ui-mentioned-file-row");
+    assert.equal(rows.length, 2);
+    rows[0].click();
+    assert.equal(fetchCalls[0][0], "vscode://codex/open-file");
+    assert.deepEqual(JSON.parse(fetchCalls[0][1].body), {
+      path: "/Users/thomashulihan/Projects/shadgpt/README.md",
+      openMode: "workspace",
+    });
+  } finally {
+    global.fetch = previousFetch;
     restore();
   }
 });
@@ -259,6 +395,14 @@ class FakeElement {
     return node;
   }
 
+  insertBefore(node, referenceNode) {
+    const index = this.children.indexOf(referenceNode);
+    node.parentElement = this;
+    if (index < 0) this.children.push(node);
+    else this.children.splice(index, 0, node);
+    return node;
+  }
+
   replaceWith(node) {
     const siblings = this.parentElement?.children;
     if (!siblings) return;
@@ -337,7 +481,7 @@ class FakeElement {
 
   matches(selector) {
     return selector.split(",").map((part) => part.trim()).some((part) => {
-      if (part === "pre" || part === "code" || part === "button" || part === "textarea") return this.tagName.toLowerCase() === part;
+      if (part === "pre" || part === "code" || part === "button" || part === "textarea" || part === "a") return this.tagName.toLowerCase() === part;
       if (part === "div.group.flex.min-w-0.flex-col") return this.tagName === "DIV" && hasClasses(this, ["group", "flex", "min-w-0", "flex-col"]);
       if (part.startsWith("._markdownContent_")) return this.className.split(/\s+/).some((item) => item.startsWith("_markdownContent_"));
       if (part === "[class*='_markdownContent_']") return this.className.includes("_markdownContent_");

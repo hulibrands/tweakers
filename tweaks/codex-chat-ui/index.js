@@ -4,6 +4,7 @@
 const TWEAK_ID = "co.thomashulihan.codex-chat-ui";
 const STYLE_ID = "codexpp-chat-ui-style";
 const PANEL_ATTR = "data-codexpp-chat-ui-panel";
+const MENTIONED_FILES_ATTR = "data-codexpp-chat-ui-mentioned-files";
 const BLOCK_ATTR = "data-codexpp-chat-ui-block";
 const HIDDEN_ATTR = "data-codexpp-chat-ui-hidden";
 const IPC_RELOAD_TWEAKS = "codex-chat-ui:reload-tweaks";
@@ -66,6 +67,7 @@ module.exports = {
     normalizeRenderableBlocks,
     renderChatUiPanel,
     sanitizeDataObject,
+    validateLocalFilePath,
     cleanText,
     PANEL_ATTR,
     HIDDEN_ATTR,
@@ -110,6 +112,7 @@ function startRenderer(api) {
     pageHandle: null,
     statusEl: null,
     probeEl: null,
+    trustedWorkspaceRoots: trustedWorkspaceRootsFromApi(api),
   };
 
   if (typeof api.settings?.registerPage === "function") {
@@ -171,6 +174,7 @@ function scanMessages(state) {
       "._markdownContent_1rhk1_42, [class*='_markdownContent_']",
     );
     if (!(markdown instanceof HTMLElement)) continue;
+    syncMentionedFilesPanel(node, markdown, state);
 
     let record;
     if (node !== lastNode && chatUiPayloadCache.has(node)) {
@@ -212,6 +216,214 @@ function scanMessages(state) {
     else node.appendChild(panel);
     hideSourceBlocks(record.sourceBlocks);
   }
+}
+
+function syncMentionedFilesPanel(messageNode, markdown, state) {
+  const existing = messageNode.querySelector(`[${MENTIONED_FILES_ATTR}]`);
+  const files = collectMentionedLocalFiles(markdown, state);
+  if (files.length === 0 || !state.clickableActions) {
+    existing?.remove();
+    return;
+  }
+
+  const signature = JSON.stringify(files.map((file) => file.path));
+  if (existing?.dataset.signature === signature) return;
+
+  const panel = renderMentionedFilesPanel(files, state);
+  panel.dataset.signature = signature;
+  if (existing) existing.replaceWith(panel);
+  else messageNode.insertBefore(panel, markdown);
+}
+
+function collectMentionedLocalFiles(markdown, state) {
+  const files = [];
+  const seen = new Set();
+  for (const link of markdown.querySelectorAll("a")) {
+    if (!(link instanceof HTMLElement)) continue;
+    const pathInfo = localFilePathFromLink(link, state);
+    if (!pathInfo.canOpen || seen.has(pathInfo.openPath)) continue;
+    seen.add(pathInfo.openPath);
+    files.push({
+      name: basenameFromPath(pathInfo.openPath),
+      path: pathInfo.openPath,
+      kind: "file",
+      description: fileTypeDescription(pathInfo.openPath),
+      children: [],
+      depth: 0,
+    });
+    if (files.length >= MAX_ITEMS) break;
+  }
+  return files;
+}
+
+function localFilePathFromLink(link, state) {
+  const candidates = [
+    link.getAttribute("href") || "",
+    link.getAttribute("data-href") || "",
+    link.textContent || "",
+  ];
+  for (const candidate of candidates) {
+    const pathInfo = validateLocalFilePath(candidate, state);
+    if (pathInfo.canOpen) return pathInfo;
+  }
+  return copyOnlyPathInfo("");
+}
+
+function validateLocalFilePath(value, state = {}) {
+  const raw = cleanText(value, 360);
+  if (!raw) return copyOnlyPathInfo("");
+  if (raw.startsWith("file://")) {
+    const path = pathFromFileUrl(raw);
+    const normalized = normalizeAbsoluteLocalPath(path);
+    if (path && isSafeAbsoluteLocalPath(path) && isSafeAbsoluteLocalPath(normalized)) {
+      return openablePathInfo(normalized, "file-url", raw);
+    }
+    return copyOnlyPathInfo(raw, "Invalid file URL");
+  }
+  if (isSafeAbsoluteLocalPath(raw)) {
+    const normalized = normalizeAbsoluteLocalPath(raw);
+    if (isSafeAbsoluteLocalPath(normalized)) return openablePathInfo(normalized, "absolute", raw);
+    return copyOnlyPathInfo(raw, "Copy only - invalid local path");
+  }
+  const resolved = resolveTrustedRelativePath(raw, state);
+  if (resolved) return openablePathInfo(resolved, "trusted-relative", raw);
+  return copyOnlyPathInfo(raw, "Copy only - untrusted relative path");
+}
+
+function openablePathInfo(path, source, raw) {
+  return {
+    rawPath: raw || path,
+    displayPath: raw || path,
+    copyPath: raw || path,
+    openPath: path,
+    source,
+    reason: "",
+    canOpen: true,
+  };
+}
+
+function copyOnlyPathInfo(raw, reason = "Copy only") {
+  return {
+    rawPath: raw,
+    displayPath: raw,
+    copyPath: raw,
+    openPath: "",
+    source: "",
+    reason,
+    canOpen: false,
+  };
+}
+
+function pathFromFileUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "file:" || (url.hostname && url.hostname !== "localhost")) return "";
+    return decodeURIComponent(url.pathname || "");
+  } catch {
+    return "";
+  }
+}
+
+function isSafeAbsoluteLocalPath(value) {
+  return /^\/(?:Users|Volumes|private|tmp|var)\//.test(String(value || ""));
+}
+
+function normalizeAbsoluteLocalPath(value) {
+  const path = String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/");
+  const trailingSlash = path.endsWith("/");
+  const parts = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  const normalized = `/${parts.join("/")}`;
+  return trailingSlash && normalized !== "/" ? `${normalized}/` : normalized;
+}
+
+function resolveTrustedRelativePath(value, state) {
+  const relative = String(value || "").replace(/\\/g, "/").trim();
+  if (!relative || relative.startsWith("/") || relative.startsWith("~") || /^[a-z][a-z0-9+.-]*:/i.test(relative)) return "";
+  const roots = trustedWorkspaceRoots(state);
+  for (const root of roots) {
+    const resolved = normalizeAbsoluteLocalPath(`${root}/${relative}`);
+    const normalizedRoot = normalizeAbsoluteLocalPath(root).replace(/\/+$/, "");
+    if (resolved === normalizedRoot || resolved.startsWith(`${normalizedRoot}/`)) return resolved;
+  }
+  return "";
+}
+
+function trustedWorkspaceRoots(state = {}) {
+  const candidates = [];
+  for (const value of [
+    state.trustedWorkspaceRoot,
+    state.workspaceRoot,
+    state.projectRoot,
+    state.cwd,
+    state.api?.workspaceRoot,
+    state.api?.projectRoot,
+    state.api?.cwd,
+    state.api?.workspace?.root,
+    state.api?.workspace?.cwd,
+  ]) {
+    if (value) candidates.push(value);
+  }
+  for (const list of [state.trustedWorkspaceRoots, state.workspaceRoots, state.api?.workspaceRoots, state.api?.workspace?.roots]) {
+    if (Array.isArray(list)) candidates.push(...list);
+  }
+  return candidates
+    .map((value) => normalizeAbsoluteLocalPath(String(value || "").trim()))
+    .filter(isSafeAbsoluteLocalPath);
+}
+
+function trustedWorkspaceRootsFromApi(api) {
+  return trustedWorkspaceRoots({ api });
+}
+
+function renderMentionedFilesPanel(files, state) {
+  const panel = document.createElement("section");
+  panel.setAttribute(MENTIONED_FILES_ATTR, "true");
+  panel.className = "codexpp-chat-ui-mentioned-files";
+  panel.setAttribute("aria-label", "Mentioned files");
+
+  const visibleFiles = files.slice(0, 3);
+  for (const file of visibleFiles) panel.appendChild(renderMentionedFileRow(file, state));
+  if (files.length > visibleFiles.length) {
+    const more = document.createElement("div");
+    more.className = "codexpp-chat-ui-mentioned-files-more";
+    more.textContent = `Show ${files.length - visibleFiles.length} more`;
+    panel.appendChild(more);
+  }
+  return panel;
+}
+
+function renderMentionedFileRow(file, state) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "codexpp-chat-ui-mentioned-file-row";
+  row.addEventListener("click", () => openFilePreviewPath(file.path, state));
+
+  const icon = document.createElement("span");
+  icon.className = `codexpp-chat-ui-mentioned-file-icon codexpp-chat-ui-mentioned-file-icon-${fileExtension(file.path) || "file"}`;
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = mentionedFileIconLabel(file.path);
+
+  const content = document.createElement("span");
+  content.className = "codexpp-chat-ui-mentioned-file-content";
+  const name = document.createElement("span");
+  name.className = "codexpp-chat-ui-mentioned-file-name";
+  name.textContent = file.name;
+  const meta = document.createElement("span");
+  meta.className = "codexpp-chat-ui-mentioned-file-meta";
+  meta.textContent = file.description || "Open file";
+  content.append(name, meta);
+
+  const action = document.createElement("span");
+  action.className = "codexpp-chat-ui-mentioned-file-action";
+  action.textContent = "Open in";
+
+  row.append(icon, content, action);
+  return row;
 }
 
 function findChatUiPayload(markdown) {
@@ -737,6 +949,7 @@ function renderFileTreeRow(file, state) {
   const wrap = document.createElement("div");
   wrap.className = "codexpp-chat-ui-file-row-wrap";
   wrap.setAttribute("role", "listitem");
+  const pathInfo = validateLocalFilePath(file.path, state);
 
   const row = document.createElement("div");
   row.className = "codexpp-chat-ui-file-row";
@@ -760,7 +973,8 @@ function renderFileTreeRow(file, state) {
   name.textContent = file.name || file.path;
   content.appendChild(name);
 
-  const metaText = [file.path && file.path !== file.name ? file.path : "", file.description].filter(Boolean).join(" - ");
+  const safetyText = file.path && !pathInfo.canOpen ? pathInfo.reason : "";
+  const metaText = [file.path && file.path !== file.name ? file.path : "", file.description, safetyText].filter(Boolean).join(" - ");
   if (metaText) {
     const meta = document.createElement("span");
     meta.className = "codexpp-chat-ui-file-meta";
@@ -770,13 +984,26 @@ function renderFileTreeRow(file, state) {
 
   row.append(icon, content);
   if (file.status) row.append(fileStatusIcon(file.status), statusBadge(file.status));
-  if (file.path && state.clickableActions) {
-    const copy = document.createElement("button");
-    copy.type = "button";
-    copy.className = "codexpp-chat-ui-file-copy";
-    copy.textContent = "Copy path";
-    copy.addEventListener("click", () => navigator.clipboard?.writeText(file.path).catch(() => {}));
-    row.appendChild(copy);
+  if (file.path && state.clickableActions && pathInfo.canOpen) {
+    row.className = `${row.className} codexpp-chat-ui-file-row-clickable`;
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "0");
+    row.setAttribute("title", `Open ${pathInfo.openPath}`);
+    row.addEventListener("click", () => openFilePreviewPath(pathInfo.openPath, state, row));
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault?.();
+      openFilePreviewPath(pathInfo.openPath, state, row);
+    });
+
+    row.appendChild(renderCopyPathButton(pathInfo.copyPath));
+  } else if (file.path && state.clickableActions) {
+    row.className = `${row.className} codexpp-chat-ui-file-row-copy-only`;
+    row.setAttribute("title", pathInfo.reason || "Copy path");
+    const stateLabel = document.createElement("span");
+    stateLabel.className = "codexpp-chat-ui-file-open-state codexpp-chat-ui-file-open-state-copy";
+    stateLabel.textContent = "Copy only";
+    row.append(stateLabel, renderCopyPathButton(pathInfo.copyPath));
   }
   wrap.appendChild(row);
 
@@ -788,6 +1015,51 @@ function renderFileTreeRow(file, state) {
     wrap.appendChild(children);
   }
   return wrap;
+}
+
+function renderCopyPathButton(path) {
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "codexpp-chat-ui-file-copy";
+  copy.textContent = "Copy path";
+  copy.addEventListener("click", (event) => {
+    event.stopPropagation?.();
+    navigator.clipboard?.writeText(path).catch(() => {});
+  });
+  return copy;
+}
+
+function openFilePreviewPath(filePath, state, row) {
+  const path = cleanText(filePath, 360);
+  if (!path) return;
+  const request = {
+    path,
+    openMode: "workspace",
+  };
+  fetch("vscode://codex/open-file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  }).then((response) => {
+    if (response && response.ok === false) {
+      throw new Error(`Open bridge returned ${response.status || "not ok"}`);
+    }
+  }).catch((error) => {
+    showFileOpenState(row, "Open failed", "failed");
+    state.api?.log?.warn?.("[codex-chat-ui] failed to open file preview row", error?.message || String(error));
+  });
+}
+
+function showFileOpenState(row, text, tone) {
+  if (!(row instanceof HTMLElement)) return;
+  let status = row.querySelector("[data-codexpp-chat-ui-file-open-state]");
+  if (!(status instanceof HTMLElement)) {
+    status = document.createElement("span");
+    status.setAttribute("data-codexpp-chat-ui-file-open-state", "true");
+    row.appendChild(status);
+  }
+  status.className = `codexpp-chat-ui-file-open-state codexpp-chat-ui-file-open-state-${tone}`;
+  status.textContent = text;
 }
 
 function normalizeFileKind(kind) {
@@ -821,6 +1093,24 @@ function fileExtension(value) {
   const index = name.lastIndexOf(".");
   if (index <= 0 || index === name.length - 1) return "";
   return cleanToken(name.slice(index + 1)).slice(0, 8);
+}
+
+function fileTypeDescription(value) {
+  const extension = fileExtension(value);
+  if (!extension) return "Open file";
+  if (["csv", "tsv", "xlsx", "xls"].includes(extension)) return `Spreadsheet · ${extension.toUpperCase()}`;
+  if (["md", "markdown", "txt", "pdf", "doc", "docx"].includes(extension)) return `Document · ${extension.toUpperCase()}`;
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extension)) return `Image · ${extension.toUpperCase()}`;
+  if (["js", "jsx", "ts", "tsx", "css", "html", "json", "yml", "yaml", "toml"].includes(extension)) return `Code · ${extension.toUpperCase()}`;
+  return `File · ${extension.toUpperCase()}`;
+}
+
+function mentionedFileIconLabel(value) {
+  const extension = fileExtension(value);
+  if (["csv", "tsv", "xlsx", "xls"].includes(extension)) return "X";
+  if (["md", "markdown", "txt", "pdf", "doc", "docx"].includes(extension)) return "DOC";
+  if (extension) return extension.slice(0, 3).toUpperCase();
+  return "FILE";
 }
 
 function fileStatusIcon(status) {
@@ -1132,6 +1422,102 @@ function injectStyles() {
       color: var(--card-foreground, #09090b);
       box-shadow: var(--codexpp-shadcn-shadow, 0 1px 2px rgb(9 9 11 / 0.06));
       padding: 12px;
+    }
+
+    .codexpp-chat-ui-mentioned-files {
+      display: flex;
+      flex-direction: column;
+      margin: 14px 0 16px;
+      border: 1px solid var(--border, #d4d4d8);
+      border-radius: min(var(--radius, 0.5rem), 8px);
+      background: var(--card, #ffffff);
+      box-shadow: var(--codexpp-shadcn-shadow, 0 1px 2px rgb(9 9 11 / 0.06));
+      overflow: hidden;
+    }
+
+    .codexpp-chat-ui-mentioned-file-row {
+      display: grid;
+      grid-template-columns: 52px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      min-height: 74px;
+      border: 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--border, #d4d4d8) 80%, transparent);
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font: inherit;
+      padding: 12px 18px;
+      text-align: left;
+    }
+
+    .codexpp-chat-ui-mentioned-file-row:hover {
+      background: var(--accent, #f4f4f5);
+    }
+
+    .codexpp-chat-ui-mentioned-file-row:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--ring, #18181b) 70%, transparent);
+      outline-offset: -2px;
+    }
+
+    .codexpp-chat-ui-mentioned-file-icon {
+      display: inline-flex;
+      width: 36px;
+      height: 36px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border, #d4d4d8);
+      border-radius: 8px;
+      background: var(--muted, #f4f4f5);
+      color: var(--muted-foreground, #52525b);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .codexpp-chat-ui-mentioned-file-icon-csv,
+    .codexpp-chat-ui-mentioned-file-icon-xlsx,
+    .codexpp-chat-ui-mentioned-file-icon-xls {
+      border-color: color-mix(in srgb, #15803d 30%, var(--border, #d4d4d8));
+      background: #15803d;
+      color: #ffffff;
+    }
+
+    .codexpp-chat-ui-mentioned-file-content {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .codexpp-chat-ui-mentioned-file-name {
+      color: var(--foreground, #09090b);
+      font-size: 15px;
+      font-weight: 650;
+      overflow-wrap: anywhere;
+    }
+
+    .codexpp-chat-ui-mentioned-file-meta {
+      color: var(--muted-foreground, #52525b);
+      font-size: 13px;
+    }
+
+    .codexpp-chat-ui-mentioned-file-action {
+      border: 1px solid var(--border, #d4d4d8);
+      border-radius: 8px;
+      background: var(--background, #ffffff);
+      color: var(--foreground, #09090b);
+      font-size: 14px;
+      padding: 7px 13px;
+      white-space: nowrap;
+    }
+
+    .codexpp-chat-ui-mentioned-files-more {
+      padding: 12px 18px;
+      color: var(--muted-foreground, #52525b);
+      font-size: 14px;
+      text-align: center;
     }
 
     .codexpp-chat-ui-card-header {
@@ -1457,6 +1843,19 @@ function injectStyles() {
       background: var(--accent, #f4f4f5);
     }
 
+    .codexpp-chat-ui-file-row-clickable {
+      cursor: pointer;
+    }
+
+    .codexpp-chat-ui-file-row-copy-only {
+      background: color-mix(in srgb, var(--muted, #f4f4f5) 42%, transparent);
+    }
+
+    .codexpp-chat-ui-file-row-clickable:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--ring, #18181b) 70%, transparent);
+      outline-offset: 2px;
+    }
+
     .codexpp-chat-ui-file-icon {
       display: inline-flex;
       min-width: 34px;
@@ -1565,6 +1964,23 @@ function injectStyles() {
       color: var(--muted-foreground, #52525b);
       font-size: 11px;
       overflow-wrap: anywhere;
+    }
+
+    .codexpp-chat-ui-file-open-state {
+      border: 1px solid var(--border, #d4d4d8);
+      border-radius: 999px;
+      background: var(--muted, #f4f4f5);
+      color: var(--muted-foreground, #52525b);
+      font-size: 11px;
+      font-weight: 650;
+      line-height: 1.2;
+      padding: 3px 7px;
+      white-space: nowrap;
+    }
+
+    .codexpp-chat-ui-file-open-state-failed {
+      background: color-mix(in srgb, var(--destructive, #dc2626) 10%, var(--card, #ffffff));
+      color: var(--destructive, #b91c1c);
     }
 
     .codexpp-chat-ui-file-copy {

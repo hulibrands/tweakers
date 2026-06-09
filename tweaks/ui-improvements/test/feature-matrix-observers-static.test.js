@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, "..", "index.js"), "utf8");
 
+// Active features: present in FEATURE_DEFS (Settings UI), DEFAULT_FEATURE_FLAGS
+// (startup activation), and FEATURES (handler).
 const CANONICAL_FEATURE_IDS = [
   "hide-upgrade-prompts",
   "show-usage-in-sidebar",
@@ -21,10 +23,15 @@ const CANONICAL_FEATURE_IDS = [
   "sidebar-chat-multi-select",
   "show-pinned-chat-project-names",
   "clarify-stale-chat-branch-label",
-  "settings-search",
   "slash-menu-polish",
   "tweak-mention-menu",
 ];
+
+// Delisted features whose handler is intentionally retained (dormant) in
+// FEATURES but removed from FEATURE_DEFS + DEFAULT_FEATURE_FLAGS, so they are
+// never offered or activated. settings-search was delisted because the native
+// Codex app now provides its own settings search.
+const RETIRED_HANDLER_IDS = ["settings-search"];
 
 test("canonical feature ids are consistent across tweak registries", () => {
   const registries = {
@@ -33,19 +40,32 @@ test("canonical feature ids are consistent across tweak registries", () => {
     FEATURES: extractFeatureHandlerIds(source),
   };
 
-  for (const [name, ids] of Object.entries(registries)) {
-    assertCanonicalRegistry(name, ids);
-  }
+  assertCanonicalRegistry("FEATURE_DEFS", registries.FEATURE_DEFS, CANONICAL_FEATURE_IDS);
+  assertCanonicalRegistry("DEFAULT_FEATURE_FLAGS", registries.DEFAULT_FEATURE_FLAGS, CANONICAL_FEATURE_IDS);
+  assertCanonicalRegistry("FEATURES", registries.FEATURES, [
+    ...CANONICAL_FEATURE_IDS,
+    ...RETIRED_HANDLER_IDS,
+  ]);
 
   assert.deepEqual(
     new Set(registries.FEATURE_DEFS),
     new Set(registries.DEFAULT_FEATURE_FLAGS),
     "FEATURE_DEFS and DEFAULT_FEATURE_FLAGS should describe the same feature ids",
   );
+
+  // Every listed feature must have a handler. FEATURES may additionally retain
+  // dormant handlers for delisted features (see RETIRED_HANDLER_IDS).
+  const handlerIds = new Set(registries.FEATURES);
+  for (const id of registries.FEATURE_DEFS) {
+    assert.ok(handlerIds.has(id), `FEATURES is missing a handler for listed feature "${id}"`);
+  }
+  const retainedHandlers = registries.FEATURES.filter(
+    (id) => !registries.FEATURE_DEFS.includes(id),
+  );
   assert.deepEqual(
-    new Set(registries.FEATURE_DEFS),
-    new Set(registries.FEATURES),
-    "FEATURE_DEFS and FEATURES should describe the same feature ids",
+    new Set(retainedHandlers),
+    new Set(RETIRED_HANDLER_IDS),
+    "FEATURES may only retain handlers for delisted features named in RETIRED_HANDLER_IDS",
   );
 });
 
@@ -76,19 +96,36 @@ test("broad mutation observers use a scheduler or documented cheap callback", ()
   );
 });
 
-function assertCanonicalRegistry(name, ids) {
+test("message metrics only invokes session scanning after message DOM is visible", () => {
+  const metricsFeature = extractFeatureSource("show-message-metrics-on-hover");
+  assert.match(metricsFeature, /const hasMetricMessageSurface = \(\) =>/);
+  assert.match(metricsFeature, /if \(disposed \|\| !hasMetricMessageSurface\(\)\) return false;/);
+  assert.match(metricsFeature, /const timer = window\.setInterval\(scheduleRefresh, 15_000\);/);
+  assert.doesNotMatch(metricsFeature, /window\.setInterval\(refreshMetrics, 5_000\)/);
+});
+
+function assertCanonicalRegistry(name, ids, expectedIds) {
   assert.equal(ids.length, new Set(ids).size, `${name} should not contain duplicate feature ids`);
 
   const actual = new Set(ids);
-  const expected = new Set(CANONICAL_FEATURE_IDS);
-  const missing = CANONICAL_FEATURE_IDS.filter((id) => !actual.has(id));
+  const expected = new Set(expectedIds);
+  const missing = expectedIds.filter((id) => !actual.has(id));
   const extra = ids.filter((id) => !expected.has(id));
 
   assert.deepEqual(
     { missing, extra },
     { missing: [], extra: [] },
-    `${name} should contain exactly the canonical feature ids`,
+    `${name} should contain exactly its expected feature ids`,
   );
+}
+
+function extractFeatureSource(name) {
+  const marker = `"${name}"(api)`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `Could not find feature ${name}`);
+  const open = source.indexOf("{", start);
+  const close = findMatchingBrace(source, open);
+  return source.slice(start, close + 1);
 }
 
 function extractFeatureDefIds(text) {

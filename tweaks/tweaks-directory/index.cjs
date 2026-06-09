@@ -14,7 +14,7 @@ const CHANNELS = {
   getTweakFileTree: "get-tweak-file-tree",
   getPluginFileTree: "get-plugin-file-tree",
   getPluginStatuses: "get-plugin-statuses",
-  getForkLineageMetadata: "get-fork-lineage-metadata",
+  getDirectoryMeta: "get-directory-meta",
 };
 
 const STORE_FILTERS = [
@@ -23,20 +23,93 @@ const STORE_FILTERS = [
   { key: "store", label: "Store" },
   { key: "updates", label: "Updates" },
 ];
+// Master superset of every sort key, used for validation in normalizeDirectoryControls
+// and compareDirectoryRecords. The visible option list per surface is mode-specific
+// (see sortOptionsForMode). "default" preserves Codex's native order, which for the
+// Plugins/Skills directory is already its curated category grouping — so the native
+// surfaces label that key "Category" rather than inventing a category comparator
+// (no category metadata exists on directory records).
+const SORT_OPTIONS = [
+  { key: "default", label: "Default" },
+  { key: "created", label: "Date Created" },
+  { key: "updated", label: "Date Updated" },
+  { key: "used", label: "Date Used" },
+  { key: "az", label: "A–Z" },
+  { key: "plugin", label: "Plugin" },
+];
+const DEFAULT_SORT = "default";
+// Tweaks own-page sort list (unchanged behavior).
+const TWEAKS_SORT_OPTIONS = [
+  { key: "default", label: "Default" },
+  { key: "created", label: "Date Created" },
+  { key: "updated", label: "Date Updated" },
+  { key: "used", label: "Date Used" },
+];
+// Native Plugins directory sort list. "Category" === native order (the default).
+const PLUGINS_SORT_OPTIONS = [
+  { key: "updated", label: "Date Updated" },
+  { key: "created", label: "Date Created" },
+  { key: "az", label: "A–Z" },
+  { key: "default", label: "Category" },
+];
+// Native Skills directory sort list. Adds "Plugin" (groups skills under their parent plugin).
+const SKILLS_SORT_OPTIONS = [
+  { key: "updated", label: "Date Updated" },
+  { key: "created", label: "Date Created" },
+  { key: "az", label: "A–Z" },
+  { key: "default", label: "Category" },
+  { key: "plugin", label: "Plugin" },
+];
+function sortOptionsForMode(mode) {
+  if (mode === "skills") return SKILLS_SORT_OPTIONS;
+  if (mode === "plugins") return PLUGINS_SORT_OPTIONS;
+  return TWEAKS_SORT_OPTIONS;
+}
+const NATIVE_DIRECTORY_MODES = ["plugins", "skills"];
+const NATIVE_DIRECTORY_CONTROLS_ENABLED = false;
+const NATIVE_DIRECTORY_META_CACHE_TTL_MS = 2000;
 
 const DOM_SCAN_LIMIT = 650;
 const DEBUG_NODE_SAMPLE_LIMIT = 8;
 const DEBUG_NODE_TEXT_LIMIT = 160;
+
+/**
+ * Ordered fallback chain for anchoring onto Codex's plugin page.
+ * Source of truth: packages/sdk/src/health-contracts/plugin-page.contract.ts
+ * (AnchorSpec entries, same order; update this table when the contract changes).
+ *
+ * Each entry is tried in order; first match wins.  The chain tolerates
+ * Codex renaming its header text or its search placeholder across releases:
+ *  - "old" markup: header "Make Codex work your way", placeholder "Search plugins"
+ *  - "new" markup: e.g. header "Featured" only, placeholder "Search skills"
+ */
+const PLUGIN_PAGE_ANCHOR_CHAIN = [
+  // Primary: our own injected panel (already present ⟹ page is mounted)
+  { id: "directory-root-own", selectors: ["[data-codexpp-tweaks-directory-panel]"], textSignals: [], required: true },
+  // Secondary: header text signals (old markup first, then new-markup fallback)
+  { id: "directory-root-header-old", selectors: [], textSignals: ["Make Codex work your way"], required: true },
+  { id: "directory-root-header-new", selectors: [], textSignals: ["Featured"], required: true },
+  // Tertiary: native search input — try old placeholder, then new placeholder
+  { id: "search-field-old", selectors: ["input[placeholder='Search plugins']"], textSignals: [], required: false },
+  { id: "search-field-new", selectors: ["input[placeholder='Search skills']"], textSignals: [], required: false },
+  // Quaternary: native plugin status badge (proves we're on the right surface)
+  { id: "native-plugin-badge", selectors: ["[data-codexpp-native-plugin-status-badge]"], textSignals: [], required: false },
+];
 const PREF_KEYS = {
   nativePatchesSafeMode: "native-patches-safe-mode",
   nativePluginStatusBadges: "native-plugin-status-badges",
+  directoryState: "directory-state",
+  pluginUsage: "plugin-usage",
 };
 const DEFAULT_PREFS = {
   nativePatchesSafeMode: false,
   nativePluginStatusBadges: true,
 };
-const FORK_LINEAGE_CACHE_TTL_MS = 30 * 60 * 1000;
-const forkLineageCache = new Map();
+const DEFAULT_DIRECTORY_STATE = {
+  tweaks: { filter: "installed", sort: DEFAULT_SORT, installedEnabledOnly: false },
+  plugins: { sort: DEFAULT_SORT, installedEnabledOnly: false },
+  skills: { sort: DEFAULT_SORT, installedEnabledOnly: false, groupBy: "category" }, // groupBy retained for persisted back-compat; grouping is now driven by sort === "plugin"
+};
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
@@ -44,6 +117,37 @@ module.exports = {
     if (api.process === "main") return startMain(api);
     return startRenderer(api);
   },
+};
+
+// Exported for unit tests only — not part of the public API.
+// See tweaks/base/tweaks-directory/test/ for the test harness.
+module.exports.__test = {
+  PLUGIN_PAGE_ANCHOR_CHAIN,
+  isPluginsDirectorySurface,
+  hasNativeDirectorySearch,
+  hasNativeDirectoryListingSignal,
+  ensurePanelForTest: ensurePanel,
+  getNativeDirectoryMeta,
+  getRuntimePluginStatuses,
+  normalizeNativeDirectoryMeta,
+  nativeDirectoryRecordVisible,
+  compareDirectoryRecords,
+  sortOptionsForMode,
+  rowDateMs,
+  groupedRows,
+  normalizeDirectoryState,
+  applyPluginUsageToNativeMeta,
+  nativeDirectoryToolbarAnchor,
+  nativeDirectorySearchFallbackAnchor,
+  nativeDirectoryRowMeta,
+  parseNativeDirectoryTitle,
+  slugKey,
+  bestSlugMatch,
+  isNativeDirectoryRowCandidate,
+  isInsideAppSidebar,
+  groupNativeSkillRowsByPlugin,
+  createNativeDirectoryMetaCache,
+  pluginStatusesSignature,
 };
 
 function startMain(api) {
@@ -59,12 +163,35 @@ function startMain(api) {
     api.log.warn("Tweaks Directory native plugin Files insertion is newer than the loaded ShadGPT runtime; restart Codex to enable plugin file trees.");
   }
 
+  const nativeMetaCache = createNativeDirectoryMetaCache();
+  let lastPluginStatusSignature = "";
+  const clearNativeMetaCache = () => nativeMetaCache.clear();
+  const pluginStatuses = () => {
+    const result = getRuntimePluginStatuses();
+    const signature = pluginStatusesSignature(result);
+    if (lastPluginStatusSignature && signature !== lastPluginStatusSignature) clearNativeMetaCache();
+    lastPluginStatusSignature = signature;
+    return result;
+  };
+
   const cleanups = [
-    api.ipc.handle(CHANNELS.listInstalled, () => manager.listInstalled()),
+    api.ipc.handle(CHANNELS.listInstalled, () => listInstalledWithStats(manager)),
     api.ipc.handle(CHANNELS.getStore, (force) => manager.getStore(Boolean(force))),
-    api.ipc.handle(CHANNELS.installStoreTweak, (id) => manager.installStoreTweak(String(id || ""))),
-    api.ipc.handle(CHANNELS.setEnabled, (id, enabled) => manager.setEnabled(String(id || ""), Boolean(enabled))),
-    api.ipc.handle(CHANNELS.reload, () => manager.reload()),
+    api.ipc.handle(CHANNELS.installStoreTweak, async (id) => {
+      const result = await manager.installStoreTweak(String(id || ""));
+      clearNativeMetaCache();
+      return result;
+    }),
+    api.ipc.handle(CHANNELS.setEnabled, async (id, enabled) => {
+      const result = await manager.setEnabled(String(id || ""), Boolean(enabled));
+      clearNativeMetaCache();
+      return result;
+    }),
+    api.ipc.handle(CHANNELS.reload, async () => {
+      const result = await manager.reload();
+      clearNativeMetaCache();
+      return result;
+    }),
     api.ipc.handle(CHANNELS.readIconAsset, (id, relPath) => readInstalledTweakIconAsset(manager, id, relPath)),
     api.ipc.handle(CHANNELS.revealTweaksFolder, () => manager.revealTweaksFolder()),
     api.ipc.handle(CHANNELS.openExternal, (url) => manager.openExternal(String(url || ""))),
@@ -92,8 +219,8 @@ function startMain(api) {
       }
       return manager.getPluginFileTree(String(id || ""), options && typeof options === "object" ? options : {});
     }),
-    api.ipc.handle(CHANNELS.getPluginStatuses, () => getRuntimePluginStatuses()),
-    api.ipc.handle(CHANNELS.getForkLineageMetadata, (payload) => getForkLineageMetadata(payload)),
+    api.ipc.handle(CHANNELS.getPluginStatuses, () => pluginStatuses()),
+    api.ipc.handle(CHANNELS.getDirectoryMeta, (options) => nativeMetaCache.get(options)),
   ];
 
   return () => cleanups.forEach((cleanup) => cleanup());
@@ -130,142 +257,354 @@ function readInstalledTweakIconAsset(manager, id, relPath) {
   }
 }
 
-async function getForkLineageMetadata(payload) {
-  const manifests = Array.isArray(payload && payload.manifests) ? payload.manifests : [];
-  const storeEntries = Array.isArray(payload && payload.storeEntries) ? payload.storeEntries : [];
-  const byId = Object.create(null);
-  await Promise.all(manifests.map(async (manifest) => {
-    const base = normalizeForkLineage(manifest, {
-      storeEntries,
-      remote: readCachedForkLineage(manifest),
-    });
-    if (!base.hasFork) return;
-    let remote = readCachedForkLineage(manifest);
-    if (!base.latestVersion && !base.sourceMissing && base.upstreamGithubRepo && !remote) {
-      remote = await fetchAndCacheForkLineage(manifest);
+function listInstalledWithStats(manager) {
+  const items = typeof manager.listInstalled === "function" ? manager.listInstalled() : [];
+  const fs = require("node:fs");
+  return (Array.isArray(items) ? items : []).map((item) => {
+    const dir = item && item.dir;
+    const stats = safeStatMs(fs, dir);
+    return {
+      ...item,
+      createdAtMs: stats.ctimeMs,
+      updatedAtMs: stats.mtimeMs,
+      lastUsedAtMs: stats.atimeMs,
+    };
+  });
+}
+
+function getNativeDirectoryMeta(options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  const os = options.os || require("node:os");
+  const home = options.home || os.homedir();
+  const statuses = getRuntimePluginStatuses({ fs, path, os, home });
+  const plugins = [];
+  const skills = [];
+  const seenPluginDirs = new Set();
+  for (const root of nativePluginRoots(path, home)) {
+    for (const dir of discoverNativePluginDirs(fs, path, root)) {
+      const sourceId = nativePluginSourceId(path, root, dir);
+      let real = dir;
+      try {
+        real = fs.realpathSync(dir);
+      } catch {}
+      if (seenPluginDirs.has(real)) continue;
+      seenPluginDirs.add(real);
+      const meta = readPluginMetadata(real, { fs, path });
+      const stats = safeStatMs(fs, real);
+      const id = cleanText(meta.id || meta.name || path.basename(real));
+      const displayName = cleanText(meta.displayName || meta.name || titleFromSlug(id || path.basename(real)));
+      const status = pluginStatusForMeta(statuses, id, displayName, sourceId);
+      const plugin = {
+        id,
+        name: cleanText(meta.name || id),
+        displayName,
+        label: displayName || id,
+        sourceId,
+        dir: real,
+        enabled: status ? status.enabled !== false : false,
+        installed: Boolean(status),
+        createdAtMs: stats.ctimeMs,
+        updatedAtMs: stats.mtimeMs,
+        lastUsedAtMs: 0,
+      };
+      plugins.push(plugin);
+      for (const skill of pluginSkillsForDir(fs, path, real, plugin, meta)) skills.push(skill);
     }
-    byId[base.tweakId] = normalizeForkLineage(manifest, { storeEntries, remote });
-  }));
+  }
+  const dedupedPlugins = dedupeNativeMetaItems(plugins, nativePluginDedupeKey);
+  const dedupedSkills = dedupeNativeMetaItems(skills, nativeSkillDedupeKey);
   return {
     status: "ok",
-    cachedAt: Date.now(),
-    byId,
+    plugins: dedupedPlugins,
+    skills: dedupedSkills,
+    byPlugin: indexDirectoryMeta(dedupedPlugins, ["id", "name", "displayName", "label"]),
+    bySkill: indexDirectoryMeta(dedupedSkills, ["name", "displayName", "slash"]),
+    byPluginSlug: indexDirectoryMetaSlug(dedupedPlugins, ["id", "name", "displayName", "label"]),
+    bySkillSlug: indexDirectoryMetaSlug(dedupedSkills, ["name", "displayName", "slash"]),
   };
 }
 
-function readCachedForkLineage(manifest) {
-  const key = forkLineageCacheKey(manifest);
-  if (!key) return null;
-  const entry = forkLineageCache.get(key);
-  if (!entry || Date.now() - entry.cachedAt > FORK_LINEAGE_CACHE_TTL_MS) {
-    if (entry) forkLineageCache.delete(key);
-    return null;
-  }
-  return entry.value;
-}
-
-async function fetchAndCacheForkLineage(manifest) {
-  const key = forkLineageCacheKey(manifest);
-  if (!key) return null;
-  const value = await fetchUpstreamForkLineage(manifest).catch((error) => ({
-    status: "unknown",
-    message: errorMessage(error),
-  }));
-  forkLineageCache.set(key, {
-    cachedAt: Date.now(),
-    value,
-  });
-  return value;
-}
-
-function forkLineageCacheKey(manifest) {
-  const fork = manifest && manifest.forkOf || {};
-  const repo = cleanRepoSlug(fork.upstreamGithubRepo);
-  const id = cleanText(fork.upstreamId);
-  if (!repo && !id) return "";
-  return `${id}|${repo}`;
-}
-
-async function fetchUpstreamForkLineage(manifest) {
-  const fork = manifest && manifest.forkOf || {};
-  const repo = cleanRepoSlug(fork.upstreamGithubRepo);
-  if (!repo) return { status: "source-missing", message: "No upstream GitHub repository is recorded." };
-  const candidates = upstreamManifestUrls(repo);
-  const errors = [];
-  for (const url of candidates) {
-    try {
-      const text = await fetchText(url, 7000);
-      const json = JSON.parse(text);
-      const upstreamManifest = json && json.manifest && typeof json.manifest === "object" ? json.manifest : json;
-      const version = cleanVersion(upstreamManifest && upstreamManifest.version);
-      if (version) {
-        return {
-          status: "ok",
-          latestVersion: version,
-          source: "github",
-          sourceUrl: url,
-        };
-      }
-      errors.push(`No version in ${url}`);
-    } catch (error) {
-      errors.push(errorMessage(error));
-    }
-  }
+function createNativeDirectoryMetaCache(options = {}) {
+  const ttlMs = Number.isFinite(Number(options.ttlMs)) ? Math.max(0, Number(options.ttlMs)) : NATIVE_DIRECTORY_META_CACHE_TTL_MS;
+  const now = typeof options.now === "function" ? options.now : () => Date.now();
+  const scan = typeof options.scan === "function" ? options.scan : getNativeDirectoryMeta;
+  let entry = null;
   return {
-    status: "unknown",
-    message: errors[0] || "Could not read upstream manifest.",
+    get(request = {}) {
+      const force = Boolean(
+        request === true ||
+        request && typeof request === "object" && (request.force || request.refresh || request.reload)
+      );
+      const currentTime = Number(now());
+      if (!force && entry && Number.isFinite(currentTime) && currentTime - entry.createdAtMs < ttlMs) {
+        return entry.value;
+      }
+      const scanOptions = request && typeof request === "object" ? request : {};
+      const value = scan(scanOptions);
+      entry = {
+        createdAtMs: Number.isFinite(currentTime) ? currentTime : Date.now(),
+        value,
+      };
+      return value;
+    },
+    clear() {
+      entry = null;
+    },
   };
 }
 
-function upstreamManifestUrls(repo) {
-  const safeRepo = cleanRepoSlug(repo);
-  if (!safeRepo) return [];
+function dedupeNativeMetaItems(items, keyForItem) {
+  const byKey = new Map();
+  for (const item of items || []) {
+    const key = keyForItem(item);
+    if (!key) continue;
+    const existing = byKey.get(key);
+    if (!existing || nativeMetaItemRank(item) > nativeMetaItemRank(existing)) byKey.set(key, item);
+  }
+  return Array.from(byKey.values());
+}
+
+function nativeMetaItemRank(item) {
+  let rank = 0;
+  if (item && item.installed) rank += 1000000000000;
+  if (item && item.enabled) rank += 1000000000;
+  rank += Math.max(Number(item && item.updatedAtMs || 0), Number(item && item.createdAtMs || 0));
+  return rank;
+}
+
+function nativePluginDedupeKey(plugin) {
+  return slugKey(plugin && (plugin.displayName || plugin.label || plugin.name || plugin.id));
+}
+
+function nativeSkillDedupeKey(skill) {
+  const plugin = slugKey(skill && (skill.pluginLabel || skill.pluginName || skill.pluginId));
+  const name = slugKey(skill && (skill.displayName || skill.name || skill.slash));
+  return plugin && name ? `${plugin}:${name}` : name;
+}
+
+function safeStatMs(fs, target) {
+  try {
+    if (!target) return {};
+    const stat = fs.statSync(target);
+    return {
+      ctimeMs: Number.isFinite(stat.ctimeMs) ? stat.ctimeMs : 0,
+      mtimeMs: Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0,
+      atimeMs: Number.isFinite(stat.atimeMs) ? stat.atimeMs : 0,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function nativePluginSourceId(path, root, dir) {
+  const rel = String(path.relative(root, dir) || "");
+  const first = rel.split(/[\\/]/).filter(Boolean)[0];
+  return cleanText(first || path.basename(dir));
+}
+
+function nativePluginRoots(path, home) {
   return [
-    `https://raw.githubusercontent.com/${safeRepo}/HEAD/manifest.json`,
-    `https://raw.githubusercontent.com/${safeRepo}/main/manifest.json`,
-    `https://raw.githubusercontent.com/${safeRepo}/master/manifest.json`,
+    path.join(home, ".codex", "plugins"),
+    path.join(home, ".codex", "plugins", "cache", "local-plugins"),
+    path.join(home, ".codex", "plugins", "cache", "openai-curated"),
+    path.join(home, ".codex", "plugins", "cache", "openai-bundled"),
+    path.join(home, ".codex", "plugins", "cache", "openai-primary-runtime"),
+    path.join(home, ".codex", "plugins", "cache", "openai-curated-remote"),
   ];
 }
 
-function fetchText(url, timeoutMs) {
-  if (typeof fetch === "function") {
-    const AbortControllerCtor = typeof AbortController === "function" ? AbortController : null;
-    const controller = AbortControllerCtor ? new AbortControllerCtor() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-    return fetch(url, { signal: controller && controller.signal }).then(async (response) => {
-      if (timer) clearTimeout(timer);
-      if (!response || !response.ok) throw new Error(`HTTP ${response && response.status || "error"} for ${url}`);
-      return response.text();
-    }).catch((error) => {
-      if (timer) clearTimeout(timer);
-      throw error;
-    });
+function discoverNativePluginDirs(fs, path, root) {
+  try {
+    if (!fs.statSync(root).isDirectory()) return [];
+  } catch {
+    return [];
   }
-  return fetchTextWithHttps(url, timeoutMs);
+  const out = [];
+  for (const entry of safeReadDirents(fs, root)) {
+    if (!entry.isDirectory() || entry.name === "cache") continue;
+    const first = path.join(root, entry.name);
+    if (looksLikeNativePluginDir(fs, path, first)) {
+      out.push(first);
+      continue;
+    }
+    for (const child of safeReadDirents(fs, first)) {
+      if (!child.isDirectory()) continue;
+      const second = path.join(first, child.name);
+      if (looksLikeNativePluginDir(fs, path, second)) out.push(second);
+    }
+  }
+  return out;
 }
 
-function fetchTextWithHttps(url, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const https = require("node:https");
-    const req = https.get(url, { headers: { "user-agent": "codex-plusplus-tweaks-directory" } }, (res) => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        res.resume();
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        return;
-      }
-      let body = "";
-      res.setEncoding("utf8");
-      res.on("data", (chunk) => {
-        body += chunk;
-        if (body.length > 1024 * 1024) {
-          req.destroy(new Error("Upstream manifest is too large."));
-        }
-      });
-      res.on("end", () => resolve(body));
-    });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error("Timed out reading upstream manifest.")));
-    req.on("error", reject);
+function safeReadDirents(fs, dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function looksLikeNativePluginDir(fs, path, dir) {
+  return [
+    path.join(dir, ".codex-plugin", "plugin.json"),
+    path.join(dir, "plugin.json"),
+    path.join(dir, ".app.json"),
+    path.join(dir, "package.json"),
+  ].some((file) => {
+    try {
+      return fs.statSync(file).isFile();
+    } catch {
+      return false;
+    }
   });
+}
+
+function pluginStatusForMeta(statuses, id, displayName, sourceId) {
+  const byKey = statuses && statuses.byKey || {};
+  const items = Array.isArray(statuses && statuses.items) ? statuses.items : [];
+  const sourceKey = directoryKey(sourceId);
+  if (sourceKey) {
+    const sourceMatch = items.find((item) => {
+      return [item.slug, item.key && String(item.key).split("@")[0]].some((value) => directoryKey(value) === sourceKey);
+    });
+    if (sourceMatch) return sourceMatch;
+    return null;
+  }
+  for (const value of [id, displayName]) {
+    const key = compactText(String(value || "")).toLowerCase();
+    if (key && byKey[key]) return byKey[key];
+  }
+  return null;
+}
+
+function pluginSkillsForDir(fs, path, dir, plugin, meta) {
+  const out = [];
+  const includes = meta && meta.interface && Array.isArray(meta.interface.includes) ? meta.interface.includes : [];
+  for (const include of includes) {
+    if (!include || include.kind !== "skill") continue;
+    const name = cleanText(include.name || include.slash || "");
+    if (!name) continue;
+    out.push(nativeSkillMeta(plugin, {
+      name,
+      displayName: cleanText(include.displayName || include.title || name),
+      description: cleanText(include.description || ""),
+      slash: cleanText(include.slash || `$${name}`),
+      sourcePath: dir,
+    }));
+  }
+  const skillRoots = [
+    path.join(dir, "skills"),
+    dir,
+  ];
+  const seen = new Set(out.map((skill) => directoryKey(skill.name)));
+  for (const root of skillRoots) {
+    for (const skillPath of discoverSkillMarkdown(fs, path, root)) {
+      const parsed = parseSkillMarkdown(fs, path, skillPath);
+      const name = parsed.name || path.basename(path.dirname(skillPath));
+      const key = directoryKey(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const stats = safeStatMs(fs, skillPath);
+      out.push(nativeSkillMeta(plugin, {
+        name,
+        displayName: parsed.displayName || name,
+        description: parsed.description,
+        slash: `$${name}`,
+        sourcePath: skillPath,
+        createdAtMs: stats.ctimeMs,
+        updatedAtMs: stats.mtimeMs,
+        lastUsedAtMs: 0,
+      }));
+    }
+  }
+  return out;
+}
+
+function discoverSkillMarkdown(fs, path, root) {
+  const out = [];
+  const rootFile = path.join(root, "SKILL.md");
+  try {
+    if (fs.statSync(rootFile).isFile()) out.push(rootFile);
+  } catch {}
+  for (const entry of safeReadDirents(fs, root)) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(root, entry.name, "SKILL.md");
+    try {
+      if (fs.statSync(file).isFile()) out.push(file);
+    } catch {}
+  }
+  return out;
+}
+
+function parseSkillMarkdown(fs, path, file) {
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    const frontmatter = /^---\s*([\s\S]*?)\s*---/.exec(text);
+    const yaml = frontmatter ? frontmatter[1] : "";
+    const name = (/^name:\s*(.+)$/m.exec(yaml) || [])[1];
+    const description = (/^description:\s*(.+)$/m.exec(yaml) || [])[1];
+    return {
+      name: cleanYamlScalar(name || path.basename(path.dirname(file))),
+      displayName: cleanYamlScalar(name || ""),
+      description: cleanYamlScalar(description || ""),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function cleanYamlScalar(value) {
+  return cleanText(String(value || "").replace(/^["']|["']$/g, ""));
+}
+
+function nativeSkillMeta(plugin, skill) {
+  return {
+    name: cleanText(skill.name),
+    displayName: cleanText(skill.displayName || skill.name),
+    description: cleanText(skill.description || ""),
+    slash: cleanText(skill.slash || ""),
+    pluginId: plugin.id,
+    pluginName: plugin.displayName || plugin.name || plugin.id,
+    pluginLabel: plugin.label || plugin.displayName || plugin.id,
+    installed: plugin.installed,
+    enabled: plugin.enabled,
+    sourcePath: skill.sourcePath || "",
+    createdAtMs: Number(skill.createdAtMs || plugin.createdAtMs || 0),
+    updatedAtMs: Number(skill.updatedAtMs || plugin.updatedAtMs || 0),
+    lastUsedAtMs: Number(skill.lastUsedAtMs || 0),
+  };
+}
+
+function indexDirectoryMeta(items, keys) {
+  const out = Object.create(null);
+  for (const item of items || []) {
+    for (const key of keys) {
+      const value = item && item[key];
+      const normalized = directoryKey(value);
+      if (normalized && !out[normalized]) out[normalized] = item;
+    }
+  }
+  return out;
+}
+
+function indexDirectoryMetaSlug(items, keys) {
+  const out = Object.create(null);
+  for (const item of items || []) {
+    for (const key of keys) {
+      const normalized = slugKey(item && item[key]);
+      if (normalized && !out[normalized]) out[normalized] = item;
+    }
+  }
+  return out;
+}
+
+function directoryKey(value) {
+  return compactText(String(value || "")).toLowerCase();
+}
+
+function slugKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function getRuntimePluginStatuses(options = {}) {
@@ -295,6 +634,14 @@ function getRuntimePluginStatuses(options = {}) {
     for (const key of pluginStatusKeys(item)) byKey[key] = item;
   }
   return { status: "ok", configPath, items, byKey };
+}
+
+function pluginStatusesSignature(result) {
+  const items = Array.isArray(result && result.items) ? result.items : [];
+  return JSON.stringify(items.map((item) => ({
+    key: String(item && item.key || ""),
+    enabled: item && item.enabled !== false,
+  })).sort((a, b) => a.key.localeCompare(b.key)));
 }
 
 function parseConfiguredPlugins(config) {
@@ -370,6 +717,7 @@ function readPluginMetadata(root, deps) {
           id: nested.id || nested.name,
           name: nested.title || nested.displayName || nested.name,
           displayName: nested.displayName || nested.title || nested.name,
+          interface: nested.interface && typeof nested.interface === "object" ? nested.interface : null,
         };
       }
     }
@@ -410,11 +758,15 @@ function pluginStatusKeys(item) {
 }
 
 function startRenderer(api) {
+  const directoryState = readDirectoryState(api);
+  const tweaksState = directoryState.tweaks || DEFAULT_DIRECTORY_STATE.tweaks;
   const state = {
     api,
     active: false,
     query: "",
-    filter: "installed",
+    filter: tweaksState.filter,
+    sort: tweaksState.sort,
+    installedEnabledOnly: tweaksState.installedEnabledOnly,
     installed: [],
     store: null,
     paths: null,
@@ -445,9 +797,17 @@ function startRenderer(api) {
       section: null,
     },
     preferences: readPreferences(api),
+    directoryState,
+    pluginUsage: readPluginUsage(api),
     pluginStatuses: { status: "idle", items: [], byKey: Object.create(null) },
     pluginStatusToken: 0,
-    forkLineage: { status: "idle", byId: Object.create(null), token: 0, message: "" },
+    nativeDirectoryMeta: { status: "idle", plugins: [], skills: [], byPlugin: Object.create(null), bySkill: Object.create(null) },
+    nativeDirectoryMetaToken: 0,
+    nativeDirectoryControls: {
+      plugins: { ...DEFAULT_DIRECTORY_STATE.plugins, ...(directoryState.plugins || {}) },
+      skills: { ...DEFAULT_DIRECTORY_STATE.skills, ...(directoryState.skills || {}) },
+    },
+    nativeDirectoryMarketplaceNormalized: Object.create(null),
     observerTimer: null,
     loadToken: 0,
     settingsPageHandle: null,
@@ -456,9 +816,11 @@ function startRenderer(api) {
   injectStyles();
   registerSettingsPage(state);
   installRescueButton(state);
+  installNativePluginUsageTracking(state);
   scanForMount(state);
   syncNativePluginIncludesIcons(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
+  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => syncNativeDirectoryControls(state));
   state.observer = new MutationObserver((mutations) => {
     if (mutations && mutations.length > 0 && mutations.every((mutation) => isOwnedPanelMutation(state, mutation))) return;
     scheduleObserverWork(state);
@@ -477,6 +839,7 @@ function startRenderer(api) {
     removeNativePluginFilesSection(state);
     removeNativePluginStatusBadges();
     removeNativePluginInheritedIcons();
+    removeNativeDirectoryControls();
     unregisterSettingsPage(state);
     removeNativeTabRestoreListeners(state);
     state.tab && state.tab.remove();
@@ -504,7 +867,7 @@ function installRouteChangeListeners(state) {
     }
     syncDetailFromLocation(state, true);
     render(state);
-    syncNativePluginFilesSection(state, false);
+  syncNativePluginFilesSection(state, false);
   };
   for (const eventName of ["popstate", "hashchange", "codexpp-pushState", "codexpp-replaceState"]) {
     win.addEventListener(eventName, onNav);
@@ -822,6 +1185,90 @@ function readStoredBoolean(api, key, fallback) {
   }
 }
 
+function readDirectoryState(api) {
+  const stored = readStoredObject(api, PREF_KEYS.directoryState, {});
+  return normalizeDirectoryState(stored);
+}
+
+function normalizeDirectoryState(value) {
+  const state = value && typeof value === "object" ? value : {};
+  const normalized = {
+    tweaks: normalizeDirectoryControls(state.tweaks, DEFAULT_DIRECTORY_STATE.tweaks),
+  };
+  if (NATIVE_DIRECTORY_CONTROLS_ENABLED) {
+    normalized.plugins = normalizeDirectoryControls(state.plugins, DEFAULT_DIRECTORY_STATE.plugins);
+    normalized.skills = normalizeDirectoryControls(state.skills, DEFAULT_DIRECTORY_STATE.skills);
+  }
+  return normalized;
+}
+
+function normalizeDirectoryControls(value, fallback) {
+  const controls = value && typeof value === "object" ? value : {};
+  const filter = STORE_FILTERS.some((option) => option.key === controls.filter) ? controls.filter : fallback.filter;
+  const sort = SORT_OPTIONS.some((option) => option.key === controls.sort) ? controls.sort : fallback.sort;
+  const groupBy = controls.groupBy === "plugin" ? "plugin" : fallback.groupBy;
+  const out = {
+    sort,
+    installedEnabledOnly: Boolean(controls.installedEnabledOnly),
+  };
+  if (filter) out.filter = filter;
+  if (groupBy) out.groupBy = groupBy;
+  return out;
+}
+
+function persistDirectoryState(state) {
+  const value = {
+    tweaks: {
+      filter: state.filter,
+      sort: state.sort,
+      installedEnabledOnly: state.installedEnabledOnly,
+    },
+  };
+  if (NATIVE_DIRECTORY_CONTROLS_ENABLED) {
+    value.plugins = state.nativeDirectoryControls && state.nativeDirectoryControls.plugins;
+    value.skills = state.nativeDirectoryControls && state.nativeDirectoryControls.skills;
+  }
+  const next = normalizeDirectoryState(value);
+  state.directoryState = next;
+  writeStoredObject(state.api, PREF_KEYS.directoryState, next, state, "directory filters");
+}
+
+function readPluginUsage(api) {
+  const stored = readStoredObject(api, PREF_KEYS.pluginUsage, {});
+  const usage = Object.create(null);
+  for (const [key, value] of Object.entries(stored || {})) {
+    const normalized = directoryKey(key);
+    const ms = Number(value || 0);
+    if (normalized && Number.isFinite(ms) && ms > 0) usage[normalized] = ms;
+  }
+  return usage;
+}
+
+function writePluginUsage(state) {
+  writeStoredObject(state.api, PREF_KEYS.pluginUsage, state.pluginUsage || {}, state, "plugin usage");
+}
+
+function readStoredObject(api, key, fallback) {
+  try {
+    if (!api.storage || typeof api.storage.get !== "function") return fallback;
+    const value = api.storage.get(key, fallback);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredObject(api, key, value, state, label) {
+  try {
+    if (key && api.storage && typeof api.storage.set === "function") {
+      api.storage.set(key, value);
+    }
+  } catch (error) {
+    const logger = state && state.api && state.api.log || api.log;
+    if (logger && typeof logger.warn === "function") logger.warn(`Tweaks Directory could not save ${label}: ${errorMessage(error)}`);
+  }
+}
+
 function readPreference(state, pref) {
   return Boolean((state.preferences || DEFAULT_PREFS)[pref]);
 }
@@ -847,12 +1294,14 @@ function applyNativePatchPreferences(state) {
     removeNativePluginFilesSection(state);
     removeNativePluginStatusBadges();
     removeNativePluginInheritedIcons();
+    removeNativeDirectoryControls();
     state.api.log.info("Tweaks Directory native page patches disabled by safe mode.");
     return;
   }
   syncNativePluginFilesSection(state, true);
   syncNativePluginIncludesIcons(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
+  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => syncNativeDirectoryControls(state));
 }
 
 function shouldAutoDeactivate(state) {
@@ -872,6 +1321,7 @@ function scheduleObserverWork(state) {
     syncNativePluginFilesSection(state, false);
     syncNativePluginIncludesIcons(state);
     void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
+    void loadNativeDirectoryMeta(state).then(() => syncNativeDirectoryControls(state));
     // If the directory subtree was torn down (user navigated away via
     // sidebar / hotkey / pushState), our captured `state.root` becomes
     // disconnected. Restore any nodes we hid before React recycles them
@@ -921,6 +1371,970 @@ async function loadPluginStatuses(state, attempt = 0) {
     state.pluginStatuses = { status: "error", items: [], byKey: Object.create(null), message: errorMessage(error) };
     state.api.log.warn(`Tweaks Directory plugin status load failed: ${errorMessage(error)}`);
     return state.pluginStatuses;
+  }
+}
+
+async function loadNativeDirectoryMeta(state, attempt = 0, request = {}) {
+  if (nativePatchesSafeMode(state)) return state.nativeDirectoryMeta;
+  const token = state.nativeDirectoryMetaToken + 1;
+  state.nativeDirectoryMetaToken = token;
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getDirectoryMeta, request);
+    if (state.nativeDirectoryMetaToken !== token) return state.nativeDirectoryMeta;
+    state.nativeDirectoryMeta = applyPluginUsageToNativeMeta(state, normalizeNativeDirectoryMeta(result));
+    return state.nativeDirectoryMeta;
+  } catch (error) {
+    if (state.nativeDirectoryMetaToken !== token) return state.nativeDirectoryMeta;
+    const transient = /no handler registered/i.test(errorMessage(error));
+    const timerHost = getTimerHost();
+    if (transient && attempt < 5 && timerHost) {
+      await new Promise((resolve) => timerHost.setTimeout(resolve, 200));
+      if (state.nativeDirectoryMetaToken !== token) return state.nativeDirectoryMeta;
+      return loadNativeDirectoryMeta(state, attempt + 1, request);
+    }
+    state.nativeDirectoryMeta = {
+      status: "error",
+      plugins: [],
+      skills: [],
+      byPlugin: Object.create(null),
+      bySkill: Object.create(null),
+      byPluginSlug: Object.create(null),
+      bySkillSlug: Object.create(null),
+      message: errorMessage(error),
+    };
+    state.api.log.warn(`Tweaks Directory native directory metadata load failed: ${errorMessage(error)}`);
+    return state.nativeDirectoryMeta;
+  }
+}
+
+function normalizeNativeDirectoryMeta(result) {
+  const plugins = Array.isArray(result && result.plugins) ? result.plugins.map(normalizeNativeMetaItem) : [];
+  const skills = Array.isArray(result && result.skills) ? result.skills.map(normalizeNativeMetaItem) : [];
+  return {
+    status: result && result.status || "ok",
+    plugins,
+    skills,
+    byPlugin: indexDirectoryMeta(plugins, ["id", "name", "displayName", "label"]),
+    bySkill: indexDirectoryMeta(skills, ["name", "displayName", "slash"]),
+    byPluginSlug: indexDirectoryMetaSlug(plugins, ["id", "name", "displayName", "label"]),
+    bySkillSlug: indexDirectoryMetaSlug(skills, ["name", "displayName", "slash"]),
+  };
+}
+
+function normalizeNativeMetaItem(item) {
+  const value = item && typeof item === "object" ? item : {};
+  return {
+    ...value,
+    id: cleanText(value.id || ""),
+    name: cleanText(value.name || value.displayName || value.label || ""),
+    displayName: cleanText(value.displayName || value.name || value.label || ""),
+    label: cleanText(value.label || value.displayName || value.name || ""),
+    pluginName: cleanText(value.pluginName || ""),
+    pluginLabel: cleanText(value.pluginLabel || value.pluginName || ""),
+    slash: cleanText(value.slash || ""),
+    installed: value.installed !== false,
+    enabled: value.enabled !== false,
+    createdAtMs: Number(value.createdAtMs || 0),
+    updatedAtMs: Number(value.updatedAtMs || 0),
+    lastUsedAtMs: Number(value.lastUsedAtMs || 0),
+  };
+}
+
+function installNativePluginUsageTracking(state) {
+  if (!document || typeof document.addEventListener !== "function") return;
+  const onClick = (event) => {
+    const target = event && event.target;
+    const button = closestNativeUsageButton(target);
+    if (!button) return;
+    const detail = findNativePluginDetailSurface();
+    if (!detail) return;
+    recordNativePluginUsage(state, detail, Date.now());
+  };
+  document.addEventListener("click", onClick, true);
+  state.mountListeners.push(() => {
+    if (document && typeof document.removeEventListener === "function") document.removeEventListener("click", onClick, true);
+  });
+}
+
+function closestNativeUsageButton(target) {
+  let node = target;
+  while (node && node !== document.body) {
+    const tag = String(node.tagName || "").toUpperCase();
+    const role = node.getAttribute && node.getAttribute("role");
+    if ((tag === "BUTTON" || role === "button") && compactText(node.textContent || "") === "Try in chat") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function recordNativePluginUsage(state, detail, usedAtMs) {
+  if (!state || !detail) return;
+  const ms = Number(usedAtMs || Date.now());
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  const usage = state.pluginUsage || Object.create(null);
+  const keys = nativePluginUsageKeys(state, detail);
+  for (const key of keys) usage[key] = ms;
+  state.pluginUsage = usage;
+  writePluginUsage(state);
+  state.nativeDirectoryMeta = applyPluginUsageToNativeMeta(state, state.nativeDirectoryMeta);
+  syncNativeDirectoryControls(state);
+}
+
+function nativePluginUsageKeys(state, detail) {
+  const keys = new Set();
+  for (const value of [detail.candidate, detail.title, detail.key && String(detail.key).replace(/^native-plugin:/, "")]) {
+    const key = directoryKey(value);
+    if (key) keys.add(key);
+  }
+  const meta = nativeDirectoryMetaForPluginUsage(state, detail);
+  for (const key of directoryUsageKeys(meta)) keys.add(key);
+  return Array.from(keys);
+}
+
+function nativeDirectoryMetaForPluginUsage(state, detail) {
+  const meta = state && state.nativeDirectoryMeta || {};
+  const candidates = [detail && detail.candidate, detail && detail.title].map(directoryKey).filter(Boolean);
+  for (const key of candidates) {
+    if (meta.byPlugin && meta.byPlugin[key]) return meta.byPlugin[key];
+  }
+  return (meta.plugins || []).find((plugin) => {
+    const labels = directoryUsageKeys(plugin);
+    return labels.some((label) => candidates.some((key) => key === label || key.includes(label) || label.includes(key)));
+  }) || null;
+}
+
+function applyPluginUsageToNativeMeta(state, meta) {
+  if (!meta || typeof meta !== "object") return meta;
+  const usage = state && state.pluginUsage || {};
+  const plugins = (meta.plugins || []).map((plugin) => withUsageTimestamp(plugin, usage));
+  const skills = (meta.skills || []).map((skill) => {
+    const usedSkill = withUsageTimestamp(skill, usage);
+    const pluginUsedAtMs = firstUsageMs(usage, [skill.pluginName, skill.pluginLabel]);
+    if (pluginUsedAtMs > usedSkill.lastUsedAtMs) return { ...usedSkill, lastUsedAtMs: pluginUsedAtMs };
+    return usedSkill;
+  });
+  return {
+    ...meta,
+    plugins,
+    skills,
+    byPlugin: indexDirectoryMeta(plugins, ["id", "name", "displayName", "label"]),
+    bySkill: indexDirectoryMeta(skills, ["name", "displayName", "slash"]),
+    byPluginSlug: indexDirectoryMetaSlug(plugins, ["id", "name", "displayName", "label"]),
+    bySkillSlug: indexDirectoryMetaSlug(skills, ["name", "displayName", "slash"]),
+  };
+}
+
+function withUsageTimestamp(item, usage) {
+  if (!item || typeof item !== "object") return item;
+  const usedAtMs = firstUsageMs(usage, directoryUsageKeys(item));
+  if (usedAtMs <= Number(item.lastUsedAtMs || 0)) return item;
+  return { ...item, lastUsedAtMs: usedAtMs };
+}
+
+function firstUsageMs(usage, values) {
+  let newest = 0;
+  for (const value of values || []) {
+    const key = directoryKey(value);
+    const ms = Number(key && usage && usage[key] || 0);
+    if (Number.isFinite(ms) && ms > newest) newest = ms;
+  }
+  return newest;
+}
+
+function directoryUsageKeys(item) {
+  if (!item || typeof item !== "object") return [];
+  return [
+    item.id,
+    item.name,
+    item.displayName,
+    item.label,
+    item.pluginName,
+    item.pluginLabel,
+    item.slash,
+  ].map(directoryKey).filter(Boolean);
+}
+
+function syncNativeDirectoryControls(state) {
+  if (!NATIVE_DIRECTORY_CONTROLS_ENABLED) {
+    removeNativeDirectoryControls();
+    if (state && state.nativeDirectoryMarketplaceNormalized) {
+      state.nativeDirectoryMarketplaceNormalized = Object.create(null);
+    }
+    return;
+  }
+  if (nativePatchesSafeMode(state) || state.active) {
+    removeNativeDirectoryControls();
+    return;
+  }
+  const pair = findPluginsSkillsTabPair();
+  if (!pair) {
+    removeNativeDirectoryControls();
+    return;
+  }
+  const mode = nativeDirectoryMode(pair);
+  if (!NATIVE_DIRECTORY_MODES.includes(mode)) {
+    removeNativeDirectoryControls();
+    return;
+  }
+  preferAllNativeMarketplaceFilter(state, pair, mode);
+  const strip = ensureNativeDirectoryControlStrip(state, pair, mode);
+  if (!strip) return;
+  wireNativeDirectorySearch(state, pair, mode);
+  try { applyNativeDirectorySearchRowLayout(state, pair, mode); } catch {}
+  try {
+    applyNativeDirectoryControls(state, pair, mode);
+  } catch (error) {
+    state.api.log.warn(`Tweaks Directory native directory controls skipped: ${errorMessage(error)}`);
+  }
+}
+
+function nativeDirectoryMode(pair) {
+  if (!pair) return "plugins";
+  const skillsActive = isNativeTabActive(pair.skills);
+  const pluginsActive = isNativeTabActive(pair.plugins);
+  if (skillsActive && !pluginsActive) return "skills";
+  const root = pair.root;
+  if (safeQuerySelector(root, "input[placeholder='Search skills']")) return "skills";
+  return "plugins";
+}
+
+function isNativeTabActive(tab) {
+  if (!tab) return false;
+  if (tab.dataset && tab.dataset.state === "active") return true;
+  if (tab.getAttribute && (tab.getAttribute("aria-selected") === "true" || tab.getAttribute("aria-pressed") === "true")) return true;
+  const cls = typeof tab.className === "string" ? tab.className : "";
+  return /\bactive\b/.test(cls);
+}
+
+function ensureNativeDirectoryControlStrip(state, pair, mode) {
+  const root = pair && pair.root;
+  if (!root) return null;
+  const search = nativeDirectorySearchInput(root, mode);
+  if (!search) return null; // not on a native directory page yet — nothing to augment
+  let strip = document.querySelector("[data-codexpp-native-directory-controls]");
+  if (strip && strip.dataset.codexppNativeDirectoryMode !== mode) {
+    strip.remove();
+    strip = null;
+  }
+  // Always create the strip once the native search exists, so it is never missing. Mount it
+  // INSIDE the resolved toolbar row (shares row 2 with the native filters). If that row isn't
+  // resolvable yet (filters still rendering), park it just after the search box so it stays
+  // visible — never at the app-shell root — and re-home it on the next observer cycle.
+  if (!strip) strip = renderNativeDirectoryControlStrip(state, mode);
+  const row = nativeDirectoryToolbarRow(root, mode);
+  if (row) {
+    if (strip.parentElement !== row) row.appendChild(strip);
+  } else if (!strip.isConnected) {
+    const wrap = search.parentElement;
+    if (wrap && typeof wrap.insertAdjacentElement === "function") wrap.insertAdjacentElement("afterend", strip);
+  }
+  strip.dataset.codexppNativeDirectoryMode = mode;
+  return strip;
+}
+
+function renderNativeDirectoryControlStrip(state, mode) {
+  const controls = nativeControlsForMode(state, mode);
+  const strip = document.createElement("div");
+  strip.className = "codexpp-native-directory-controls";
+  strip.dataset.codexppNativeDirectoryControls = "true";
+  strip.dataset.codexppNativeDirectoryMode = mode;
+  strip.dataset.slot = "toolbar";
+
+  const pills = document.createElement("div");
+  pills.className = "codexpp-td-pill-group";
+  pills.dataset.slot = "button-group";
+  pills.appendChild(filterPill("Enabled", controls.installedEnabledOnly, () => {
+    controls.installedEnabledOnly = !controls.installedEnabledOnly;
+    persistDirectoryState(state);
+    rerenderNativeDirectoryControls(state);
+  }));
+  strip.appendChild(pills);
+
+  strip.appendChild(sortSelect(controls, () => {
+    persistDirectoryState(state);
+    syncNativeDirectoryControls(state);
+  }, `${mode} sort`, mode));
+  strip.appendChild(resetFiltersButton(() => resetNativeDirectoryFilters(state, mode)));
+  return strip;
+}
+
+function nativeControlsForMode(state, mode) {
+  state.nativeDirectoryControls[mode] ||= { sort: DEFAULT_SORT, installedEnabledOnly: false };
+  if (state.nativeDirectoryControls[mode].installedEnabledOnly === undefined) {
+    state.nativeDirectoryControls[mode].installedEnabledOnly = Boolean(
+      state.nativeDirectoryControls[mode].installedOnly || state.nativeDirectoryControls[mode].enabledOnly
+    );
+  }
+  return state.nativeDirectoryControls[mode];
+}
+
+// Resolve Codex's native directory toolbar row: the lowest common ancestor of the native
+// search input and a native marketplace filter ("Built by OpenAI"/"All"/...). This is far more
+// reliable than walking ancestors with heuristic candidate checks — those failed when the
+// page-root boundary sat below the toolbar, which dropped the strip at the app-shell root.
+function nativeDirectoryToolbarRow(root, mode) {
+  const search = nativeDirectorySearchInput(root, mode);
+  if (!search) return null;
+  const filter = nativeDirectoryMarketplaceFilterNode(root, mode);
+  if (!filter) return null;
+  const filterAncestors = new Set();
+  for (let node = filter; node; node = node.parentElement) filterAncestors.add(node);
+  for (let node = search.parentElement; node && node !== document.body; node = node.parentElement) {
+    if (filterAncestors.has(node)) return node;
+  }
+  return null;
+}
+
+function nativeDirectoryMarketplaceFilterNode(root, mode) {
+  if (!root || typeof root.querySelectorAll !== "function") return null;
+  let nodes = [];
+  try {
+    nodes = Array.from(root.querySelectorAll("button,[role='button'],select,label"));
+  } catch {
+    return null;
+  }
+  for (const node of nodes) {
+    if (!node || (typeof node.closest === "function" && node.closest("[data-codexpp-native-directory-controls]"))) continue;
+    if (typeof node.querySelector === "function" && node.querySelector("input,textarea")) continue;
+    const aria = typeof node.getAttribute === "function" ? node.getAttribute("aria-label") || "" : "";
+    const text = compactText(node.textContent || aria || "");
+    if (/\bBuilt by OpenAI\b/i.test(text) || /^All\b/i.test(text) || (mode === "skills" && /^(Plugin|Category)\b/i.test(text))) {
+      return node;
+    }
+  }
+  return null;
+}
+
+// Lay out the native toolbar as two rows: force the search field onto its own full-width row
+// (row 1) so the native marketplace filters and the ShadGPT strip share row 2 beneath it.
+// Additive inline styles only, re-applied each cycle and restored on teardown.
+function applyNativeDirectorySearchRowLayout(state, pair, mode) {
+  const root = pair && pair.root;
+  if (!root) return;
+  const row = nativeDirectoryToolbarRow(root, mode);
+  if (!row) return;
+  if (row.style) {
+    row.style.flexWrap = "wrap";
+    row.style.alignItems = "center";
+    row.style.justifyContent = "flex-start";
+    if (!row.style.rowGap) row.style.rowGap = "8px";
+    if (row.dataset) row.dataset.codexppTdToolbarRow = "true";
+  }
+  const search = nativeDirectorySearchInput(root, mode);
+  let searchItem = null;
+  if (search) {
+    searchItem = search;
+    while (searchItem && searchItem.parentElement && searchItem.parentElement !== row) searchItem = searchItem.parentElement;
+    if (searchItem && searchItem.parentElement === row && searchItem.style) {
+      searchItem.style.flexBasis = "100%";
+      if (searchItem.dataset) searchItem.dataset.codexppTdSearchFull = "true";
+    }
+  }
+  // Some surfaces (Skills) right-align the native filter with margin-left:auto, leaving a gap
+  // before the ShadGPT controls. Pack every non-search, non-strip row child to the left so the
+  // native filters and the ShadGPT controls sit together on row 2.
+  for (const child of Array.from(row.children)) {
+    if (!child || !child.style || child === searchItem) continue;
+    if (child.dataset && child.dataset.codexppNativeDirectoryControls) continue;
+    if (child.style.marginLeft !== "0px") {
+      child.style.marginLeft = "0px";
+      if (child.dataset) child.dataset.codexppTdNoAutoMargin = "true";
+    }
+  }
+}
+
+function restoreNativeDirectorySearchRowLayout() {
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-td-toolbar-row]"))) {
+    if (node.style) { node.style.flexWrap = ""; node.style.alignItems = ""; node.style.justifyContent = ""; node.style.rowGap = ""; }
+    if (node.dataset) delete node.dataset.codexppTdToolbarRow;
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-td-search-full]"))) {
+    if (node.style) { node.style.flexBasis = ""; }
+    if (node.dataset) delete node.dataset.codexppTdSearchFull;
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-td-no-auto-margin]"))) {
+    if (node.style) { node.style.marginLeft = ""; }
+    if (node.dataset) delete node.dataset.codexppTdNoAutoMargin;
+  }
+}
+
+function rerenderNativeDirectoryControls(state) {
+  const strip = document.querySelector("[data-codexpp-native-directory-controls]");
+  if (strip) strip.remove();
+  syncNativeDirectoryControls(state);
+}
+
+function resetNativeDirectoryFilters(state, mode) {
+  const defaults = DEFAULT_DIRECTORY_STATE[mode] || DEFAULT_DIRECTORY_STATE.plugins;
+  state.nativeDirectoryControls[mode] = { ...defaults };
+  const pair = findPluginsSkillsTabPair();
+  const input = nativeDirectorySearchInput(pair && pair.root, mode);
+  if (input && "value" in input) {
+    input.value = "";
+    try {
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch {}
+  }
+  persistDirectoryState(state);
+  rerenderNativeDirectoryControls(state);
+}
+
+function nativeDirectoryToolbarAnchor(root, tabRow, mode) {
+  const placeholder = mode === "skills" ? "Search skills" : "Search plugins";
+  const input = safeQuerySelector(root, `input[placeholder='${placeholder}']`);
+  if (input) {
+    let node = input.parentElement;
+    while (node && node.parentElement && node !== root && node !== document.body) {
+      if (nativeDirectoryToolbarCandidate(node, input, tabRow, mode)) return node;
+      node = node.parentElement;
+    }
+  }
+  return null;
+}
+
+function nativeDirectorySearchFallbackAnchor(root, mode) {
+  const input = nativeDirectorySearchInput(root, mode);
+  if (!input) return null;
+  const parent = input.parentElement;
+  if (parent && parent !== root && parent !== document.body && typeof parent.insertAdjacentElement === "function") return parent;
+  return typeof input.insertAdjacentElement === "function" ? input : null;
+}
+
+function nativeDirectoryToolbarCandidate(node, input, tabRow, mode) {
+  if (!node || !input || !node.contains || !node.contains(input)) return false;
+  if (tabRow && node.contains(tabRow)) return false;
+  if (node.dataset && (node.dataset.codexppNativeDirectoryControls || node.dataset.codexppNativeDirectoryGroupHeading)) return false;
+  if (typeof node.querySelector === "function" && node.querySelector("[data-codexpp-native-directory-controls]")) return false;
+  if (looksLikeAppSidebar(node)) return false;
+  const text = compactText(node.textContent || "");
+  if (text.length > 260) return false;
+  if (text.includes("Try in chat") || text.includes("Featured") || text.includes("Computer Use")) return false;
+  if (text.includes("Plugins") && text.includes("Skills") && text.includes("Tweaks")) return false;
+  if (nativeDirectoryToolbarHasResultRows(node)) return false;
+  if (!nativeDirectoryToolbarHasNativeFilter(node, mode)) return false;
+  return nativeDirectoryToolbarGeometryLooksSafe(node, input);
+}
+
+function nativeDirectoryToolbarHasNativeFilter(node, mode) {
+  if (!node || typeof node.querySelectorAll !== "function") return false;
+  const controls = Array.from(node.querySelectorAll("button,[role='button'],select,label")).filter((control) => {
+    if (!control || control === node) return false;
+    if (typeof control.closest === "function" && control.closest("[data-codexpp-native-directory-controls]")) return false;
+    return true;
+  });
+  return controls.some((control) => {
+    const text = compactText(control.textContent || control.getAttribute && control.getAttribute("aria-label") || "");
+    if (/^All\b/i.test(text)) return true;
+    if (mode === "plugins" && /\bBuilt by OpenAI\b/i.test(text)) return true;
+    if (mode === "skills" && /\bBuilt by OpenAI\b|\bPlugin\b|\bCategory\b/i.test(text)) return true;
+    return false;
+  });
+}
+
+function nativeDirectoryToolbarHasResultRows(node) {
+  if (!node || typeof node.querySelectorAll !== "function") return false;
+  return Array.from(node.querySelectorAll("article,li,[role='listitem']")).some((row) => {
+    const text = compactText(row.textContent || "");
+    return text.length > 0 && !text.includes("Search plugins") && !text.includes("Search skills");
+  });
+}
+
+function nativeDirectoryToolbarGeometryLooksSafe(node, input) {
+  if (typeof node.getBoundingClientRect !== "function" || typeof input.getBoundingClientRect !== "function") return true;
+  try {
+    const rect = node.getBoundingClientRect();
+    const inputRect = input.getBoundingClientRect();
+    if (!rect || !inputRect || rect.width <= 0 || rect.height <= 0 || inputRect.height <= 0) return true;
+    if (rect.height > Math.max(120, inputRect.height * 4)) return false;
+    const inputMid = inputRect.top + inputRect.height / 2;
+    return inputMid >= rect.top - 16 && inputMid <= rect.bottom + 16;
+  } catch {
+    return true;
+  }
+}
+
+function nativeDirectorySearchInput(root, mode) {
+  const placeholder = mode === "skills" ? "Search skills" : "Search plugins";
+  return safeQuerySelector(root, `input[placeholder='${placeholder}']`);
+}
+
+function nativeDirectorySearchValue(pair, mode) {
+  const input = nativeDirectorySearchInput(pair && pair.root, mode);
+  return input && "value" in input ? String(input.value || "") : "";
+}
+
+function wireNativeDirectorySearch(state, pair, mode) {
+  const input = nativeDirectorySearchInput(pair && pair.root, mode);
+  if (!input || !input.dataset || input.dataset.codexppNativeDirectorySearchWired === "true") return;
+  input.dataset.codexppNativeDirectorySearchWired = "true";
+  input.addEventListener("input", () => {
+    const currentPair = findPluginsSkillsTabPair();
+    if (!currentPair) return;
+    try {
+      applyNativeDirectoryControls(state, currentPair, nativeDirectoryMode(currentPair));
+    } catch (error) {
+      state.api.log.warn(`Tweaks Directory native search sync skipped: ${errorMessage(error)}`);
+    }
+  });
+}
+
+function preferAllNativeMarketplaceFilter(state, pair, mode) {
+  if (mode !== "plugins" && mode !== "skills") return;
+  if (state.nativeDirectoryMarketplaceNormalized[mode]) return;
+  const trigger = nativeMarketplaceTrigger(pair);
+  if (!trigger) return;
+  if (trigger.tagName === "SELECT") {
+    if (selectNativeMarketplaceAllOption(trigger)) state.nativeDirectoryMarketplaceNormalized[mode] = true;
+    return;
+  }
+  const text = compactText(trigger.textContent || "");
+  if (/^All\b/i.test(text)) {
+    state.nativeDirectoryMarketplaceNormalized[mode] = true;
+    return;
+  }
+  if (!/\bBuilt by OpenAI\b/i.test(text)) return;
+  state.nativeDirectoryMarketplaceNormalized[mode] = true;
+  if (typeof trigger.click === "function") trigger.click();
+  const win = getWindow();
+  const settle = () => clickNativeMarketplaceAllOption();
+  if (win && typeof win.setTimeout === "function") win.setTimeout(settle, 60);
+  else settle();
+}
+
+function nativeMarketplaceTrigger(pair) {
+  const root = pair && pair.root;
+  if (!root || typeof root.querySelectorAll !== "function") return null;
+  let candidates = [];
+  try {
+    candidates = Array.from(root.querySelectorAll("button,[role='button'],select,label"));
+  } catch {
+    return null;
+  }
+  const nodes = candidates.filter((node) => {
+    if (!node || node.dataset && node.dataset.codexppNativeDirectoryControls) return false;
+    if (typeof node.closest === "function" && node.closest("[data-codexpp-native-directory-controls]")) return false;
+    return /\bBuilt by OpenAI\b/i.test(compactText(node.textContent || ""));
+  });
+  return nodes[0] || null;
+}
+
+function selectNativeMarketplaceAllOption(select) {
+  if (!select || !select.options) return false;
+  const option = Array.from(select.options).find((item) => /^All\b/i.test(compactText(item.textContent || item.label || "")));
+  if (!option) return false;
+  select.value = option.value;
+  try {
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  } catch {}
+  return true;
+}
+
+function clickNativeMarketplaceAllOption() {
+  const nodes = Array.from(document.querySelectorAll("[role='option'],[role='menuitem'],button,[cmdk-item],div")).filter((node) => {
+    if (!node || typeof node.querySelector === "function" && node.querySelector("[data-codexpp-native-directory-controls]")) return false;
+    if (!isVisibleTabCandidate(node)) return false;
+    const text = compactText(node.textContent || "");
+    return text === "All" || text === "All sources" || text === "All marketplaces";
+  });
+  const option = nodes[0];
+  if (option && typeof option.click === "function") option.click();
+}
+
+function safeQuerySelector(root, selector) {
+  try {
+    return root && typeof root.querySelector === "function" ? root.querySelector(selector) : null;
+  } catch {
+    return null;
+  }
+}
+
+function removeNativeDirectoryControls() {
+  for (const strip of Array.from(document.querySelectorAll("[data-codexpp-native-directory-controls]"))) {
+    strip.remove();
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-directory-group-heading]"))) {
+    node.remove();
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-directory-display]"))) {
+    node.style.display = node.dataset.codexppNativeDirectoryDisplay || "";
+    delete node.dataset.codexppNativeDirectoryDisplay;
+    delete node.dataset.codexppNativeDirectoryHidden;
+  }
+  restoreNativeDirectorySearchRowLayout();
+  restoreNativeDirectoryGroupLabels(document);
+}
+
+function applyNativeDirectoryControls(state, pair, mode) {
+  const root = pair && pair.root;
+  if (!root) return;
+  const controls = nativeControlsForMode(state, mode);
+  controls.query = nativeDirectorySearchValue(pair, mode);
+  const rows = nativeDirectoryRows(root, pair.tabRow);
+  const rowRecords = rows.map((row, index) => nativeDirectoryRowRecord(state, row, mode, index));
+  const visible = rowRecords.filter((record) => nativeDirectoryRecordVisible(record, controls));
+  const visibleSet = new Set(visible.map((record) => record.row));
+  for (const record of rowRecords) setNativeDirectoryRowHidden(record.row, !visibleSet.has(record.row));
+  sortNativeDirectoryRows(visible, controls.sort);
+  const groupByPlugin = mode === "skills" && controls.sort === "plugin";
+  // Hide Codex's native section labels (Featured, etc.) for flat or regrouped orders;
+  // keep them for the "Category" sort, which IS the native order.
+  const flatSort = controls.sort === "az" || isDateSort(controls.sort);
+  setNativeDirectoryGroupLabelsHidden(root, flatSort || groupByPlugin);
+  if (groupByPlugin) groupNativeSkillRowsByPlugin(visible);
+  else {
+    removeNativeDirectoryGroupHeadings(root);
+    applyNativeDirectoryRowOrder(visible);
+  }
+}
+
+function nativeDirectoryRows(root, tabRow) {
+  const selector = "article,li,[role='listitem'],[role='option'],div";
+  const candidates = Array.from(root.querySelectorAll(selector)).filter((node) => isNativeDirectoryRowCandidate(node, tabRow));
+  return candidates.filter((node) => !candidates.some((other) => other !== node && node.contains && node.contains(other)));
+}
+
+function isNativeDirectoryRowCandidate(node, tabRow) {
+  if (!node || node.dataset && (node.dataset.codexppNativeDirectoryControls || node.dataset.codexppNativeDirectoryGroupHeading)) return false;
+  if (tabRow && (node === tabRow || node.contains && node.contains(tabRow))) return false;
+  if (typeof node.querySelector === "function" && node.querySelector("[data-codexpp-native-directory-controls]")) return false;
+  if (typeof node.querySelector === "function" && node.querySelector("input[placeholder='Search plugins'],input[placeholder='Search skills']")) return false;
+  if (!isVisibleTabCandidate(node)) return false;
+  const text = compactText(node.textContent || "");
+  if (text.length < 3 || text.length > 420) return false;
+  if (text === "Featured" || text === "Recommended" || text === "Make Codex work your way") return false;
+  if (text.includes("Search plugins") || text.includes("Search skills")) return false;
+  if (text.includes("Built by OpenAI") && text.includes("All")) return false;
+  if (text.includes("Sort by:") || text === "Enabled") return false;
+  if (text.includes("Plugins") && text.includes("Skills") && text.includes("Tweaks")) return false;
+  if (looksLikeAppSidebar(node)) return false;
+  if (isInsideAppSidebar(node)) return false;
+  return hasRowVisualSignal(node) || hasKnownDirectoryText(text);
+}
+
+function isInsideAppSidebar(node) {
+  let cur = node;
+  let hops = 0;
+  while (cur && cur !== document.body && hops < 12) {
+    if (looksLikeAppSidebar(cur)) return true;
+    const tag = String(cur.tagName || "").toUpperCase();
+    const role = typeof cur.getAttribute === "function" ? cur.getAttribute("role") : "";
+    if (tag === "NAV" || tag === "ASIDE" || role === "navigation") return true;
+    cur = cur.parentElement;
+    hops += 1;
+  }
+  return false;
+}
+
+function hasRowVisualSignal(node) {
+  if (!node || typeof node.querySelector !== "function") return false;
+  return Boolean(node.querySelector("img,svg,button,[role='button']"));
+}
+
+function hasKnownDirectoryText(text) {
+  return /\b(Control|Create|Read|Manage|Use when|Explore|Find|Summarize|Draft|Generate|Debug|Triage|Search)\b/i.test(text);
+}
+
+function nativeDirectoryRowRecord(state, row, mode, fallbackIndex) {
+  if (row.dataset && row.dataset.codexppNativeDirectoryOriginalIndex === undefined) {
+    row.dataset.codexppNativeDirectoryOriginalIndex = String(fallbackIndex);
+  }
+  const text = compactText(row.textContent || "");
+  const title = nativeDirectoryRowTitle(row, text);
+  const meta = nativeDirectoryRowMeta(state, title, text, mode);
+  return {
+    row,
+    text,
+    title,
+    meta,
+    originalIndex: Number(row.dataset && row.dataset.codexppNativeDirectoryOriginalIndex || fallbackIndex),
+    installed: meta ? meta.installed !== false : /\bInstalled\b|✓|✔/.test(text),
+    enabled: meta ? meta.enabled !== false : !/\bDisabled\b/i.test(text),
+  };
+}
+
+function nativeDirectoryRowTitle(row, text) {
+  if (row && typeof row.querySelector === "function") {
+    const heading = row.querySelector("h1,h2,h3,h4,strong,[class*='font-medium'],[class*='font-semibold']");
+    const headingText = compactText(heading && heading.textContent || "");
+    if (headingText && headingText.length <= 80) return headingText;
+  }
+  return text.slice(0, 80);
+}
+
+function nativeDirectoryRowMeta(state, title, text, mode) {
+  const meta = state.nativeDirectoryMeta || {};
+  return mode === "skills" ? nativeSkillRowMeta(meta, title, text) : nativePluginRowMeta(meta, title, text);
+}
+
+const MIN_SLUG_FUZZY = 4;
+
+function parseNativeDirectoryTitle(title) {
+  const raw = compactText(title || "");
+  const idx = raw.indexOf(": ");
+  if (idx > 0) return { pluginPart: raw.slice(0, idx), skillPart: raw.slice(idx + 2) };
+  return { pluginPart: "", skillPart: raw };
+}
+
+function bestSlugMatch(pool, fields, needleSlug) {
+  const needle = slugKey(needleSlug);
+  if (!needle || needle.length < MIN_SLUG_FUZZY) return null;
+  let best = null;
+  let bestScore = 0;
+  for (const item of pool || []) {
+    for (const field of fields || []) {
+      const candidate = slugKey(item && item[field]);
+      if (!candidate || candidate.length < MIN_SLUG_FUZZY) continue;
+      let score = 0;
+      if (candidate === needle) score = candidate.length + 1000;
+      else if (needle.includes(candidate)) score = candidate.length;
+      else if (candidate.includes(needle)) score = needle.length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = item;
+      }
+    }
+  }
+  return best;
+}
+
+function nativeSkillRowMeta(meta, title, text) {
+  const keys = [title, text].map(directoryKey).filter(Boolean);
+  for (const key of keys) {
+    const direct = meta.bySkill && meta.bySkill[key];
+    if (direct) return direct;
+  }
+  const titleParts = parseNativeDirectoryTitle(title);
+  const parsed = titleParts.pluginPart ? titleParts : parseNativeDirectoryTitle(text);
+  const plugin = parsed.pluginPart ? meta.byPluginSlug && meta.byPluginSlug[slugKey(parsed.pluginPart)] || bestSlugMatch(meta.plugins || [], ["displayName", "label", "name", "id"], parsed.pluginPart) : null;
+  const skillNeedle = parsed.skillPart || title;
+  if (plugin) {
+    const owned = (meta.skills || []).filter((skill) => sameNativePlugin(skill, plugin));
+    const ownedMatch = meta.bySkillSlug && meta.bySkillSlug[slugKey(skillNeedle)] && sameNativePlugin(meta.bySkillSlug[slugKey(skillNeedle)], plugin)
+      ? meta.bySkillSlug[slugKey(skillNeedle)]
+      : bestSlugMatch(owned, ["name", "displayName", "slash"], skillNeedle);
+    if (ownedMatch) return ownedMatch;
+    return syntheticSkillMetaForPlugin(plugin, skillNeedle);
+  }
+  const skillSlug = slugKey(skillNeedle);
+  return meta.bySkillSlug && meta.bySkillSlug[skillSlug] || bestSlugMatch(meta.skills || [], ["name", "displayName", "slash"], skillNeedle) || null;
+}
+
+function nativePluginRowMeta(meta, title, text) {
+  const keys = [title, text].map(directoryKey).filter(Boolean);
+  for (const key of keys) {
+    const direct = meta.byPlugin && meta.byPlugin[key];
+    if (direct) return direct;
+  }
+  const titleSlug = slugKey(title);
+  return meta.byPluginSlug && meta.byPluginSlug[titleSlug] || bestSlugMatch(meta.plugins || [], ["id", "name", "displayName", "label"], title) || null;
+}
+
+function sameNativePlugin(skill, plugin) {
+  if (!skill || !plugin) return false;
+  const skillKeys = [skill.pluginId, skill.pluginName, skill.pluginLabel].map(slugKey).filter(Boolean);
+  const pluginKeys = [plugin.id, plugin.name, plugin.displayName, plugin.label].map(slugKey).filter(Boolean);
+  return skillKeys.some((key) => pluginKeys.includes(key));
+}
+
+function syntheticSkillMetaForPlugin(plugin, skillLabel) {
+  return {
+    id: cleanText(skillLabel || ""),
+    name: cleanText(skillLabel || ""),
+    displayName: cleanText(skillLabel || ""),
+    label: cleanText(skillLabel || ""),
+    slash: "",
+    pluginId: cleanText(plugin.id || ""),
+    pluginName: cleanText(plugin.displayName || plugin.name || plugin.label || plugin.id || ""),
+    pluginLabel: cleanText(plugin.label || plugin.displayName || plugin.name || plugin.id || ""),
+    installed: plugin.installed !== false,
+    enabled: plugin.enabled !== false,
+    createdAtMs: Number(plugin.createdAtMs || 0),
+    updatedAtMs: Number(plugin.updatedAtMs || 0),
+    lastUsedAtMs: Number(plugin.lastUsedAtMs || 0),
+  };
+}
+
+function nativeDirectoryRecordVisible(record, controls) {
+  if (controls.installedEnabledOnly && !(record.installed && record.enabled)) return false;
+  const query = directoryKey(controls.query || "");
+  if (!query) return true;
+  const meta = record.meta || {};
+  const haystack = [
+    record.text,
+    record.title,
+    meta.id,
+    meta.name,
+    meta.displayName,
+    meta.label,
+    meta.pluginName,
+    meta.pluginLabel,
+    meta.slash,
+  ].filter(Boolean).join(" ");
+  return directoryKey(haystack).includes(query);
+}
+
+function isDateSort(sortKey) {
+  return sortKey === "created" || sortKey === "updated";
+}
+
+function isDefaultSort(sortKey) {
+  return !sortKey || sortKey === DEFAULT_SORT;
+}
+
+function sortNativeDirectoryRows(records, sortKey) {
+  if (isDefaultSort(sortKey) || sortKey === "plugin") {
+    records.sort((a, b) => Number(a && a.originalIndex || 0) - Number(b && b.originalIndex || 0));
+    return;
+  }
+  records.sort((a, b) => compareDirectoryRecords(a, b, sortKey));
+}
+
+function restoreNativeDirectoryRowOrder(records) {
+  const byParent = groupRecordsByParent(records);
+  for (const { parent, rows } of byParent) {
+    rows.sort((a, b) => a.originalIndex - b.originalIndex);
+    for (const record of rows) parent.appendChild(record.row);
+  }
+}
+
+function applyNativeDirectoryRowOrder(records) {
+  const byParent = groupRecordsByParent(records);
+  for (const { parent, rows } of byParent) {
+    for (const record of rows) parent.appendChild(record.row);
+  }
+}
+
+function groupNativeSkillRowsByPlugin(records) {
+  const byParent = groupRecordsByParent(records);
+  for (const { parent, rows } of byParent) {
+    const ordered = rows.slice().sort((a, b) => {
+      const groupA = nativeRecordPluginLabel(a);
+      const groupB = nativeRecordPluginLabel(b);
+      return groupA.localeCompare(groupB) || compareDirectoryRecords(a, b, DEFAULT_SORT);
+    });
+    const signature = ordered.map((record) => `${nativeRecordPluginLabel(record)}:${record.originalIndex}:${record.title}`).join("|");
+    const existingHeadings = nativeDirectoryGroupHeadingsForParent(parent);
+    if (parent.dataset && parent.dataset.codexppNativeDirectoryPluginGroupSignature === signature && existingHeadings.length > 0) continue;
+    for (const heading of existingHeadings) heading.remove();
+    const fragment = document && typeof document.createDocumentFragment === "function" ? document.createDocumentFragment() : null;
+    let currentPlugin = "";
+    for (const record of ordered) {
+      const plugin = nativeRecordPluginLabel(record);
+      if (plugin !== currentPlugin) {
+        currentPlugin = plugin;
+        appendBatchNode(parent, fragment, nativeDirectoryGroupHeading(plugin));
+      }
+      appendBatchNode(parent, fragment, record.row);
+    }
+    if (fragment) parent.appendChild(fragment);
+    if (parent.dataset) parent.dataset.codexppNativeDirectoryPluginGroupSignature = signature;
+  }
+}
+
+function nativeDirectoryGroupHeadingsForParent(parent) {
+  if (!parent || typeof parent.querySelectorAll !== "function") return [];
+  return Array.from(parent.querySelectorAll("[data-codexpp-native-directory-group-heading]")).filter((node) => node.parentElement === parent);
+}
+
+function appendBatchNode(parent, fragment, node) {
+  if (fragment && typeof fragment.appendChild === "function") fragment.appendChild(node);
+  else parent.appendChild(node);
+}
+
+function groupRecordsByParent(records) {
+  const map = new Map();
+  for (const record of records) {
+    const parent = record.row && record.row.parentElement;
+    if (!parent) continue;
+    if (!map.has(parent)) map.set(parent, []);
+    map.get(parent).push(record);
+  }
+  return Array.from(map.entries()).map(([parent, rows]) => ({ parent, rows }));
+}
+
+function nativeRecordPluginLabel(record) {
+  const label = record && record.meta && (record.meta.pluginLabel || record.meta.pluginName);
+  return cleanText(label || "Other");
+}
+
+function nativeDirectoryGroupHeading(title) {
+  const heading = document.createElement("div");
+  heading.className = "codexpp-native-directory-group-heading codexpp-native-directory-plugin-section-heading";
+  heading.dataset.codexppNativeDirectoryGroupHeading = "true";
+  heading.dataset.codexppNativeDirectoryPluginSection = "true";
+  heading.dataset.codexppNativeDirectoryPluginTitle = title || "Other";
+  heading.setAttribute("role", "heading");
+  heading.setAttribute("aria-level", "2");
+  heading.textContent = title || "Other";
+  return heading;
+}
+
+function removeNativeDirectoryGroupHeadings(root) {
+  for (const node of Array.from(root.querySelectorAll("[data-codexpp-native-directory-group-heading]"))) node.remove();
+  clearNativeDirectoryPluginGroupSignature(root);
+  for (const node of Array.from(root.querySelectorAll("*"))) clearNativeDirectoryPluginGroupSignature(node);
+}
+
+function clearNativeDirectoryPluginGroupSignature(node) {
+  if (node && node.dataset && node.dataset.codexppNativeDirectoryPluginGroupSignature !== undefined) {
+    delete node.dataset.codexppNativeDirectoryPluginGroupSignature;
+  }
+}
+
+function setNativeDirectoryGroupLabelsHidden(root, hidden) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  const labels = Array.from(root.querySelectorAll("h1,h2,h3,[role='heading'],div,span")).filter(isNativeDirectoryGroupLabel);
+  for (const label of labels) setNativeDirectoryGroupLabelHidden(label, hidden);
+  if (!hidden) restoreNativeDirectoryGroupLabels(root);
+}
+
+function isNativeDirectoryGroupLabel(node) {
+  if (!node || node.dataset && node.dataset.codexppNativeDirectoryGroupHeading) return false;
+  if (typeof node.closest === "function" && node.closest("[data-codexpp-native-directory-controls]")) return false;
+  const text = compactText(node.textContent || "");
+  if (!text || text === "Make Codex work your way") return false;
+  if (!/^(Featured|Recommended|Built by OpenAI|Local|OpenAI|Community|Other|Installed|Enabled|Available)$/i.test(text)) return false;
+  if (node.children && node.children.length > 0 && Array.from(node.children).some((child) => compactText(child.textContent || "") && compactText(child.textContent || "") !== text)) return false;
+  return true;
+}
+
+function setNativeDirectoryGroupLabelHidden(node, hidden) {
+  if (!node || !node.style || !node.dataset) return;
+  if (node.dataset.codexppNativeDirectoryGroupLabelDisplay === undefined) {
+    node.dataset.codexppNativeDirectoryGroupLabelDisplay = node.style.display || "";
+  }
+  if (hidden) {
+    node.dataset.codexppNativeDirectoryGroupLabelHidden = "true";
+    node.style.display = "none";
+  } else {
+    delete node.dataset.codexppNativeDirectoryGroupLabelHidden;
+    node.style.display = node.dataset.codexppNativeDirectoryGroupLabelDisplay || "";
+  }
+}
+
+function restoreNativeDirectoryGroupLabels(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  for (const node of Array.from(root.querySelectorAll("[data-codexpp-native-directory-group-label-display]"))) {
+    if (!node.style || !node.dataset) continue;
+    node.style.display = node.dataset.codexppNativeDirectoryGroupLabelDisplay || "";
+    delete node.dataset.codexppNativeDirectoryGroupLabelDisplay;
+    delete node.dataset.codexppNativeDirectoryGroupLabelHidden;
+  }
+}
+
+function setNativeDirectoryRowHidden(row, hidden) {
+  if (!row || !row.style || !row.dataset) return;
+  if (row.dataset.codexppNativeDirectoryDisplay === undefined) {
+    row.dataset.codexppNativeDirectoryDisplay = row.style.display || "";
+  }
+  if (hidden) {
+    row.dataset.codexppNativeDirectoryHidden = "true";
+    row.style.display = "none";
+  } else {
+    delete row.dataset.codexppNativeDirectoryHidden;
+    row.style.display = row.dataset.codexppNativeDirectoryDisplay || "";
   }
 }
 
@@ -1792,8 +3206,26 @@ function hasNativeDirectoryListingSignal(text) {
   return false;
 }
 
+/**
+ * True when `root` contains Codex's native directory search input.
+ * Uses the search-field selector entries from PLUGIN_PAGE_ANCHOR_CHAIN
+ * (old placeholder "Search plugins" first, then new-markup "Search skills"),
+ * plus a generic input scan as a final fallback.
+ */
 function hasNativeDirectorySearch(root) {
   if (!root || typeof root.querySelectorAll !== "function") return false;
+  // Try contract selectors first (fast path — matches old and new markup)
+  for (const entry of PLUGIN_PAGE_ANCHOR_CHAIN) {
+    if (!entry.selectors || entry.selectors.length === 0) continue;
+    for (const sel of entry.selectors) {
+      // Only try input/placeholder-based selectors here
+      if (!sel.startsWith("input[placeholder")) continue;
+      try {
+        if (root.querySelector(sel)) return true;
+      } catch { /* invalid selector in future contract version — skip */ }
+    }
+  }
+  // Generic fallback: any input or [placeholder] node with a known search signal
   return Array.from(root.querySelectorAll("input,[placeholder]")).some((node) => {
     const placeholder = typeof node.getAttribute === "function"
       ? compactText(node.getAttribute("placeholder") || "")
@@ -1840,11 +3272,20 @@ function isAppContentColumn(node) {
   return rect.width >= viewportW * 0.42;
 }
 
+/**
+ * True when `root` is (or contains) Codex's native plugin/skills directory
+ * surface.  Uses the ordered fallback chain from PLUGIN_PAGE_ANCHOR_CHAIN
+ * (mirroring plugin-page.contract.ts) so this survives Codex markup changes:
+ * try each textSignal / selector in order; first hit wins.
+ */
 function isPluginsDirectorySurface(root) {
   if (!root) return false;
   const text = compactText(root.textContent || "");
+  // Chain entries that use textSignals (header-based detection)
   if (text.includes("Make Codex work your way")) return true;
-  if (text.includes("Featured") && text.includes("Computer Use")) return true;
+  // New-markup fallback: "Featured" alone is too broad; require a listing signal
+  if (text.includes("Featured") && hasNativeDirectoryListingSignal(text)) return true;
+  // Chain entries that use selectors (search-input-based detection)
   return hasNativeDirectorySearch(root);
 }
 
@@ -1867,8 +3308,35 @@ function looksLikeAppSidebar(node) {
   return text.includes("New chat") && text.includes("Projects") && text.includes("Settings");
 }
 
+/**
+ * Ensure our panel exists and is positioned correctly.
+ *
+ * Additive coexistence guarantee (plugin-page.contract.ts reconciliation
+ * "plugin-page-additive-coexist"): the panel is always INSERTED ALONGSIDE
+ * Codex's native plugin list — never in place of it.  We never detach or
+ * hide native nodes here.  The only caller that hides native content is
+ * activate() / hideNativeDirectoryContent(), which runs only when the user
+ * explicitly clicks our "Tweaks" tab.
+ *
+ * Idempotency guarantee: if `[data-codexpp-tweaks-directory-panel]` is
+ * already present in the DOM (e.g. because activate was called twice, or
+ * the MutationObserver fired during a hot-reload), we reuse the existing
+ * node rather than creating a second one.
+ */
 function ensurePanel(state, tabRow) {
   const useFloating = isUnsafeDirectoryRoot(state.root, tabRow);
+
+  // Idempotency: recover the panel node from the DOM if state.panel was
+  // cleared (e.g. after deactivate) but the element is still connected.
+  if (!state.panel || !state.panel.isConnected) {
+    const existing = typeof document !== "undefined"
+      ? document.querySelector("[data-codexpp-tweaks-directory-panel]")
+      : null;
+    if (existing && existing.isConnected) {
+      state.panel = existing;
+    }
+  }
+
   if (state.panel && state.panel.isConnected) {
     state.panel.hidden = false;
     if (useFloating) {
@@ -1889,6 +3357,9 @@ function ensurePanel(state, tabRow) {
     state.floatingPanel = false;
     return;
   }
+
+  // Create panel and insert it ALONGSIDE (after) the native content anchor —
+  // never removing or replacing native plugin list nodes.
   const panel = document.createElement("section");
   panel.dataset.codexppTweaksDirectoryPanel = "true";
   panel.dataset.slot = "page";
@@ -2184,6 +3655,7 @@ function shouldKeepNode(state, tabRow, node) {
 function isNativePluginsRegistryNode(node) {
   const text = compactText(node.textContent || "");
   const placeholder = typeof node.getAttribute === "function" ? compactText(node.getAttribute("placeholder") || "") : "";
+  // Use contract's search-field chain: "Search plugins" (old) or "Search skills" (new)
   if (placeholder === "Search plugins" || placeholder === "Search skills") return true;
   if (text === "Make Codex work your way" || text === "Featured") return true;
   if (text === "Built by OpenAI" || text === "All") return true;
@@ -2364,8 +3836,6 @@ async function loadData(state, forceStore) {
     if (!state.active || state.loadToken !== token) return;
     syncDetailFromLocation(state, false);
     state.status = "";
-    seedForkLineageMetadata(state);
-    void loadForkLineageMetadata(state, token);
   } catch (error) {
     if (!state.active || state.loadToken !== token) return;
     state.status = error && error.message ? error.message : String(error);
@@ -2402,7 +3872,23 @@ function render(state) {
   toolbar.className = "codexpp-td-toolbar";
   toolbar.dataset.slot = "toolbar";
   toolbar.appendChild(searchInput(state));
+  const pills = document.createElement("div");
+  pills.className = "codexpp-td-pill-group";
+  pills.dataset.slot = "button-group";
+  pills.appendChild(filterPill("Enabled", state.installedEnabledOnly, () => {
+    state.installedEnabledOnly = !state.installedEnabledOnly;
+    state.detailRowKey = null;
+    persistDirectoryState(state);
+    render(state);
+  }));
+  toolbar.appendChild(pills);
+  toolbar.appendChild(sortSelect(state, () => {
+    state.detailRowKey = null;
+    persistDirectoryState(state);
+    render(state);
+  }, "Sort tweaks", "tweaks"));
   toolbar.appendChild(filterSelect(state));
+  toolbar.appendChild(resetFiltersButton(() => resetTweaksDirectoryFilters(state)));
   header.appendChild(toolbar);
   panel.appendChild(header);
 
@@ -2417,13 +3903,13 @@ function render(state) {
     list.className = "codexpp-td-list";
     list.dataset.slot = "list";
     list.setAttribute("role", "list");
-    for (const section of groupedRows(rows)) {
-      list.appendChild(sectionHeader(section.title));
+    for (const section of groupedRows(rows, state.sort)) {
+      if (section.title) list.appendChild(sectionHeader(section.title));
       const grid = document.createElement("div");
       grid.className = "codexpp-td-grid";
       grid.dataset.slot = "list";
       grid.setAttribute("role", "group");
-      grid.setAttribute("aria-label", section.title);
+      grid.setAttribute("aria-label", section.title || "Sorted tweaks");
       for (const row of section.rows) grid.appendChild(rowCard(state, row));
       list.appendChild(grid);
     }
@@ -2467,6 +3953,7 @@ function filterSelect(state) {
   select.addEventListener("change", () => {
     state.filter = select.value;
     state.detailRowKey = null;
+    persistDirectoryState(state);
     render(state);
   });
   wrap.appendChild(select);
@@ -2478,6 +3965,84 @@ function filterSelect(state) {
   return wrap;
 }
 
+function sortSelect(target, onChange, label, mode) {
+  const wrap = document.createElement("label");
+  wrap.className = "codexpp-td-filter-select codexpp-td-sort-select";
+  wrap.dataset.slot = "select-trigger";
+  wrap.title = label || "Sort by";
+  const text = document.createElement("span");
+  text.className = "codexpp-td-select-label";
+  text.textContent = "Sort by:";
+  wrap.appendChild(text);
+  const select = document.createElement("select");
+  select.dataset.slot = "select";
+  select.setAttribute("aria-label", label || "Sort by");
+  const desiredSort = target.sort || DEFAULT_SORT;
+  let matchedSort = false;
+  for (const option of sortOptionsForMode(mode)) {
+    const item = document.createElement("option");
+    item.dataset.slot = "select-item";
+    item.value = option.key;
+    item.textContent = option.label;
+    if (desiredSort === option.key) {
+      item.selected = true;
+      matchedSort = true;
+    }
+    select.appendChild(item);
+  }
+  // Keep the visible selection and the applied sort in lockstep if the stored sort
+  // isn't part of this surface's option list (e.g. a stale persisted key).
+  if (!matchedSort && select.options.length) {
+    select.selectedIndex = 0;
+    target.sort = select.options[0].value;
+  }
+  select.addEventListener("change", () => {
+    target.sort = select.value;
+    onChange && onChange();
+  });
+  wrap.appendChild(select);
+  wrap.appendChild(selectChevron());
+  return wrap;
+}
+
+function selectChevron() {
+  const chevron = document.createElement("span");
+  chevron.dataset.slot = "select-icon";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "⌄";
+  return chevron;
+}
+
+function filterPill(label, active, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = active ? "codexpp-td-pill active" : "codexpp-td-pill";
+  button.setAttribute("aria-pressed", active ? "true" : "false");
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function resetFiltersButton(onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "codexpp-td-button codexpp-td-reset-filters";
+  button.textContent = "Reset filters";
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function resetTweaksDirectoryFilters(state) {
+  const defaults = DEFAULT_DIRECTORY_STATE.tweaks;
+  state.query = "";
+  state.filter = defaults.filter;
+  state.sort = defaults.sort;
+  state.installedEnabledOnly = defaults.installedEnabledOnly;
+  state.detailRowKey = null;
+  persistDirectoryState(state);
+  render(state);
+}
+
 function visibleRows(state) {
   const installedById = new Map(state.installed.map((item) => [item.manifest.id, item]));
   const hiddenForkedUpstreamIds = forkedUpstreamIds(state.installed);
@@ -2487,257 +4052,106 @@ function visibleRows(state) {
   for (const item of state.installed) {
     if (shouldHideForkedUpstreamRow(item, hiddenForkedUpstreamIds)) continue;
     const storeEntry = storeEntries.find((entry) => entry.id === item.manifest.id) || null;
-    rows.push(withForkLineage(state, { type: "installed", installed: item, store: storeEntry, manifest: item.manifest }));
+    rows.push({ type: "installed", installed: item, store: storeEntry, manifest: item.manifest });
   }
 
   for (const entry of storeEntries) {
     if (installedById.has(entry.id)) continue;
     if (hiddenForkedUpstreamIds.has(entry.id)) continue;
-    rows.push(withForkLineage(state, { type: "store", installed: null, store: entry, manifest: entry.manifest }));
+    rows.push({ type: "store", installed: null, store: entry, manifest: entry.manifest });
   }
 
   const query = state.query.trim().toLowerCase();
-  return rows.filter((row) => {
+  const filtered = rows.filter((row) => {
     const update = row.store && row.installed && row.store.manifest.version !== row.installed.manifest.version;
     if (state.filter === "installed" && !row.installed) return false;
     if (state.filter === "store" && row.installed) return false;
     if (state.filter === "updates" && !update) return false;
+    if (state.installedEnabledOnly && !(row.installed && row.installed.enabled !== false)) return false;
     if (!query) return true;
     const haystack = [
+      row.manifest.id,
       row.manifest.name,
       row.manifest.description,
       row.manifest.githubRepo,
+      row.manifest.version,
+      authorText(row.manifest.author),
       row.manifest.tags && row.manifest.tags.join(" "),
     ].filter(Boolean).join(" ").toLowerCase();
     return haystack.includes(query);
   });
+  if (isDefaultSort(state.sort)) return filtered;
+  return filtered.sort((a, b) => compareDirectoryRecords(tweakRowRecord(a), tweakRowRecord(b), state.sort));
 }
 
-function withForkLineage(state, row) {
-  const remote = state.forkLineage && state.forkLineage.byId && row.manifest
-    ? state.forkLineage.byId[row.manifest.id]
-    : null;
+function tweakRowRecord(row) {
   return {
-    ...row,
-    forkLineage: normalizeForkLineage(row.manifest, {
-      storeEntries: state.store && Array.isArray(state.store.entries) ? state.store.entries : [],
-      remote,
-    }),
+    title: row && row.manifest && (row.manifest.name || row.manifest.id) || "",
+    text: row && row.manifest && [row.manifest.id, row.manifest.name, row.manifest.description].filter(Boolean).join(" ") || "",
+    originalIndex: 0,
+    meta: {
+      createdAtMs: rowDateMs(row, "created"),
+      updatedAtMs: rowDateMs(row, "updated"),
+      lastUsedAtMs: rowDateMs(row, "used"),
+    },
   };
 }
 
-function seedForkLineageMetadata(state) {
-  const storeEntries = state.store && Array.isArray(state.store.entries) ? state.store.entries : [];
-  const byId = Object.create(null);
-  for (const manifest of forkLineageManifestPayload(state)) {
-    const metadata = normalizeForkLineage(manifest, { storeEntries });
-    if (metadata.hasFork) byId[metadata.tweakId] = metadata;
+function compareDirectoryRecords(a, b, sortKey) {
+  const key = SORT_OPTIONS.some((option) => option.key === sortKey) ? sortKey : DEFAULT_SORT;
+  if (isDefaultSort(key) || key === "plugin") {
+    const indexOrder = Number(a && a.originalIndex || 0) - Number(b && b.originalIndex || 0);
+    if (indexOrder !== 0) return indexOrder;
+    return cleanText(a && (a.title || a.text) || "").localeCompare(cleanText(b && (b.title || b.text) || ""));
   }
-  state.forkLineage = {
-    status: "local",
-    byId,
-    token: state.forkLineage && state.forkLineage.token || 0,
-    message: "",
-  };
-}
-
-async function loadForkLineageMetadata(state, loadToken) {
-  const manifests = forkLineageManifestPayload(state);
-  if (!manifests.length || !state.api.ipc || typeof state.api.ipc.invoke !== "function") return;
-  const token = (state.forkLineage && state.forkLineage.token || 0) + 1;
-  state.forkLineage = {
-    ...(state.forkLineage || {}),
-    status: "loading",
-    token,
-    message: "",
-  };
-  render(state);
-  try {
-    const result = await state.api.ipc.invoke(CHANNELS.getForkLineageMetadata, {
-      manifests,
-      storeEntries: state.store && Array.isArray(state.store.entries) ? state.store.entries : [],
-    });
-    if (!state.active || state.loadToken !== loadToken || state.forkLineage.token !== token) return;
-    const normalized = normalizeForkLineageResult(result, manifests, state.store && state.store.entries);
-    state.forkLineage = {
-      status: normalized.status,
-      byId: normalized.byId,
-      token,
-      message: normalized.message,
-    };
-  } catch (error) {
-    if (!state.active || state.loadToken !== loadToken || state.forkLineage.token !== token) return;
-    state.forkLineage = {
-      ...(state.forkLineage || {}),
-      status: "error",
-      token,
-      message: errorMessage(error),
-    };
-    state.api.log.warn(`Tweaks Directory fork lineage metadata load failed: ${errorMessage(error)}`);
-  } finally {
-    if (state.active && state.loadToken === loadToken && state.forkLineage.token === token) render(state);
+  if (key === "az") {
+    const azOrder = cleanText(a && (a.title || a.text) || "").localeCompare(cleanText(b && (b.title || b.text) || ""));
+    if (azOrder !== 0) return azOrder;
+    return Number(a && a.originalIndex || 0) - Number(b && b.originalIndex || 0);
   }
+  const aDate = directoryRecordDate(a, key);
+  const bDate = directoryRecordDate(b, key);
+  if (aDate !== bDate) return bDate - aDate;
+  const aName = cleanText(a && (a.title || a.text) || "");
+  const bName = cleanText(b && (b.title || b.text) || "");
+  const nameOrder = aName.localeCompare(bName);
+  if (nameOrder !== 0) return nameOrder;
+  return Number(a && a.originalIndex || 0) - Number(b && b.originalIndex || 0);
 }
 
-function forkLineageManifestPayload(state) {
-  const manifests = [];
-  const seen = new Set();
-  for (const item of state.installed || []) {
-    const manifest = item && item.manifest;
-    if (!manifest || !manifest.id || !manifest.forkOf || seen.has(manifest.id)) continue;
-    seen.add(manifest.id);
-    manifests.push(manifest);
+function directoryRecordDate(record, key) {
+  const meta = record && record.meta || {};
+  if (key === "created") return Number(meta.createdAtMs || 0);
+  if (key === "used") return Number(meta.lastUsedAtMs || 0);
+  return Number(meta.updatedAtMs || 0);
+}
+
+function rowDateMs(row, key) {
+  if (!row) return 0;
+  if (key === "created") {
+    return firstDateMs(row.installed && row.installed.createdAtMs, row.manifest && row.manifest.forkOf && row.manifest.forkOf.forkedAt, row.store && row.store.approvedAt);
   }
-  const storeEntries = state.store && Array.isArray(state.store.entries) ? state.store.entries : [];
-  for (const entry of storeEntries) {
-    const manifest = entry && entry.manifest;
-    if (!manifest || !manifest.id || !manifest.forkOf || seen.has(manifest.id)) continue;
-    seen.add(manifest.id);
-    manifests.push(manifest);
+  if (key === "used") {
+    return firstDateMs(row.installed && row.installed.lastUsedAtMs, row.installed && row.installed.updatedAtMs, row.store && row.store.approvedAt);
   }
-  return manifests;
+  return firstDateMs(row.installed && row.installed.updatedAtMs, row.store && row.store.approvedAt, row.manifest && row.manifest.forkOf && row.manifest.forkOf.forkedAt);
 }
 
-function normalizeForkLineageResult(result, manifests, storeEntries) {
-  const incoming = result && result.byId && typeof result.byId === "object" ? result.byId : {};
-  const byId = Object.create(null);
-  for (const manifest of manifests || []) {
-    const metadata = normalizeForkLineage(manifest, {
-      storeEntries: Array.isArray(storeEntries) ? storeEntries : [],
-      remote: incoming[manifest.id],
-    });
-    if (metadata.hasFork) byId[metadata.tweakId] = metadata;
-  }
-  return {
-    status: result && result.status || "ok",
-    byId,
-    message: result && typeof result.message === "string" ? result.message : "",
-  };
-}
-
-function normalizeForkLineage(manifest, options = {}) {
-  const fork = manifest && manifest.forkOf && typeof manifest.forkOf === "object" ? manifest.forkOf : null;
-  const tweakId = cleanText(manifest && manifest.id);
-  if (!fork) {
-    return {
-      hasFork: false,
-      tweakId,
-      status: "unknown",
-      statusLabel: "Unknown",
-      builtFromVersion: "",
-      latestVersion: "",
-      upstreamId: "",
-      upstreamGithubRepo: "",
-      upstreamCommitSha: "",
-      sourceMissing: true,
-    };
-  }
-  const upstreamId = cleanText(fork.upstreamId);
-  const upstreamGithubRepo = cleanRepoSlug(fork.upstreamGithubRepo);
-  const builtFromVersion = cleanVersion(fork.upstreamVersion);
-  const upstreamCommitSha = cleanText(fork.upstreamCommitSha);
-  const localLatest = latestUpstreamVersionFromStore(upstreamId, options.storeEntries);
-  const remote = options.remote && typeof options.remote === "object" ? options.remote : null;
-  const remoteLatest = cleanVersion(remote && (remote.latestVersion || remote.version));
-  const latestVersion = remoteLatest || localLatest;
-  const sourceMissing = Boolean((!upstreamId && !upstreamGithubRepo) || remote && remote.status === "source-missing");
-  const status = forkLineageStatus({
-    builtFromVersion,
-    latestVersion,
-    sourceMissing,
-  });
-  return {
-    hasFork: true,
-    tweakId,
-    upstreamId,
-    upstreamGithubRepo,
-    upstreamCommitSha,
-    builtFromVersion,
-    latestVersion,
-    status,
-    statusLabel: forkLineageStatusLabel(status),
-    source: latestVersion ? remoteLatest ? "github" : "store" : "",
-    sourceUrl: cleanText(remote && remote.sourceUrl),
-    sourceMissing,
-    message: cleanText(remote && remote.message),
-  };
-}
-
-function latestUpstreamVersionFromStore(upstreamId, storeEntries) {
-  const id = cleanText(upstreamId);
-  if (!id || !Array.isArray(storeEntries)) return "";
-  for (const entry of storeEntries) {
-    const entryId = cleanText(entry && (entry.id || entry.manifest && entry.manifest.id));
-    if (entryId !== id) continue;
-    return cleanVersion(entry && entry.manifest && entry.manifest.version);
-  }
-  return "";
-}
-
-function forkLineageStatus(lineage) {
-  if (lineage.sourceMissing) return "source-missing";
-  if (!lineage.latestVersion) return "unknown";
-  if (!lineage.builtFromVersion) return "unknown";
-  const comparison = compareVersions(lineage.latestVersion, lineage.builtFromVersion);
-  return comparison > 0 ? "update-available" : "current";
-}
-
-function forkLineageStatusLabel(status) {
-  if (status === "current") return "Current";
-  if (status === "update-available") return "Update available";
-  if (status === "source-missing") return "Source missing";
-  return "Unknown";
-}
-
-function forkLineageLatestLabel(lineage) {
-  if (!lineage || !lineage.hasFork) return "";
-  if (lineage.latestVersion) return lineage.latestVersion;
-  if (lineage.sourceMissing) return "Source missing";
-  return "Unknown";
-}
-
-function forkLineageBuiltFromLabel(lineage) {
-  if (!lineage || !lineage.hasFork) return "Unknown";
-  return lineage.builtFromVersion || "Unknown";
-}
-
-function forkLineageSummary(lineage) {
-  if (!lineage || !lineage.hasFork) return "";
-  const source = lineage.upstreamId || lineage.upstreamGithubRepo || "unknown source";
-  return `Forked from ${source} · Built from ${forkLineageBuiltFromLabel(lineage)} · Latest ${forkLineageLatestLabel(lineage)} · ${lineage.statusLabel}`;
-}
-
-function compareVersions(a, b) {
-  const left = versionParts(a);
-  const right = versionParts(b);
-  if (!left.length && !right.length) return cleanText(a).localeCompare(cleanText(b));
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    const leftPart = left[index] || 0;
-    const rightPart = right[index] || 0;
-    if (leftPart > rightPart) return 1;
-    if (leftPart < rightPart) return -1;
+function firstDateMs(...values) {
+  for (const value of values) {
+    const ms = dateMs(value);
+    if (ms > 0) return ms;
   }
   return 0;
 }
 
-function versionParts(value) {
-  const match = cleanVersion(value).match(/\d+(?:\.\d+)*/);
-  if (!match) return [];
-  return match[0].split(".").map((part) => Number(part)).filter((part) => Number.isFinite(part));
-}
-
-function cleanVersion(value) {
-  return cleanText(value).replace(/^v/i, "");
-}
-
-function cleanText(value) {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function cleanRepoSlug(value) {
-  const repo = cleanText(value).replace(/^https:\/\/github\.com\//i, "").replace(/\.git$/i, "");
-  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ? repo : "";
+function dateMs(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
 }
 
 function forkedUpstreamIds(installed) {
@@ -2759,7 +4173,8 @@ function shouldHideForkedUpstreamRow(item, hiddenForkedUpstreamIds) {
   );
 }
 
-function groupedRows(rows) {
+function groupedRows(rows, sortKey) {
+  if (isDateSort(sortKey)) return [{ title: "", rows }];
   const updates = [];
   const installed = [];
   const store = [];
@@ -2814,10 +4229,14 @@ function rowCard(state, row) {
   left.appendChild(body);
   card.appendChild(left);
 
-  if (row.forkLineage && row.forkLineage.hasFork) {
+  if (row.manifest.forkOf) {
     const lineage = document.createElement("div");
-    lineage.className = `codexpp-td-meta codexpp-td-lineage is-${row.forkLineage.status}`;
-    lineage.textContent = forkLineageSummary(row.forkLineage);
+    lineage.className = "codexpp-td-meta codexpp-td-lineage";
+    const upstream = row.manifest.forkOf;
+    lineage.textContent =
+      "Forked from " + upstream.upstreamId +
+      " @ " + (upstream.upstreamVersion || "unknown") +
+      " (" + (upstream.upstreamCommitSha ? upstream.upstreamCommitSha.slice(0, 7) : "unpinned") + ")";
     body.appendChild(lineage);
   }
 
@@ -2936,7 +4355,7 @@ function renderTweakDetailPage(state, panel, row) {
   infoCard.dataset.slot = "card-content";
   infoCard.appendChild(detailRow("Status", row.installed ? row.installed.enabled ? "Installed, enabled" : "Installed, disabled" : "Available in store"));
   infoCard.appendChild(detailRow("Version", manifest.version || "Unknown"));
-  infoCard.appendChild(detailRow("Latest", latestVersionLabel(row, hasUpdate)));
+  infoCard.appendChild(detailRow("Latest", row.store && row.store.manifest && row.store.manifest.version ? row.store.manifest.version : hasUpdate ? "Update available" : "Current"));
   if (manifest.githubRepo) infoCard.appendChild(detailRow("GitHub", manifest.githubRepo));
   if (manifest.author) infoCard.appendChild(detailRow("Developer", authorText(manifest.author)));
   if (manifest.tags && manifest.tags.length) infoCard.appendChild(detailRow("Tags", manifest.tags.join(", ")));
@@ -2944,7 +4363,7 @@ function renderTweakDetailPage(state, panel, row) {
   info.appendChild(infoCard);
   main.appendChild(info);
 
-  if (row.forkLineage && row.forkLineage.hasFork) {
+  if (manifest.forkOf) {
     const lineage = document.createElement("section");
     lineage.className = "codexpp-td-detail-section";
     lineage.dataset.slot = "card";
@@ -2952,12 +4371,9 @@ function renderTweakDetailPage(state, panel, row) {
     const lineageCard = document.createElement("div");
     lineageCard.className = "codexpp-td-detail-card";
     lineageCard.dataset.slot = "card-content";
-    lineageCard.appendChild(detailRow("Forked from", row.forkLineage.upstreamId || row.forkLineage.upstreamGithubRepo || "Unknown"));
-    lineageCard.appendChild(detailRow("Built from", forkLineageBuiltFromLabel(row.forkLineage)));
-    lineageCard.appendChild(detailRow("Latest upstream", forkLineageLatestLabel(row.forkLineage)));
-    lineageCard.appendChild(detailRow("Upstream status", row.forkLineage.statusLabel));
-    lineageCard.appendChild(detailRow("Pinned commit", row.forkLineage.upstreamCommitSha || "Unpinned"));
-    if (row.forkLineage.message) lineageCard.appendChild(detailRow("Latest source", row.forkLineage.message));
+    lineageCard.appendChild(detailRow("Forked from", manifest.forkOf.upstreamId || "Unknown"));
+    lineageCard.appendChild(detailRow("Upstream version", manifest.forkOf.upstreamVersion || "Unknown"));
+    lineageCard.appendChild(detailRow("Pinned commit", manifest.forkOf.upstreamCommitSha || "Unpinned"));
     lineage.appendChild(lineageCard);
     main.appendChild(lineage);
   }
@@ -3541,13 +4957,6 @@ function statusText(row, hasUpdate) {
   return "Available in the tweak store.";
 }
 
-function latestVersionLabel(row, hasUpdate) {
-  if (row && row.forkLineage && row.forkLineage.hasFork) {
-    return forkLineageLatestLabel(row.forkLineage);
-  }
-  return row.store && row.store.manifest && row.store.manifest.version ? row.store.manifest.version : hasUpdate ? "Update available" : "Current";
-}
-
 function authorText(author) {
   if (!author) return "";
   if (typeof author === "string") return author;
@@ -3970,6 +5379,10 @@ function compactText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function cleanText(value) {
+  return compactText(value);
+}
+
 function injectStyles() {
   let style = document.getElementById("codexpp-tweaks-directory-style");
   if (!style) {
@@ -4029,8 +5442,8 @@ function injectStyles() {
       letter-spacing: 0;
       box-shadow: 0 1px 2px rgba(0,0,0,.04);
     }
-    .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files * { box-sizing: border-box; }
-    .codexpp-tweaks-directory, .codexpp-td-native-plugin-files {
+    .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files *, .codexpp-native-directory-controls, .codexpp-native-directory-controls * { box-sizing: border-box; }
+    .codexpp-tweaks-directory, .codexpp-td-native-plugin-files, .codexpp-native-directory-controls {
       --codexpp-td-background: var(--background, var(--bg-primary, #fff));
       --codexpp-td-foreground: var(--foreground, var(--text-primary, #111));
       --codexpp-td-muted: var(--muted-foreground, var(--text-secondary, rgba(0,0,0,.54)));
@@ -4058,21 +5471,30 @@ function injectStyles() {
     .codexpp-tweaks-directory-floating { position: fixed; z-index: 2147483600; top: 72px; right: 24px; bottom: 24px; left: clamp(320px, 36vw, 620px); width: auto; max-width: none; margin: 0; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 24px; background: var(--codexpp-td-background); color: var(--codexpp-td-foreground); box-shadow: 0 18px 60px rgba(0,0,0,.18); }
     .codexpp-td-header { display: flex; flex-direction: column; gap: 30px; align-items: stretch; }
     .codexpp-td-header h1 { margin: 0; max-width: 100%; text-align: center; font-size: 30px; line-height: 1.18; font-weight: 400; letter-spacing: 0; overflow-wrap: anywhere; }
-    .codexpp-td-toolbar { width: 100%; display: flex; gap: 8px; justify-content: center; align-items: center; }
-    .codexpp-td-search { flex: 1 1 auto; min-width: 0; max-width: none; height: 28px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 0 12px; background: var(--codexpp-td-background); color: inherit; font: inherit; font-size: 14px; box-shadow: 0 1px 1px rgba(0,0,0,.03) inset; }
+    .codexpp-td-toolbar { width: 100%; display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; align-items: center; }
+    .codexpp-native-directory-controls { display: inline-flex; flex: 0 0 auto; margin: 0; flex-wrap: wrap; gap: 8px; justify-content: flex-start; align-items: center; }
+    .codexpp-td-search { flex: 1 1 100%; min-width: 0; max-width: none; height: 28px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 0 12px; background: var(--codexpp-td-background); color: inherit; font: inherit; font-size: 14px; box-shadow: 0 1px 1px rgba(0,0,0,.03) inset; }
     .codexpp-td-search::placeholder { color: color-mix(in srgb, var(--codexpp-td-muted) 82%, transparent); }
     .codexpp-td-search:focus-visible,
     .codexpp-td-filter-select:focus-within,
+    .codexpp-td-pill:focus-visible,
     .codexpp-td-button:focus-visible,
     .codexpp-td-directory-action:focus-visible {
       outline: none;
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--codexpp-td-ring) 28%, transparent);
       border-color: color-mix(in srgb, var(--codexpp-td-ring) 44%, var(--codexpp-td-border));
     }
-    .codexpp-td-filter-select { flex: 0 0 auto; height: 28px; min-width: 96px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 0 8px 0 10px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-foreground); }
+    .codexpp-td-pill-group { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+    .codexpp-td-pill { height: 36px; min-width: 0; border: 1px solid var(--codexpp-td-border); border-radius: 999px; padding: 0 10px; background: var(--codexpp-td-background); color: var(--codexpp-td-muted); font: inherit; font-size: 13px; cursor: pointer; }
+    .codexpp-td-pill.active { background: var(--codexpp-td-foreground); border-color: var(--codexpp-td-foreground); color: var(--codexpp-td-background); }
+    .codexpp-td-filter-select { flex: 0 0 auto; height: 36px; min-width: 96px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 0 8px 0 10px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-foreground); }
+    .codexpp-td-sort-select { min-width: 154px; }
+    .codexpp-td-select-label { color: var(--codexpp-td-muted); font-size: 13px; white-space: nowrap; }
     .codexpp-td-filter-select select { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-size: 14px; outline: none; cursor: pointer; }
     .codexpp-td-filter-select span { font-size: 14px; line-height: 1; color: var(--codexpp-td-muted); pointer-events: none; }
-    .codexpp-td-button { min-width: 0; max-width: 100%; min-height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 4px 10px; background: var(--codexpp-td-background); color: inherit; font: inherit; font-size: 13px; cursor: pointer; white-space: normal; }
+    .codexpp-native-directory-group-heading { grid-column: 1 / -1; margin: 24px 0 12px; border-bottom: 1px solid var(--codexpp-td-border); padding-bottom: 12px; color: var(--codexpp-td-foreground); font-size: 23px; line-height: 1.25; font-weight: 400; letter-spacing: 0; }
+    .codexpp-native-directory-plugin-section-heading { width: 100%; }
+    .codexpp-td-button { min-width: 0; max-width: 100%; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 4px 10px; background: var(--codexpp-td-background); color: inherit; font: inherit; font-size: 13px; cursor: pointer; white-space: normal; }
     .codexpp-td-button.primary { background: var(--primary, var(--codexpp-td-foreground)); color: var(--primary-foreground, var(--codexpp-td-background)); }
     .codexpp-td-button.destructive { border-color: color-mix(in srgb, var(--destructive, #dc2626) 30%, var(--codexpp-td-border)); color: var(--destructive, rgb(185,28,28)); }
     .codexpp-td-rescue { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; min-height: 34px; max-width: min(260px, calc(100vw - 32px)); border: 1px solid rgba(220,38,38,.26); border-radius: 9px; padding: 7px 12px; background: var(--bg-primary, #fff); color: rgb(185,28,28); font: inherit; box-shadow: 0 8px 28px rgba(0,0,0,.18); cursor: pointer; }
@@ -4098,10 +5520,6 @@ function injectStyles() {
     .codexpp-td-item p, .codexpp-td-meta { margin: 0; color: var(--codexpp-td-muted); font-size: 13px; line-height: 1.25; }
     .codexpp-td-item p { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .codexpp-td-meta { font-size: 12px; }
-    .codexpp-td-lineage.is-update-available { color: #b45309; }
-    .codexpp-td-lineage.is-current { color: #047857; }
-    .codexpp-td-lineage.is-unknown,
-    .codexpp-td-lineage.is-source-missing { color: var(--codexpp-td-muted); }
     .codexpp-td-item-actions { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--codexpp-td-muted); }
     .codexpp-td-directory-action { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--codexpp-td-border); border-radius: 8px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-foreground); font: inherit; font-size: 18px; line-height: 1; cursor: pointer; }
     .codexpp-td-directory-action.status { border: 0; background: transparent; color: color-mix(in srgb, var(--codexpp-td-muted) 78%, transparent); font-size: 18px; }
@@ -4197,14 +5615,3 @@ function injectStyles() {
     }
   `;
 }
-
-module.exports.__test = {
-  compareVersions,
-  forkLineageBuiltFromLabel,
-  forkLineageLatestLabel,
-  forkLineageStatusLabel,
-  forkLineageSummary,
-  latestUpstreamVersionFromStore,
-  normalizeForkLineage,
-  normalizeForkLineageResult,
-};

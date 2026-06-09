@@ -66,11 +66,6 @@ const FEATURE_DEFS = Object.freeze([
       "Remove the rounded inner corners on the main content panel so it sits flush against the sidebar.",
   },
   {
-    id: "settings-search",
-    title: "Settings search",
-    description: "Add a search field above Settings tabs so sections can be filtered quickly.",
-  },
-  {
     id: "match-sidebar-width",
     title: "Match settings sidebar width",
     description:
@@ -126,7 +121,6 @@ const DEFAULT_FEATURE_FLAGS = Object.freeze({
   "show-usage-in-sidebar": false,
   "show-message-metrics-on-hover": true,
   "square-sidebar": false,
-  "settings-search": false,
   "match-sidebar-width": true,
   "sidebar-action-grid": true,
   "sidebar-project-backgrounds": true,
@@ -169,6 +163,16 @@ const BROWSER_ANNOTATION_DEFAULT_MODE_REWRITES = Object.freeze([
     reason: "thread-panel-direct-submit",
   },
 ]);
+const SESSION_SCAN_LIMITS = Object.freeze({
+  projectLabelActiveFiles: 600,
+  projectLabelArchivedFiles: 80,
+  projectLabelTotalFiles: 680,
+  messageMetricsActiveFiles: 20,
+  messageMetricsArchivedFiles: 4,
+  messageMetricsTotalFiles: 24,
+  messageMetricsMaxFileBytes: 12 * 1024 * 1024,
+  messageMetricsTotalBytes: 24 * 1024 * 1024,
+});
 
 /** @type {import("@codex-plusplus/sdk").Tweak} */
 module.exports = {
@@ -178,11 +182,11 @@ module.exports = {
         startMainLegacyBrandUiScrubber(api),
         startMainBrowserAnnotationComposerModePatch(api),
         startMainTweakMentionProvider(api),
+        startMainMetricsProvider(api),
+        startMainUsageProvider(api),
+        startMainProjectLabelProvider(api),
+        startMainSidebarBatchMenuProvider(api),
       ].filter(Boolean);
-      startMainMetricsProvider(api);
-      startMainUsageProvider(api);
-      startMainProjectLabelProvider(api);
-      startMainSidebarBatchMenuProvider(api);
       return;
     }
 
@@ -263,6 +267,7 @@ module.exports = {
  * `flex flex-col gap-2` section per group, rounded card with rows.
  */
 function renderSettings(root, state) {
+  root.replaceChildren();
   const section = el("section", "flex flex-col gap-2");
   section.appendChild(sectionTitle("Features"));
 
@@ -805,6 +810,24 @@ const FEATURES = {
      *     at:number }
      * `pct` is REMAINING (Codex displays remaining %, e.g. "100%").
      * `resetAt` is whatever Codex shows verbatim (typically "HH:MM").
+     *
+     * Data strategy (single usage-fetch path):
+     * -----------------------------------------
+     * When the analytics tweak (co.thomashulihan.usage-analytics) is present,
+     * its main-process IPC handler owns the single "/wham/usage" reader. We
+     * source data through the same `api.ipc.invoke("usage-fetch")` IPC channel
+     * instead of maintaining a second independent polling loop with a separate
+     * renderer bridge. Once IPC succeeds (`ipcUsageConfirmed`), the renderer
+     * bridge injection and `window.message` listener are never activated —
+     * eliminating the observer-storm risk of a second fetch path.
+     *
+     * Backward-compat fallback:
+     * When IPC fails (analytics absent, older runtime), behaviour is unchanged:
+     * DOM scanning (breakdown grid + compact node) and the renderer bridge
+     * fallback remain active. No regression, no thrown errors.
+     *
+     * No characterData observers in this feature. rAF-debounced. Observer-storm
+     * rule compliant.
      */
     let snapshot = readSnapshot(api);
     let mounted = null; // HTMLElement currently rendered in the sidebar
@@ -813,6 +836,11 @@ const FEATURES = {
     let directUsageLastAttemptAt = 0;
     let directUsageFailureLogged = false;
     let directUsageSuccessLogged = false;
+    // Set true the first time api.ipc.invoke("usage-fetch") succeeds.
+    // When true the renderer bridge + message listener are not activated,
+    // keeping this tweak on the same single fetch path as usage-analytics.
+    let ipcUsageConfirmed = false;
+    // Bridge state — only used when IPC is unavailable.
     let usageBridgeReady = false;
     let usageBridgeReadyLogged = false;
     let usageBridgeScriptInjected = false;
@@ -854,6 +882,8 @@ const FEATURES = {
       }
       return changed;
     };
+
+    // ── bridge fallback (only activated when IPC path is unavailable) ──
 
     const ensureUsageBridgeScript = () => {
       if (usageBridgeScriptInjected) return;
@@ -950,14 +980,11 @@ const FEATURES = {
       window.dispatchEvent(event);
     };
 
-    const fetchCodexAppServerJson = async (url, timeoutMs = 10_000) => {
-      try {
-        return await api.ipc.invoke("usage-fetch", url);
-      } catch {
-        // Older runtimes or a failed main-webview probe fall through to the
-        // renderer bridge attempt below.
-      }
-
+    /**
+     * Fetch /wham/usage via the renderer bridge (fallback when IPC unavailable).
+     * Only called when ipcUsageConfirmed is false and api.ipc.invoke fails.
+     */
+    const fetchViaRendererBridge = (url, timeoutMs = 10_000) => {
       const hostId =
         new URL(window.location.href).searchParams.get("hostId")?.trim() ||
         "local";
@@ -1161,6 +1188,16 @@ const FEATURES = {
       applyUsageEvent(data);
     };
 
+    /**
+     * Fetch /wham/usage and update the snapshot.
+     *
+     * Single-path strategy: try `api.ipc.invoke("usage-fetch")` first — this
+     * is the same channel the usage-analytics tweak uses, so when both tweaks
+     * are active there is exactly ONE /wham/usage reader (the IPC handler in
+     * main). Only when IPC is unavailable do we fall back to the renderer
+     * bridge (legacy runtime or analytics tweak absent). Once IPC has succeeded
+     * once, `ipcUsageConfirmed` is set and the bridge path is never entered.
+     */
     const refreshUsageFromApi = async () => {
       if (directUsageInFlight) return false;
       const now = Date.now();
@@ -1170,14 +1207,32 @@ const FEATURES = {
       directUsageLastAttemptAt = now;
       directUsageInFlight = true;
       try {
-        const status = await fetchCodexAppServerJson("/wham/usage");
+        let status;
+        // ── primary: shared IPC path (usage-analytics or built-in handler) ──
+        try {
+          status = await api.ipc.invoke("usage-fetch", "/wham/usage");
+          // IPC succeeded — remember this so the bridge is never activated.
+          ipcUsageConfirmed = true;
+        } catch {
+          // ── fallback: renderer bridge (only when IPC unavailable) ──
+          if (ipcUsageConfirmed) {
+            // IPC was working before; a transient error — don't re-activate
+            // the bridge path. Treat as a temporary unavailability.
+            return false;
+          }
+          try {
+            status = await fetchViaRendererBridge("/wham/usage");
+          } catch {
+            status = null;
+          }
+        }
         const partial = snapshotFromUsageStatus(status);
         if (partial.fiveHour || partial.weekly) {
           directUsageAvailable = true;
           directUsageFailureLogged = false;
           if (!directUsageSuccessLogged) {
             directUsageSuccessLogged = true;
-            log("api active", partial);
+            log("api active (ipc=" + ipcUsageConfirmed + ")", partial);
           }
           applySnapshot(partial, "api");
           return true;
@@ -1378,6 +1433,8 @@ const FEATURES = {
     // We throttle to one tick per animation frame so a flood of React
     // re-renders can't tank the renderer (Codex mutates the DOM heavily
     // while typing). Coalesces N onMutate() calls into one scan.
+    //
+    // No characterData — rAF-debounced — observer-storm rule compliant.
     let scheduled = false;
     const onMutate = () => {
       if (scheduled) return;
@@ -1399,6 +1456,12 @@ const FEATURES = {
     obs.observe(document.documentElement, { childList: true, subtree: true });
     const interval = window.setInterval(onMutate, 15_000);
     window.addEventListener("focus", onMutate);
+    // The window "message" listener for usage events is part of the renderer
+    // bridge fallback path. When ipcUsageConfirmed becomes true (IPC path is
+    // active — i.e. usage-analytics tweak is present), this listener is a
+    // no-op because the bridge is never injected and `onUsageMessage` only
+    // processes data that arrives via that bridge. We still attach it so
+    // the fallback works on the first load before IPC is confirmed.
     window.addEventListener("message", onUsageMessage);
     document.addEventListener("visibilitychange", onMutate);
 
@@ -1507,6 +1570,11 @@ const FEATURES = {
    * stays inside the sidebar/nav surface and marks itself with
    * `data-codexpp-settings-search` so the runtime Settings injector can ignore
    * search clicks instead of treating them as navigation.
+   *
+   * DORMANT: delisted from FEATURE_DEFS + DEFAULT_FEATURE_FLAGS because the
+   * native Codex app now ships its own settings search, so this is never
+   * activated. The handler is intentionally retained so the feature can be
+   * revived (re-add the id to both registries) without re-implementing it.
    */
   "settings-search"(api) {
     const STYLE_ID = "codexpp-settings-search-style";
@@ -3873,6 +3941,12 @@ const FEATURES = {
     const ATTR = "data-codexpp-sidebar-project-backgrounds";
     const MENU_ATTR = "data-codexpp-sidebar-project-color-menu";
     const COLOR_STORAGE_KEY = PROJECT_COLOR_STORAGE_KEY;
+    const EXCLUDED_PROJECT_IDS = new Set([
+      "cloud:therealityreport/trr-app",
+      "cloud:therealityreport/screenalytics",
+    ]);
+    const CLOUD_PROJECT_PREFIX = "cloud:";
+    const EXCLUDED_PROJECT_LABELS = new Set(["trr-app", "screenalytics"]);
     const ASIDE_SELECTOR = [
       "aside.pointer-events-auto.relative.flex.overflow-hidden",
       "aside.pointer-events-auto.relative.flex.overflow-visible",
@@ -4171,6 +4245,14 @@ const FEATURES = {
       [${MENU_ATTR}="trigger"] {
         color: var(--color-token-foreground);
       }
+
+      div[role="listitem"][aria-label="trr-app"],
+      div[role="listitem"][aria-label="screenalytics"],
+      div[role="listitem"]:has([data-app-action-sidebar-project-id^="cloud:"]),
+      div[role="listitem"]:has([data-app-action-sidebar-project-id="cloud:therealityreport/trr-app"]),
+      div[role="listitem"]:has([data-app-action-sidebar-project-id="cloud:therealityreport/screenalytics"]) {
+        display: none !important;
+      }
     `;
     document.head.appendChild(style);
 
@@ -4214,10 +4296,24 @@ const FEATURES = {
       const text = labelFor(node);
       if (!text || text.length < 2 || text.length > 80) return false;
       if (EXCLUDED_LABELS.has(text)) return false;
+      if (isExcludedProjectRow(node)) return false;
 
       const action = node.querySelector("[role='button'][aria-label]");
       return action instanceof HTMLElement && labelFor(action) === text;
     };
+
+    const isExcludedProjectRow = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (EXCLUDED_PROJECT_LABELS.has(labelFor(node))) return true;
+      const action = node.querySelector("[data-app-action-sidebar-project-id]");
+      const projectId = action instanceof HTMLElement
+        ? action.getAttribute("data-app-action-sidebar-project-id")
+        : null;
+      return Boolean(projectId && (isCloudProjectId(projectId) || EXCLUDED_PROJECT_IDS.has(projectId)));
+    };
+
+    const isCloudProjectId = (projectId) =>
+      typeof projectId === "string" && projectId.trim().toLowerCase().startsWith(CLOUD_PROJECT_PREFIX);
 
     const candidateRows = (sidebar) =>
       Array.from(sidebar.querySelectorAll("div[role='listitem'][aria-label]"))
@@ -5148,6 +5244,10 @@ const FEATURES = {
         return;
       }
 
+      sidebar.querySelectorAll("div[role='listitem'][aria-label]").forEach((row) => {
+        if (isExcludedProjectRow(row)) clearRowMarks(row);
+      });
+
       let rows = candidateRows(sidebar);
       rows = rows.filter((node, index) => rows.indexOf(node) === index);
       const seenLabels = new Set();
@@ -5301,22 +5401,40 @@ const FEATURES = {
    * `token_count` + `task_complete` JSONL events.
    */
   "show-message-metrics-on-hover"(api) {
+    const MESSAGE_NODE_SELECTOR = "div.group.flex.min-w-0.flex-col";
+    const MESSAGE_MARKDOWN_SELECTOR = "._markdownContent_1rhk1_42";
     const mounted = new Map();
     const streamStats = new WeakMap();
     let metrics = [];
     let disposed = false;
     let scanScheduled = false;
+    let refreshScheduled = false;
+
+    const hasMetricMessageSurface = () =>
+      Boolean(document.querySelector(`${MESSAGE_NODE_SELECTOR} ${MESSAGE_MARKDOWN_SELECTOR}`));
 
     const refreshMetrics = async () => {
+      if (disposed || !hasMetricMessageSurface()) return false;
       try {
         const next = await api.ipc.invoke("message-metrics");
         if (Array.isArray(next)) {
           metrics = next;
           scheduleScan();
+          return true;
         }
       } catch (e) {
         api.log.warn("[message-metrics] metrics unavailable", e);
       }
+      return false;
+    };
+
+    const scheduleRefresh = () => {
+      if (refreshScheduled || disposed) return;
+      refreshScheduled = true;
+      requestAnimationFrame(() => {
+        refreshScheduled = false;
+        refreshMetrics();
+      });
     };
 
     const scheduleScan = () => {
@@ -5335,10 +5453,10 @@ const FEATURES = {
     const lastTextLen = new WeakMap();
     const scanMessages = () => {
       if (disposed || metrics.length === 0) return;
-      const nodes = document.querySelectorAll("div.group.flex.min-w-0.flex-col");
+      const nodes = document.querySelectorAll(MESSAGE_NODE_SELECTOR);
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
-        const markdown = node.querySelector("._markdownContent_1rhk1_42");
+        const markdown = node.querySelector(MESSAGE_MARKDOWN_SELECTOR);
         if (!markdown) continue;
         const rawText = markdown.textContent || "";
         trackVisibleStream(streamStats, markdown, rawText);
@@ -5361,11 +5479,15 @@ const FEATURES = {
       }
     };
 
-    const observer = new MutationObserver(scheduleScan);
+    const onMutate = () => {
+      scheduleScan();
+      scheduleRefresh();
+    };
+    const observer = new MutationObserver(onMutate);
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    refreshMetrics();
-    const timer = window.setInterval(refreshMetrics, 5_000);
+    scheduleRefresh();
+    const timer = window.setInterval(scheduleRefresh, 15_000);
 
     return () => {
       disposed = true;
@@ -5827,6 +5949,7 @@ function startMainMetricsProvider(api) {
   }
 
   api.log.info("[message-metrics] main provider active");
+  return () => disposeMainService(METRICS_GLOBAL_KEY, service);
 }
 
 function startMainUsageProvider(api) {
@@ -5842,6 +5965,7 @@ function startMainUsageProvider(api) {
   }
 
   api.log.info("[usage] main provider active");
+  return () => disposeMainService(USAGE_GLOBAL_KEY, service);
 }
 
 function startMainProjectLabelProvider(api) {
@@ -5857,12 +5981,18 @@ function startMainProjectLabelProvider(api) {
   }
 
   api.log.info("[pinned-chat-project-names] main provider active");
+  return () => disposeMainService(PROJECT_LABEL_GLOBAL_KEY, service);
 }
 
 function startMainSidebarBatchMenuProvider(api) {
-  globalThis[SIDEBAR_BATCH_MENU_GLOBAL_KEY] = {
-    show: showSidebarBatchMenu,
+  const service = {
+    disposed: false,
+    show(payload) {
+      if (service.disposed) return null;
+      return showSidebarBatchMenu(payload);
+    },
   };
+  globalThis[SIDEBAR_BATCH_MENU_GLOBAL_KEY] = service;
 
   if (!globalThis[SIDEBAR_BATCH_MENU_HANDLER_KEY]) {
     api.ipc.handle("sidebar-chat-batch-menu", (payload = {}) => {
@@ -5873,6 +6003,16 @@ function startMainSidebarBatchMenuProvider(api) {
   }
 
   api.log.info("[sidebar-chat-multi-select] main menu provider active");
+  return () => disposeMainService(SIDEBAR_BATCH_MENU_GLOBAL_KEY, service);
+}
+
+function disposeMainService(key, service) {
+  try {
+    service.dispose?.();
+  } finally {
+    service.disposed = true;
+    if (globalThis[key] === service) delete globalThis[key];
+  }
 }
 
 function showSidebarBatchMenu(payload) {
@@ -5924,11 +6064,13 @@ function showSidebarBatchMenu(payload) {
 }
 
 function createProjectLabelService(api) {
-  let cache = { at: 0, labels: new Map() };
+  let cache = { at: 0, labels: new Map(), covered: new Set() };
+  let disposed = false;
   const TTL_MS = 30_000;
 
   return {
     getLabels(ids) {
+      if (disposed) return {};
       const requested = Array.isArray(ids)
         ? ids.map(normalizeConversationId).filter(Boolean)
         : [];
@@ -5936,10 +6078,26 @@ function createProjectLabelService(api) {
       const now = Date.now();
       if (now - cache.at > TTL_MS) {
         try {
-          cache = { at: now, labels: readConversationProjectLabels() };
+          cache = {
+            at: now,
+            labels: readConversationProjectLabels(requested),
+            covered: new Set(requested),
+          };
         } catch (e) {
           api.log.warn("[pinned-chat-project-names] scan failed", e);
-          cache = { at: now, labels: new Map() };
+          cache = { at: now, labels: new Map(), covered: new Set(requested) };
+        }
+      } else {
+        const missing = requested.filter((id) => !cache.covered.has(id));
+        if (missing.length) {
+          try {
+            const labels = readConversationProjectLabels(missing);
+            for (const [id, record] of labels) cache.labels.set(id, record);
+          } catch (e) {
+            api.log.warn("[pinned-chat-project-names] scan failed", e);
+          }
+          for (const id of missing) cache.covered.add(id);
+          cache.at = now;
         }
       }
       const out = {};
@@ -5949,29 +6107,42 @@ function createProjectLabelService(api) {
       }
       return out;
     },
+    dispose() {
+      disposed = true;
+      cache = { at: 0, labels: new Map(), covered: new Set() };
+    },
   };
 }
 
-function readConversationProjectLabels() {
+function readConversationProjectLabels(requestedIds = []) {
   const fs = require("node:fs");
   const path = require("node:path");
   const home = process.env.HOME || require("node:os").homedir();
-  const roots = [
-    path.join(home, ".codex", "sessions"),
-    path.join(home, ".codex", "archived_sessions"),
-  ];
-  const files = [];
-  for (const root of roots) collectJsonlFiles(fs, root, files);
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const requested = new Set(
+    requestedIds.map(normalizeConversationId).filter(Boolean),
+  );
+  if (requested.size === 0) return new Map();
+  const files = collectBoundedSessionFiles(fs, [
+    {
+      dir: path.join(home, ".codex", "sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.projectLabelActiveFiles,
+    },
+    {
+      dir: path.join(home, ".codex", "archived_sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.projectLabelArchivedFiles,
+    },
+  ], SESSION_SCAN_LIMITS.projectLabelTotalFiles);
 
   const labels = new Map();
-  for (const file of files.slice(0, 5000)) {
+  for (const file of files) {
     const meta = readSessionMeta(fs, file.path);
     const id = normalizeConversationId(meta?.id);
+    if (!id || !requested.has(id) || labels.has(id)) continue;
     const cwd = typeof meta?.cwd === "string" ? meta.cwd : null;
-    if (!id || !cwd || labels.has(id)) continue;
+    if (!cwd) continue;
     const label = projectLabelForPath(path, cwd);
     if (label) labels.set(id, { label, cwd });
+    if (labels.size >= requested.size) break;
   }
   return labels;
 }
@@ -6013,15 +6184,21 @@ function normalizeConversationId(value) {
 
 function createUsageService(api) {
   let cache = { at: 0, value: null };
+  let disposed = false;
   const TTL_MS = 10_000;
 
   return {
     async fetchUsage() {
+      if (disposed) return null;
       const now = Date.now();
       if (cache.value && now - cache.at < TTL_MS) return cache.value;
       const value = await fetchUsageInCodexWebview();
       cache = { at: Date.now(), value };
       return value;
+    },
+    dispose() {
+      disposed = true;
+      cache = { at: 0, value: null };
     },
   };
 
@@ -6098,10 +6275,12 @@ function createUsageService(api) {
 
 function createMetricsService(api) {
   let cache = { at: 0, items: [] };
-  const TTL_MS = 2_000;
+  let disposed = false;
+  const TTL_MS = 10_000;
 
   return {
     getMetrics() {
+      if (disposed) return [];
       const now = Date.now();
       if (now - cache.at < TTL_MS) return cache.items;
       try {
@@ -6112,6 +6291,10 @@ function createMetricsService(api) {
       }
       return cache.items;
     },
+    dispose() {
+      disposed = true;
+      cache = { at: 0, items: [] };
+    },
   };
 }
 
@@ -6119,20 +6302,25 @@ function readRecentMessageMetrics() {
   const fs = require("node:fs");
   const path = require("node:path");
   const home = process.env.HOME || require("node:os").homedir();
-  const roots = [
-    path.join(home, ".codex", "sessions"),
-    path.join(home, ".codex", "archived_sessions"),
-  ];
-  const files = [];
-  for (const root of roots) collectJsonlFiles(fs, root, files);
-
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const files = collectBoundedSessionFiles(fs, [
+    {
+      dir: path.join(home, ".codex", "sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.messageMetricsActiveFiles,
+    },
+    {
+      dir: path.join(home, ".codex", "archived_sessions"),
+      maxFiles: SESSION_SCAN_LIMITS.messageMetricsArchivedFiles,
+    },
+  ], SESSION_SCAN_LIMITS.messageMetricsTotalFiles);
 
   const byKey = new Map();
-  for (const file of files.slice(0, 20)) {
+  let bytesRead = 0;
+  for (const file of files) {
     // Some long-running archived rollouts can be huge; recent visible
     // conversations are covered by the smaller active session files.
-    if (file.size > 12 * 1024 * 1024) continue;
+    if (file.size > SESSION_SCAN_LIMITS.messageMetricsMaxFileBytes) continue;
+    if (bytesRead + file.size > SESSION_SCAN_LIMITS.messageMetricsTotalBytes) break;
+    bytesRead += file.size;
     for (const item of parseMetricsFile(fs, file.path)) {
       const key = item.turnId || `${item.completedAt}:${item.clean.slice(0, 80)}`;
       if (!byKey.has(key)) byKey.set(key, item);
@@ -6145,7 +6333,20 @@ function readRecentMessageMetrics() {
     .slice(0, 300);
 }
 
-function collectJsonlFiles(fs, dir, out) {
+function collectBoundedSessionFiles(fs, roots, totalLimit) {
+  const files = [];
+  for (const root of roots) {
+    const bucket = [];
+    collectJsonlFiles(fs, root.dir, bucket, root.maxFiles);
+    files.push(...bucket);
+  }
+  return files
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, totalLimit);
+}
+
+function collectJsonlFiles(fs, dir, out, maxFiles = Infinity) {
+  if (out.length >= maxFiles) return;
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -6153,10 +6354,12 @@ function collectJsonlFiles(fs, dir, out) {
     return;
   }
 
+  entries.sort((a, b) => b.name.localeCompare(a.name));
   for (const entry of entries) {
+    if (out.length >= maxFiles) return;
     const full = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      collectJsonlFiles(fs, full, out);
+      collectJsonlFiles(fs, full, out, maxFiles);
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
       try {
         const stat = fs.statSync(full);

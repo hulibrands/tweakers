@@ -1,14 +1,17 @@
 const TWEAK_ID = "co.thomashulihan.thread-summary-profiles";
 const PROJECTS_TWEAK_ID = "co.thomashulihan.projects";
 const CHROME_TWEAK_ID = "co.thomashulihan.project-chrome-profile";
-const CHROME_ASSIGNMENTS_KEY = "chromeAssignments";
-const CHROME_CLEARED_ASSIGNMENTS_KEY = "chromeAssignmentClears";
 const IPC_GET_SUMMARY = "getThreadProfileSummary";
 const IPC_OPEN_ACTION = "openThreadProfileAction";
 const SECTION_ATTR = "data-codexpp-thread-summary-profiles";
-const ROW_ORDER = Object.freeze(["chrome", "supabase", "github", "google-drive", "gmail", "modal"]);
+const OPEN_STATE_KEY = "profiles-section:open";
+const ROW_ORDER = Object.freeze(["chrome", "supabase", "github", "google-drive", "gmail", "modal", "decodo", "railway"]);
+const SUMMARY_CACHE_TTL_MS = 5000;
+const MODAL_CLI_CACHE_TTL_MS = 60000;
 
 let activeCleanup = [];
+let summaryCache = new Map();
+let modalCliCache = new Map();
 
 module.exports = {
   start(api) {
@@ -28,20 +31,25 @@ module.exports = {
 
   __test: {
     SECTION_ATTR,
+    OPEN_STATE_KEY,
     ROW_ORDER,
+    SUMMARY_CACHE_TTL_MS,
+    MODAL_CLI_CACHE_TTL_MS,
+    getCachedThreadProfileSummary,
     buildThreadProfileSummary,
+    resolveThreadSummaryContext,
     buildProfileRows,
     normalizeProfileRow,
     parseGithubRemote,
     parseSupabaseConfigToml,
     sanitizeAction,
+    activeModalWorkspaceContextCached,
     inferRendererProjectContext,
     extractProjectPathFromVisibleText,
     injectProfilesSection,
     findThreadSummaryPanels,
     createProfilesSection,
-    registerSettingsPage,
-    renderSettingsPage,
+    clearThreadProfileCaches,
   },
 };
 
@@ -53,7 +61,7 @@ function startMain(api, cleanup) {
   const home = os.homedir();
   const userRoot = userRootForPlatform(home, path);
 
-  cleanup.push(api.ipc.handle(IPC_GET_SUMMARY, (input = {}) => buildThreadProfileSummary(input, {
+  cleanup.push(api.ipc.handle(IPC_GET_SUMMARY, (input = {}) => getCachedThreadProfileSummary(input, {
     fs,
     os,
     path,
@@ -63,11 +71,11 @@ function startMain(api, cleanup) {
     env: process.env,
   })));
   cleanup.push(api.ipc.handle(IPC_OPEN_ACTION, (action) => openProfileAction(action, { childProcess })));
+  cleanup.push(() => clearThreadProfileCaches());
 }
 
 function startRenderer(api, cleanup) {
   installStyles();
-  registerSettingsPage(api, cleanup);
 
   let scheduled = false;
   let raf = 0;
@@ -95,85 +103,43 @@ function startRenderer(api, cleanup) {
   });
 }
 
-function registerSettingsPage(api, cleanup = []) {
-  if (typeof api.settings?.registerPage !== "function") {
-    api.log?.warn?.("[thread-summary-profiles] registerPage unavailable; settings UI not mounted.");
-    return null;
-  }
-
-  const handle = api.settings.registerPage({
-    id: "main",
-    title: "Thread Summary Profiles",
-    description: "Shows connected project services in the thread summary.",
-    iconSvg:
-      '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
-      '<path d="M4 5h12M4 10h12M4 15h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
-      '<path d="M14 13.5 16 15.5 18.5 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
-      "</svg>",
-    render(root) {
-      renderSettingsPage(root);
-    },
-  });
-  if (handle && typeof handle.unregister === "function") cleanup.push(() => handle.unregister());
-  else if (handle && typeof handle.dispose === "function") cleanup.push(() => handle.dispose());
-  return handle || null;
-}
-
-function renderSettingsPage(root) {
-  root.innerHTML = "";
-  root.className = "codexpp-thread-summary-profiles-settings";
-
-  const style = document.createElement("style");
-  style.textContent = `
-    .codexpp-thread-summary-profiles-settings { display: flex; flex-direction: column; gap: 12px; }
-    .codexpp-thread-summary-profiles-settings__card { border: 1px solid var(--border-subtle, rgba(128,128,128,.25)); border-radius: 8px; background: var(--background-primary, transparent); }
-    .codexpp-thread-summary-profiles-settings__row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.18)); }
-    .codexpp-thread-summary-profiles-settings__row:last-child { border-bottom: 0; }
-    .codexpp-thread-summary-profiles-settings__text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-    .codexpp-thread-summary-profiles-settings__text strong { font-size: 13px; line-height: 18px; font-weight: 600; }
-    .codexpp-thread-summary-profiles-settings__text span { color: var(--text-secondary, rgba(0,0,0,.56)); font-size: 12px; line-height: 1.35; }
-    .codexpp-thread-summary-profiles-settings__badge { flex: 0 0 auto; border: 1px solid rgba(22,163,74,.35); border-radius: 999px; color: #15803d; background: rgba(22,163,74,.08); padding: 2px 8px; font-size: 12px; line-height: 18px; }
-    @media (max-width: 520px) {
-      .codexpp-thread-summary-profiles-settings__row { align-items: flex-start; flex-direction: column; }
-    }
-  `;
-  root.appendChild(style);
-
-  const card = document.createElement("section");
-  card.className = "codexpp-thread-summary-profiles-settings__card";
-  card.appendChild(settingsStatusRow("Profiles section", "Active in thread summaries", "Enabled"));
-  card.appendChild(settingsStatusRow("Source", "Uses existing Projects and Chrome profile assignments", "Read-only"));
-  root.appendChild(card);
-}
-
-function settingsStatusRow(title, description, status) {
-  const row = document.createElement("div");
-  row.className = "codexpp-thread-summary-profiles-settings__row";
-
-  const text = document.createElement("div");
-  text.className = "codexpp-thread-summary-profiles-settings__text";
-  const strong = document.createElement("strong");
-  strong.textContent = title;
-  const span = document.createElement("span");
-  span.textContent = description;
-  text.append(strong, span);
-
-  const badge = document.createElement("span");
-  badge.className = "codexpp-thread-summary-profiles-settings__badge";
-  badge.textContent = status;
-
-  row.append(text, badge);
-  return row;
-}
-
 function buildThreadProfileSummary(input = {}, options = {}) {
+  return buildThreadProfileSummaryFromContext(resolveThreadSummaryContext(input, options), options);
+}
+
+function getCachedThreadProfileSummary(input = {}, options = {}) {
+  const context = resolveThreadSummaryContext(input, options);
+  const cache = options.summaryCache === false ? null : (options.summaryCache || summaryCache);
+  const ttlMs = cacheTtlMs(options.summaryCacheTtlMs, SUMMARY_CACHE_TTL_MS);
+  const now = currentTimeMs(options);
+  const key = context.projectPath || "__unknown__";
+  if (cache && ttlMs > 0 && !input.forceRefresh && !input.refresh) {
+    const cached = cache.get(key);
+    if (cached && now - cached.cachedAt <= ttlMs) {
+      const summary = cloneSummary(cached.summary);
+      if (context.projectName) summary.projectName = context.projectName;
+      return summary;
+    }
+  }
+  const summary = buildThreadProfileSummaryFromContext(context, options);
+  if (cache && ttlMs > 0) cache.set(key, { cachedAt: now, summary: cloneSummary(summary) });
+  return summary;
+}
+
+function resolveThreadSummaryContext(input = {}, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const rawProjectPath = resolveProjectPathInput(input, options);
   const normalizedProjectPath = normalizeProjectPath(rawProjectPath, { path, home, allowEmpty: true });
   const requestedPath = resolveStoredProjectPrefix(normalizedProjectPath, options) || normalizedProjectPath;
-  const projectPath = requestedPath || inferSingleConfiguredProjectPath(options);
+  const projectPath = requestedPath || inferCurrentWorkingDirectoryProjectPath(options) || inferSingleConfiguredProjectPath(options);
   const projectName = cleanText(input.projectName || (projectPath ? path.basename(projectPath) : ""), 120) || "Unknown project";
+  return { projectPath, projectName };
+}
+
+function buildThreadProfileSummaryFromContext(context = {}, options = {}) {
+  const projectPath = context.projectPath || "";
+  const projectName = context.projectName || "Unknown project";
   return {
     projectPath,
     projectName,
@@ -189,6 +155,8 @@ function buildProfileRows(projectPath, projectName, options = {}) {
     googleWorkspaceRow(projectPath, "google-drive", options),
     googleWorkspaceRow(projectPath, "gmail", options),
     modalRow(projectPath, options),
+    decodoRow(projectPath, options),
+    railwayRow(projectPath, options),
   ];
   return rows.map(normalizeProfileRow).filter((row) => row.state !== "unset");
 }
@@ -281,34 +249,25 @@ function modalRow(projectPath, options = {}) {
   const storage = readProjectsStorage(options);
   const assignment = storage.modalWorkspaceAssignments?.[projectPath] || null;
   if (!assignment) {
-    const workspaceConfig = readModalWorkspaceConfig(projectPath, options);
-    if (!workspaceConfig) {
-      return baseRow("modal", "Modal", "Unset", {
-        state: "unset",
-        status: "Status unknown",
-        action: settingsAction("projects"),
-      });
-    }
-    return baseRow("modal", "Modal", workspaceConfig.appName || "Enabled", {
-      detail: workspaceConfig.executor ? `Executor: ${workspaceConfig.executor}` : workspaceConfig.source,
-      state: "set",
-      status: "Workspace profile",
-      freshness: workspaceConfig.source,
+    return baseRow("modal", "Modal", "Unset", {
+      state: "unset",
+      status: "Status unknown",
       action: settingsAction("projects"),
     });
   }
-  const cliContext = activeModalWorkspaceContext(projectPath, options);
+  const cliContext = activeModalWorkspaceContextCached(projectPath, options);
   const conflict = modalWorkspaceConflict(assignment, cliContext);
   const value = assignment.workspace || assignment.accountName || assignment.profile || "Set";
-  let detail = "Active CLI unavailable";
+  const checked = modalCliCheckedSuffix(cliContext);
+  let detail = checked ? `Active CLI unavailable${checked}` : "Active CLI unavailable";
   let status = assignment.updatedAt ? `Assigned ${shortDate(assignment.updatedAt)}` : "Assigned locally";
   let state = "set";
   if (conflict) {
-    detail = `Active CLI: ${conflict.activeProfile} / ${conflict.activeWorkspace}`;
+    detail = `Active CLI: ${conflict.activeProfile} / ${conflict.activeWorkspace}${checked}`;
     status = "CLI conflict";
     state = "warning";
   } else if (cliContext.profile || cliContext.workspace) {
-    detail = assignment.profile ? `Profile ${assignment.profile}` : "Active CLI matches";
+    detail = assignment.profile ? `Profile ${assignment.profile}${checked}` : `Active CLI matches${checked}`;
     status = "CLI checked";
   } else if (assignment.profile) {
     detail = `Profile ${assignment.profile}`;
@@ -322,24 +281,64 @@ function modalRow(projectPath, options = {}) {
   });
 }
 
-function readModalWorkspaceConfig(projectPath, options = {}) {
+function decodoRow(projectPath, options = {}) {
+  const storage = readProjectsStorage(options);
+  const assignment = storage.decodoAssignments?.[projectPath] || null;
+  if (!assignment) {
+    return baseRow("decodo", "Decodo", "Unset", {
+      state: "unset",
+      status: "Status unknown",
+      action: settingsAction("projects"),
+    });
+  }
+  return baseRow("decodo", "Decodo", assignment.accountName || assignment.username || "Set", {
+    detail: assignment.username || "",
+    state: "set",
+    status: freshness("Project default", assignment.updatedAt),
+    freshness: assignment.updatedAt || "",
+    action: settingsAction("projects"),
+  });
+}
+
+function railwayRow(projectPath, options = {}) {
+  const config = readRailwayProjectConfig(projectPath, options);
+  if (!config) {
+    return baseRow("railway", "Railway", "Unset", {
+      state: "unset",
+      status: "Status unknown",
+      action: settingsAction("projects"),
+    });
+  }
+  return baseRow("railway", "Railway", config.projectName || config.projectId || "Project linked", {
+    detail: config.environmentName || config.environmentId || config.source,
+    state: "set",
+    status: "Project config detected",
+    freshness: config.source,
+    action: fileAction(config.filePath),
+  });
+}
+
+function readRailwayProjectConfig(projectPath, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
   if (!projectPath) return null;
-  for (const rel of ["profiles/local-full.env", "profiles/local-docker.env"]) {
+  for (const rel of [".railway/project.json", ".railway/environment.json", "railway.json"]) {
     const filePath = path.join(projectPath, rel);
-    let content = "";
+    let raw = "";
     try {
-      content = fs.readFileSync(filePath, "utf8");
+      raw = fs.readFileSync(filePath, "utf8");
     } catch {
       continue;
     }
-    const values = parseEnvAssignments(content);
-    if (values.WORKSPACE_TRR_MODAL_ENABLED !== "1" && values.TRR_MODAL_ENABLED !== "1") continue;
+    const parsed = parseJsonObject(raw);
+    if (!parsed) continue;
     return {
-      appName: values.WORKSPACE_TRR_MODAL_APP_NAME || values.TRR_MODAL_APP_NAME || "",
-      executor: values.WORKSPACE_TRR_REMOTE_EXECUTOR || values.TRR_REMOTE_EXECUTOR || "modal",
+      projectId: cleanText(parsed.projectId || parsed.project_id || parsed.id || "", 120),
+      projectName: cleanText(parsed.projectName || parsed.project_name || parsed.name || "", 120),
+      environmentId: cleanText(parsed.environmentId || parsed.environment_id || "", 120),
+      environmentName: cleanText(parsed.environmentName || parsed.environment_name || "", 120),
       source: rel,
+      filePath,
     };
   }
   return null;
@@ -383,16 +382,19 @@ async function injectProfilesSection(rootDocument, api) {
   const rows = Array.isArray(summary.rows) ? summary.rows.map(normalizeProfileRow).filter((row) => row.state !== "unset") : [];
   let count = 0;
   for (const panel of panels) {
-    if (!rows.length) {
+    const template = findSidePanelSectionTemplate(panel);
+    if (!template && hasNativeSidePanelSections(panel)) {
       panel.querySelector(`[${SECTION_ATTR}="true"]`)?.remove();
       continue;
     }
     const next = createProfilesSection(summary, {
+      template,
+      storage: api.storage,
       onAction: (action) => handleRendererAction(api, action),
     });
     const existing = panel.querySelector(`[${SECTION_ATTR}="true"]`);
-    if (existing) existing.replaceWith(next);
-    else insertProfilesSection(panel, next);
+    if (existing) existing.remove();
+    insertProfilesSection(panel, next, template);
     count += 1;
   }
   return count;
@@ -408,6 +410,7 @@ function pruneOrphanProfilesSections(rootDocument, panels) {
 function findThreadSummaryPanels(rootDocument = document) {
   const candidates = Array.from(rootDocument.querySelectorAll("aside, section, div")).filter((node) => {
     if (!isElement(node) || node.hasAttribute(SECTION_ATTR)) return false;
+    if (isEditableTree(node)) return false;
     const text = normalizeVisibleText(node.textContent);
     if (!text || text.length > 2000) return false;
     const headings = ["environment", "sources", "progress", "subagents"].filter((heading) => text.includes(heading));
@@ -416,36 +419,486 @@ function findThreadSummaryPanels(rootDocument = document) {
   return candidates.filter((node) => !candidates.some((other) => other !== node && node.contains(other)));
 }
 
-function insertProfilesSection(panel, section) {
+function insertProfilesSection(panel, section, template = null) {
+  const anchor = findProfilesInsertionAnchor(panel, template);
+  if (anchor?.parentElement) {
+    insertAfter(anchor.parentElement, section, anchor);
+    return;
+  }
   const sections = Array.from(panel.children || []).filter(isElement);
   const progress = sections.find((node) => normalizeVisibleText(node.textContent).startsWith("progress"));
   if (progress?.parentElement === panel) panel.insertBefore(section, progress);
   else panel.appendChild(section);
 }
 
+function findProfilesInsertionAnchor(panel, template = null) {
+  const sources = findSidePanelSectionByHeading(panel, "sources", { interactiveOnly: false });
+  if (sources?.parentElement) return sources;
+  if (template?.section?.parentElement) return template.section;
+  return null;
+}
+
+function insertAfter(parent, node, anchor) {
+  const children = Array.from(parent?.children || []);
+  const index = children.indexOf(anchor);
+  if (index < 0 || index === children.length - 1) parent.appendChild(node);
+  else parent.insertBefore(node, children[index + 1]);
+}
+
 function createProfilesSection(summary = {}, options = {}) {
+  const rows = Array.isArray(summary.rows) ? summary.rows.map(normalizeProfileRow).filter((row) => row.state !== "unset") : [];
+  if (options.template?.mode === "static") return createStaticProfilesSection(rows, options);
+  if (options.template) return createNativeProfilesSection(rows, options);
+
   const section = document.createElement("section");
   section.setAttribute(SECTION_ATTR, "true");
-  section.className = "codexpp-thread-summary-profiles";
+  section.className = "codexpp-thread-summary-profiles codexpp-thread-summary-profiles--fallback";
 
-  const title = document.createElement("div");
+  const details = document.createElement("details");
+  details.className = "codexpp-thread-summary-profiles__details";
+  details.open = readProfilesOpenState(options.storage, true);
+
+  const summaryNode = document.createElement("summary");
+  summaryNode.className = "codexpp-thread-summary-profiles__summary";
+  const title = document.createElement("span");
   title.className = "codexpp-thread-summary-profiles__title";
   title.textContent = "Profiles";
-  section.appendChild(title);
+  const collapsedSummary = document.createElement("span");
+  collapsedSummary.className = "codexpp-thread-summary-profiles__collapsed-summary";
+  collapsedSummary.textContent = profileCollapsedSummary(rows);
+  collapsedSummary.hidden = details.open;
+  const chevron = document.createElement("span");
+  chevron.className = "codexpp-thread-summary-profiles__chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  summaryNode.append(title, collapsedSummary, chevron);
+  details.appendChild(summaryNode);
+  details.addEventListener?.("toggle", () => {
+    writeProfilesOpenState(options.storage, details.open);
+    collapsedSummary.hidden = details.open;
+  });
 
-  const rows = Array.isArray(summary.rows) ? summary.rows.map(normalizeProfileRow).filter((row) => row.state !== "unset") : [];
+  const body = document.createElement("div");
+  body.className = "codexpp-thread-summary-profiles__content";
+
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "codexpp-thread-summary-profiles__empty";
     empty.hidden = true;
     empty.textContent = "No profiles connected";
-    section.appendChild(empty);
+    body.appendChild(empty);
   }
-  for (const row of rows) section.appendChild(createProfileRow(row, options));
+  for (const row of rows) body.appendChild(createProfileRow(row, options));
+  details.appendChild(body);
+  section.appendChild(details);
   return section;
 }
 
+function findSidePanelSectionTemplate(panel) {
+  for (const preferred of ["progress", "environment", "subagents", "sources", "outputs", "side chats"]) {
+    const section = findSidePanelSectionByHeading(panel, preferred, { interactiveOnly: true });
+    if (!section) continue;
+    const trigger = findSectionTrigger(section, preferred, { interactiveOnly: true });
+    return {
+      section,
+      heading: preferred,
+      trigger,
+      content: findSectionContent(section, trigger),
+      row: findNativeRowTemplate(section, trigger),
+    };
+  }
+  const sources = findSidePanelSectionByHeading(panel, "sources", { interactiveOnly: false });
+  if (sources) {
+    return {
+      mode: "static",
+      section: sources,
+      heading: "sources",
+      trigger: findSectionTrigger(sources, "sources", { interactiveOnly: false }),
+      content: findSectionContent(sources, null),
+      row: findNativeRowTemplate(sources, null),
+    };
+  }
+  return null;
+}
+
+function findSidePanelSectionByHeading(panel, heading, options = {}) {
+  const wanted = normalizeVisibleText(heading);
+  const candidates = flattenElements(panel)
+    .filter((node) => {
+      if (!isElement(node) || node === panel || node.hasAttribute?.(SECTION_ATTR)) return false;
+      const text = normalizeVisibleText(node.textContent);
+      if (!text.startsWith(wanted)) return false;
+      const trigger = findSectionTrigger(node, wanted, { interactiveOnly: options.interactiveOnly });
+      if (options.interactiveOnly && !trigger) return false;
+      if (!trigger && !hasSectionBodyChild(node, wanted)) return false;
+      return true;
+    })
+    .map((node) => sectionOwnerForHeading(panel, node, wanted))
+    .filter(Boolean)
+    .filter((node, index, all) => all.indexOf(node) === index)
+    .sort((left, right) => elementDepth(right) - elementDepth(left));
+  return candidates[0] || null;
+}
+
+function sectionOwnerForHeading(panel, node, heading) {
+  let owner = node;
+  for (let current = node; isElement(current?.parentElement) && current.parentElement !== panel; current = current.parentElement) {
+    const parentText = normalizeVisibleText(current.parentElement.textContent);
+    if (!parentText.startsWith(heading)) break;
+    owner = current.parentElement;
+  }
+  return owner;
+}
+
+function hasSectionBodyChild(section, heading) {
+  return Array.from(section?.children || []).some((child) => {
+    if (!isElement(child)) return false;
+    const text = normalizeVisibleText(child.textContent);
+    return text && text !== heading && !text.startsWith(`${heading} `);
+  });
+}
+
+function hasNativeSidePanelSections(panel) {
+  return ["environment", "progress", "subagents", "outputs", "side chats"].some((heading) => {
+    const section = findSidePanelSectionByHeading(panel, heading, { interactiveOnly: true });
+    return Boolean(section);
+  });
+}
+
+function createNativeProfilesSection(rows, options = {}) {
+  const template = options.template;
+  const section = cloneTemplateShell(template.section, "section");
+  appendClass(section, "codexpp-thread-summary-profiles codexpp-thread-summary-profiles--native");
+  section.setAttribute(SECTION_ATTR, "true");
+
+  const collapsedSummary = profileCollapsedSummary(rows);
+  const trigger = createNativeProfilesTrigger(template, collapsedSummary);
+  appendClass(trigger, "codexpp-thread-summary-profiles__native-trigger");
+  if (String(trigger.tagName || "").toLowerCase() === "button" && !trigger.getAttribute("type")) trigger.setAttribute("type", "button");
+
+  const body = template.content ? cloneTemplateShell(template.content, "div") : document.createElement("div");
+  appendClass(body, "codexpp-thread-summary-profiles__content codexpp-thread-summary-profiles__native-content");
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "codexpp-thread-summary-profiles__empty";
+    empty.hidden = true;
+    empty.textContent = "No profiles connected";
+    body.appendChild(empty);
+  }
+  for (const row of rows) body.appendChild(createProfileRow(row, { ...options, template }));
+
+  const setOpen = (open) => {
+    const state = open ? "open" : "closed";
+    section.setAttribute("data-state", state);
+    trigger.setAttribute("data-state", state);
+    trigger.setAttribute("aria-expanded", String(open));
+    body.setAttribute("data-state", state);
+    body.hidden = !open;
+    const summaryNode = trigger.querySelector?.(".codexpp-thread-summary-profiles__collapsed-summary");
+    if (summaryNode) summaryNode.hidden = open;
+  };
+
+  trigger.addEventListener("click", (event) => {
+    event?.preventDefault?.();
+    const nextOpen = body.hidden;
+    writeProfilesOpenState(options.storage, nextOpen);
+    setOpen(nextOpen);
+  });
+
+  setOpen(readProfilesOpenState(options.storage, true));
+  section.append(trigger, body);
+  return section;
+}
+
+function createStaticProfilesSection(rows, options = {}) {
+  const template = options.template;
+  const cloned = cloneTemplateTreeWithMap(template.section);
+  const section = cloned.node;
+  appendClass(section, "codexpp-thread-summary-profiles codexpp-thread-summary-profiles--native codexpp-thread-summary-profiles--static");
+  section.setAttribute(SECTION_ATTR, "true");
+
+  const titleSource = findStaticHeadingTemplate(template.section, template.content);
+  const contentSource = template.content || findStaticContentTemplate(template.section, titleSource);
+  let body = cloned.map.get(contentSource) || findSectionContent(section, null);
+  let title = cloned.map.get(titleSource) || findStaticHeadingTemplate(section, body);
+  if (!title) {
+    title = document.createElement("div");
+    section.insertBefore(title, section.firstChild || null);
+  }
+  appendClass(title, "codexpp-thread-summary-profiles__static-title");
+  title.textContent = "Profiles";
+
+  if (!body) {
+    body = template.content ? cloneTemplateShell(template.content, "div") : document.createElement("div");
+    section.appendChild(body);
+  }
+  appendClass(body, "codexpp-thread-summary-profiles__static-content");
+  body.textContent = "";
+
+  if (!rows.length) {
+    const empty = document.createElement("span");
+    empty.className = "codexpp-thread-summary-profiles__static-empty";
+    empty.textContent = "No profiles connected";
+    body.appendChild(empty);
+  } else {
+    for (const row of rows) body.appendChild(createStaticProfileIcon(row, options));
+  }
+  copyStaticTemplateComputedStyles(template, section, title, body);
+  return section;
+}
+
+function findStaticHeadingTemplate(section, content = null) {
+  const heading = sectionHeadingName(section);
+  const label = heading ? findHeadingLabelNode(section, heading) : null;
+  if (label && label !== content) return label;
+  const children = Array.from(section?.children || []).filter(isElement);
+  return children.find((child) => child !== content && normalizeVisibleText(child.textContent)) || null;
+}
+
+function findStaticContentTemplate(section, title = null) {
+  const siblings = Array.from(title?.parentElement?.children || []).filter(isElement);
+  const afterTitle = siblings.slice(Math.max(0, siblings.indexOf(title) + 1)).find((node) => node !== title);
+  if (afterTitle) return afterTitle;
+  return findSectionContent(section, null);
+}
+
+function createStaticProfileIcon(row, options = {}) {
+  const action = sanitizeAction(row.action);
+  const tag = action?.type === "external" && action.target ? "a" : action ? "button" : "span";
+  const node = document.createElement(tag);
+  node.className = "codexpp-thread-summary-profiles__static-icon";
+  node.setAttribute("data-profile-row", row.id);
+  node.title = profileFullText(row);
+  node.setAttribute("title", profileFullText(row));
+  node.setAttribute("aria-label", profileFullText(row));
+  if (tag === "a") {
+    node.href = action.target;
+    node.target = "_blank";
+    node.rel = "noreferrer";
+  } else if (tag === "button") {
+    node.type = "button";
+    node.addEventListener("click", () => options.onAction?.(action));
+  }
+  node.appendChild(createProviderIcon(row.id));
+  copyStaticIconComputedStyle(options.template?.content, node);
+  return node;
+}
+
+function copyStaticTemplateComputedStyles(template, section, title, body) {
+  if (typeof getComputedStyle !== "function") return;
+  copyComputedStyleProperties(template?.section, section, [
+    "display", "boxSizing", "width", "maxWidth", "minWidth", "gridColumn", "flex", "flexBasis",
+    "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "margin", "marginTop", "marginRight", "marginBottom", "marginLeft",
+    "border", "borderTop", "borderRight", "borderBottom", "borderLeft",
+  ]);
+  const sourceTitle = findStaticHeadingTemplate(template?.section, template?.content);
+  copyComputedStyleProperties(sourceTitle, title, [
+    "display", "boxSizing", "color", "font", "fontFamily", "fontSize", "fontWeight", "fontStyle",
+    "lineHeight", "letterSpacing", "textTransform", "padding", "paddingTop", "paddingRight",
+    "paddingBottom", "paddingLeft", "margin", "marginTop", "marginRight", "marginBottom", "marginLeft",
+  ]);
+  copyComputedStyleProperties(template?.content, body, [
+    "display", "alignItems", "justifyContent", "gap", "columnGap", "rowGap", "boxSizing",
+    "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "margin", "marginTop", "marginRight", "marginBottom", "marginLeft",
+    "color", "font", "fontFamily", "fontSize", "fontWeight", "lineHeight",
+  ]);
+}
+
+function copyStaticIconComputedStyle(sourceContent, node) {
+  if (typeof getComputedStyle !== "function") return;
+  const sourceIcon = Array.from(sourceContent?.children || []).find(isElement);
+  copyComputedStyleProperties(sourceIcon, node, [
+    "display", "alignItems", "justifyContent", "width", "height", "minWidth", "minHeight",
+    "maxWidth", "maxHeight", "color", "font", "fontFamily", "fontSize", "fontWeight",
+    "lineHeight", "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "margin", "marginTop", "marginRight", "marginBottom", "marginLeft",
+  ]);
+}
+
+function copyComputedStyleProperties(source, target, properties) {
+  if (!isElement(source) || !isElement(target) || typeof getComputedStyle !== "function") return;
+  let computed = null;
+  try {
+    computed = getComputedStyle(source);
+  } catch {
+    return;
+  }
+  for (const property of properties) {
+    const value = computed?.[property];
+    if (value) target.style[property] = value;
+  }
+}
+
+function createNativeProfilesTrigger(template, collapsedSummary) {
+  const trigger = cloneTemplateShell(template.trigger, "button");
+  const labelTemplate = findHeadingLabelNode(template.trigger, template.heading);
+  const label = labelTemplate ? cloneTemplateShell(labelTemplate, "span") : document.createElement("span");
+  label.textContent = "Profiles";
+
+  const summary = labelTemplate ? cloneTemplateShell(labelTemplate, "span") : document.createElement("span");
+  appendClass(summary, "codexpp-thread-summary-profiles__collapsed-summary");
+  summary.textContent = collapsedSummary;
+
+  const chevronTemplate = findChevronTemplate(template.trigger, labelTemplate);
+  const chevron = chevronTemplate ? cloneTemplateTree(chevronTemplate) : document.createElement("span");
+  if (!chevronTemplate) {
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = "›";
+  }
+
+  trigger.textContent = "";
+  trigger.append(label, summary, chevron);
+  return trigger;
+}
+
+function profileCollapsedSummary(rows) {
+  const labels = rows.map((row) => row.label).filter(Boolean);
+  if (!labels.length) return "No profiles";
+  if (labels.length <= 2) return labels.join(", ");
+  return `${labels.length} connected`;
+}
+
+function sectionHeadingName(section) {
+  const text = normalizeVisibleText(section?.textContent);
+  for (const heading of ["environment", "profiles", "progress", "outputs", "side chats", "subagents", "sources"]) {
+    if (text.startsWith(heading)) return heading;
+  }
+  return "";
+}
+
+function findSectionTrigger(section, heading, options = {}) {
+  const interactive = Array.from(section.querySelectorAll?.("button, summary, [role=\"button\"], [aria-expanded]") || [])
+    .filter((node) => isElement(node) && normalizeVisibleText(node.textContent).includes(heading));
+  if (interactive.length) return interactive[0];
+  if (options.interactiveOnly) return null;
+  const children = Array.from(section.children || []).filter(isElement);
+  return children.find((node) => normalizeVisibleText(node.textContent).startsWith(heading)) || null;
+}
+
+function findSectionContent(section, trigger) {
+  const children = Array.from(section.children || []).filter((node) => isElement(node) && node !== trigger);
+  return children.find((node) => !normalizeVisibleText(node.textContent).startsWith(sectionHeadingName(section))) || null;
+}
+
+function findNativeRowTemplate(section, trigger) {
+  const content = findSectionContent(section, trigger);
+  const candidates = flattenElements(content).filter((node) => {
+    if (node === content || node.hasAttribute?.(SECTION_ATTR)) return false;
+    const text = normalizeVisibleText(node.textContent);
+    if (!text || text.length > 180) return false;
+    return hasIconLikeChild(node) && hasTextLikeChild(node);
+  });
+  return candidates.sort((left, right) => elementDepth(left) - elementDepth(right))[0] || null;
+}
+
+function hasIconLikeChild(node) {
+  return Array.from(node.children || []).some((child) => isElement(child) && (isIconSlotLike(child) || isChevronLike(child)));
+}
+
+function hasTextLikeChild(node) {
+  return Array.from(node.children || []).some((child) => isElement(child) && normalizeVisibleText(child.textContent));
+}
+
+function cloneTemplateShell(source, fallbackTag) {
+  const tagName = isElement(source) ? String(source.tagName || fallbackTag).toLowerCase() : fallbackTag;
+  const clone = document.createElement(tagName || fallbackTag);
+  copyTemplateAttributes(source, clone);
+  return clone;
+}
+
+function cloneTemplateTree(source) {
+  return cloneTemplateTreeWithMap(source).node;
+}
+
+function cloneTemplateTreeWithMap(source, map = new WeakMap()) {
+  const clone = cloneTemplateShell(source, "div");
+  if (isElement(source)) map.set(source, clone);
+  const childNodes = Array.from(source?.childNodes || source?.children || []);
+  if (!childNodes.length) {
+    clone.textContent = source?.textContent || "";
+    return { node: clone, map };
+  }
+  for (const child of childNodes) {
+    if (isElement(child)) {
+      clone.appendChild(cloneTemplateTreeWithMap(child, map).node);
+    } else if (child?.nodeType === 3 && typeof document.createTextNode === "function") {
+      clone.appendChild(document.createTextNode(child.textContent || ""));
+    }
+  }
+  return { node: clone, map };
+}
+
+function findHeadingLabelNode(root, heading) {
+  const target = normalizeVisibleText(heading);
+  const matches = flattenElements(root).filter((node) => {
+    const text = normalizeVisibleText(node.textContent);
+    return text === target || text.startsWith(`${target} `);
+  });
+  return matches.sort((left, right) => elementDepth(right) - elementDepth(left))[0] || null;
+}
+
+function findChevronTemplate(root, label) {
+  const elements = flattenElements(root);
+  const start = label ? elements.indexOf(label) + 1 : 0;
+  for (const node of elements.slice(Math.max(0, start))) {
+    if (isChevronLike(node)) return node;
+  }
+  return null;
+}
+
+function isChevronLike(node) {
+  if (!isElement(node)) return false;
+  const tagName = String(node.tagName || "").toLowerCase();
+  const text = normalizeVisibleText(node.textContent);
+  if (tagName === "svg") return true;
+  if (/^[›>⌄⌃∨∧⌵⌃⌄]+$/.test(text)) return true;
+  const className = String(node.className || "").toLowerCase();
+  const label = String(node.getAttribute?.("aria-label") || "").toLowerCase();
+  return className.includes("chevron") || label.includes("expand") || label.includes("collapse");
+}
+
+function flattenElements(root) {
+  const result = [];
+  const visit = (node) => {
+    if (!isElement(node)) return;
+    result.push(node);
+    for (const child of Array.from(node.children || [])) visit(child);
+  };
+  visit(root);
+  return result;
+}
+
+function elementDepth(node) {
+  let depth = 0;
+  for (let current = node; isElement(current?.parentElement); current = current.parentElement) depth += 1;
+  return depth;
+}
+
+function copyTemplateAttributes(source, target) {
+  if (!isElement(source) || !target) return;
+  if (source.className) target.className = String(source.className);
+  for (const attr of elementAttributes(source)) {
+    const name = String(attr.name || "").toLowerCase();
+    if (!name || name === "id" || name === "aria-controls" || name === SECTION_ATTR) continue;
+    target.setAttribute(attr.name, attr.value);
+  }
+}
+
+function elementAttributes(node) {
+  if (!node?.attributes) return [];
+  return Array.from(node.attributes).map((attr) => Array.isArray(attr) ? { name: attr[0], value: attr[1] } : attr);
+}
+
+function appendClass(node, className) {
+  const existing = String(node?.className || "").split(/\s+/).filter(Boolean);
+  const next = String(className || "").split(/\s+/).filter(Boolean);
+  node.className = [...new Set([...existing, ...next])].join(" ");
+}
+
 function createProfileRow(row, options = {}) {
+  if (options.template?.row) return createNativeProfileRow(row, options);
   const action = sanitizeAction(row.action);
   const tag = action?.type === "external" && action.target ? "a" : action ? "button" : "div";
   const node = document.createElement(tag);
@@ -484,6 +937,154 @@ function createProfileRow(row, options = {}) {
   return node;
 }
 
+function createNativeProfileRow(row, options = {}) {
+  const action = sanitizeAction(row.action);
+  const tag = action?.type === "external" && action.target ? "a" : action ? "button" : "div";
+  const source = options.template.row;
+  const node = document.createElement(tag);
+  copyTemplateAttributes(source, node);
+  appendClass(node, `codexpp-thread-summary-profiles__row codexpp-thread-summary-profiles__row--native is-${row.state}`);
+  node.setAttribute("data-profile-row", row.id);
+  if (tag === "a") {
+    node.href = action.target;
+    node.target = "_blank";
+    node.rel = "noreferrer";
+  } else if (tag === "button") {
+    node.type = "button";
+    node.addEventListener("click", () => options.onAction?.(action));
+  }
+  if (action) node.setAttribute("aria-label", `${row.label}: ${row.value}`);
+
+  const iconSource = findNativeIconTemplate(source);
+  const icon = iconSource ? cloneTemplateShell(iconSource, "span") : document.createElement("span");
+  appendClass(icon, "codexpp-thread-summary-profiles__native-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "";
+  icon.appendChild(createProviderIcon(row.id));
+
+  const textSource = findNativeTextTemplate(source, iconSource);
+  const text = textSource ? cloneTemplateShell(textSource, "span") : document.createElement("span");
+  appendClass(text, "codexpp-thread-summary-profiles__native-text");
+  text.textContent = profileOneLineText(row);
+  text.title = profileFullText(row);
+  node.textContent = "";
+  node.append(icon, text);
+  return node;
+}
+
+function findNativeIconTemplate(row) {
+  return Array.from(row?.children || []).find((node) => isElement(node) && isIconSlotLike(node)) || null;
+}
+
+function findNativeTextTemplate(row, iconSource = null) {
+  return Array.from(row?.children || []).find((node) => {
+    if (!isElement(node) || node === iconSource) return false;
+    return Boolean(normalizeVisibleText(node.textContent));
+  }) || null;
+}
+
+function isIconSlotLike(node) {
+  if (!isElement(node)) return false;
+  const tagName = String(node.tagName || "").toLowerCase();
+  if (tagName === "svg") return true;
+  const className = String(node.className || "").toLowerCase();
+  const text = normalizeVisibleText(node.textContent);
+  if (className.includes("icon")) return true;
+  if (node.getAttribute?.("aria-hidden") === "true" && text.length <= 2) return true;
+  return !text && Array.from(node.children || []).some((child) => String(child.tagName || "").toLowerCase() === "svg");
+}
+
+function profileOneLineText(row) {
+  return [row.label, row.value].filter(Boolean).join(" ");
+}
+
+function profileFullText(row) {
+  return [profileOneLineText(row), row.detail, row.status].filter(Boolean).join(" - ");
+}
+
+function createProviderIcon(id) {
+  const kind = ROW_ORDER.includes(id) ? id : "chrome";
+  const svg = createSvgElement("svg", {
+    viewBox: "0 0 24 24",
+    width: "16",
+    height: "16",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "2",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+    class: `codexpp-thread-summary-profiles__provider-icon icon-${kind}`,
+  });
+  if (kind === "chrome") {
+    appendSvgElement(svg, "circle", { cx: "12", cy: "12", r: "10" });
+    appendSvgElement(svg, "path", { d: "M2 12h20" });
+    appendSvgElement(svg, "path", { d: "M12 2a15.3 15.3 0 0 1 0 20" });
+    appendSvgElement(svg, "path", { d: "M12 2a15.3 15.3 0 0 0 0 20" });
+    return svg;
+  }
+  if (kind === "github") {
+    appendSvgElement(svg, "line", { x1: "6", y1: "3", x2: "6", y2: "15" });
+    appendSvgElement(svg, "circle", { cx: "18", cy: "6", r: "3" });
+    appendSvgElement(svg, "circle", { cx: "6", cy: "18", r: "3" });
+    appendSvgElement(svg, "path", { d: "M18 9a9 9 0 0 1-9 9" });
+    return svg;
+  }
+  if (kind === "supabase") {
+    appendSvgElement(svg, "ellipse", { cx: "12", cy: "5", rx: "9", ry: "3" });
+    appendSvgElement(svg, "path", { d: "M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5" });
+    appendSvgElement(svg, "path", { d: "M3 12c0 1.7 4 3 9 3s9-1.3 9-3" });
+    return svg;
+  }
+  if (kind === "gmail") {
+    appendSvgElement(svg, "rect", { width: "20", height: "16", x: "2", y: "4", rx: "2" });
+    appendSvgElement(svg, "path", { d: "m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" });
+    return svg;
+  }
+  if (kind === "google-drive") {
+    appendSvgElement(svg, "path", { d: "M4 20h16" });
+    appendSvgElement(svg, "path", { d: "M7 20 12 4l5 16" });
+    appendSvgElement(svg, "path", { d: "M9.5 12h5" });
+    return svg;
+  }
+  if (kind === "modal") {
+    appendSvgElement(svg, "polyline", { points: "4 17 10 11 4 5" });
+    appendSvgElement(svg, "line", { x1: "12", y1: "19", x2: "20", y2: "19" });
+    return svg;
+  }
+  if (kind === "railway") {
+    appendSvgElement(svg, "rect", { x: "4", y: "3", width: "16", height: "16", rx: "2" });
+    appendSvgElement(svg, "path", { d: "M8 19l-2 3" });
+    appendSvgElement(svg, "path", { d: "M16 19l2 3" });
+    appendSvgElement(svg, "path", { d: "M8 7h8" });
+    appendSvgElement(svg, "path", { d: "M8 12h8" });
+    return svg;
+  }
+  appendSvgElement(svg, "circle", { cx: "12", cy: "12", r: "3" });
+  appendSvgElement(svg, "path", { d: "M12 2v4" });
+  appendSvgElement(svg, "path", { d: "M12 18v4" });
+  appendSvgElement(svg, "path", { d: "m4.93 4.93 2.83 2.83" });
+  appendSvgElement(svg, "path", { d: "m16.24 16.24 2.83 2.83" });
+  appendSvgElement(svg, "path", { d: "M2 12h4" });
+  appendSvgElement(svg, "path", { d: "M18 12h4" });
+  return svg;
+}
+
+function createSvgElement(tagName, attrs = {}, text = "") {
+  const node = typeof document.createElementNS === "function"
+    ? document.createElementNS("http://www.w3.org/2000/svg", tagName)
+    : document.createElement(tagName);
+  for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+  if (text) node.textContent = text;
+  return node;
+}
+
+function appendSvgElement(parent, tagName, attrs = {}, text = "") {
+  const node = createSvgElement(tagName, attrs, text);
+  parent.appendChild(node);
+  return node;
+}
+
 function handleRendererAction(api, action) {
   const safe = sanitizeAction(action);
   if (!safe) return;
@@ -517,24 +1118,8 @@ function sanitizeAction(action) {
 }
 
 function readChromeStorage(options = {}) {
-  const projects = readStorageFile(PROJECTS_TWEAK_ID, options);
-  const legacy = readStorageFile(CHROME_TWEAK_ID, options);
-  const assignments = isPlainObject(projects[CHROME_ASSIGNMENTS_KEY])
-    ? { ...projects[CHROME_ASSIGNMENTS_KEY] }
-    : {};
-  const cleared = isPlainObject(projects[CHROME_CLEARED_ASSIGNMENTS_KEY])
-    ? projects[CHROME_CLEARED_ASSIGNMENTS_KEY]
-    : {};
-  const legacyAssignments = isPlainObject(legacy.assignments) ? legacy.assignments : {};
-  for (const [projectPath, assignment] of Object.entries(legacyAssignments)) {
-    if (Object.prototype.hasOwnProperty.call(assignments, projectPath)) continue;
-    if (Object.prototype.hasOwnProperty.call(cleared, projectPath)) continue;
-    assignments[projectPath] = assignment;
-  }
-  return {
-    ...projects,
-    assignments,
-  };
+  const value = readStorageFile(CHROME_TWEAK_ID, options);
+  return { ...value, assignments: isPlainObject(value.assignments) ? value.assignments : {} };
 }
 
 function readProjectsStorage(options = {}) {
@@ -543,6 +1128,7 @@ function readProjectsStorage(options = {}) {
     ...value,
     googleWorkspaceAssignments: isPlainObject(value.googleWorkspaceAssignments) ? value.googleWorkspaceAssignments : {},
     modalWorkspaceAssignments: isPlainObject(value.modalWorkspaceAssignments) ? value.modalWorkspaceAssignments : {},
+    decodoAssignments: isPlainObject(value.decodoAssignments) ? value.decodoAssignments : {},
   };
 }
 
@@ -668,14 +1254,13 @@ function parseSupabaseConfigToml(content) {
   return { projectRef, features };
 }
 
-function parseEnvAssignments(content) {
-  const values = {};
-  for (const line of String(content || "").split(/\r?\n/)) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)\s*$/.exec(line);
-    if (!match) continue;
-    values[match[1]] = match[2].trim().replace(/^['"]|['"]$/g, "");
+function parseJsonObject(content) {
+  try {
+    const parsed = JSON.parse(String(content || ""));
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
-  return values;
 }
 
 function activeModalWorkspaceContext(projectPathInput, options = {}) {
@@ -709,6 +1294,41 @@ function activeModalWorkspaceContext(projectPathInput, options = {}) {
     }
   }
   return { profile: null, workspace: null, source: null, error: lastError || "Modal CLI profile unavailable." };
+}
+
+function activeModalWorkspaceContextCached(projectPathInput, options = {}) {
+  const path = options.path || require("node:path");
+  const projectPath = normalizeProjectPath(projectPathInput, { path, home: options.home, allowEmpty: true });
+  const now = currentTimeMs(options);
+  if (options.skipModalCli) {
+    return { ...activeModalWorkspaceContext(projectPath, options), checkedAt: now, ageMs: 0, cached: false };
+  }
+  const cache = options.modalCliCache === false ? null : (options.modalCliCache || modalCliCache);
+  const ttlMs = cacheTtlMs(options.modalCliCacheTtlMs, MODAL_CLI_CACHE_TTL_MS);
+  const key = projectPath || "__unknown__";
+  if (cache && ttlMs > 0 && !options.refreshModalCli) {
+    const cached = cache.get(key);
+    if (cached && now - cached.checkedAt <= ttlMs) {
+      return { ...cached.context, checkedAt: cached.checkedAt, ageMs: Math.max(0, now - cached.checkedAt), cached: true };
+    }
+  }
+  const context = activeModalWorkspaceContext(projectPath, options);
+  if (cache && ttlMs > 0) cache.set(key, { checkedAt: now, context: { ...context } });
+  return { ...context, checkedAt: now, ageMs: 0, cached: false };
+}
+
+function modalCliCheckedSuffix(cliContext) {
+  if (!cliContext || cliContext.checkedAt == null || cliContext.error === "Modal CLI skipped.") return "";
+  return ` - checked ${formatAge(cliContext.ageMs || 0)} ago`;
+}
+
+function formatAge(ageMs) {
+  const seconds = Math.max(0, Math.floor(Number(ageMs || 0) / 1000));
+  if (seconds < 2) return "just now";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
 }
 
 function modalPythonCommandCandidates(projectPath, options = {}) {
@@ -825,12 +1445,29 @@ function inferSingleConfiguredProjectPath(options = {}) {
   for (const group of [
     projectStorage.googleWorkspaceAssignments,
     projectStorage.modalWorkspaceAssignments,
+    projectStorage.decodoAssignments,
   ]) {
     for (const key of Object.keys(group || {})) {
       if (key) projects.add(key);
     }
   }
   return projects.size === 1 ? [...projects][0] : "";
+}
+
+function inferCurrentWorkingDirectoryProjectPath(options = {}) {
+  const path = options.path || require("node:path");
+  const raw = cleanText(options.cwd || safeProcessCwd(), 500);
+  if (!raw) return "";
+  const normalized = normalizeProjectPath(raw, { path, home: options.home, allowEmpty: true });
+  return resolveStoredProjectPrefix(normalized, options);
+}
+
+function safeProcessCwd() {
+  try {
+    return process.cwd();
+  } catch {
+    return "";
+  }
 }
 
 function normalizeProjectPath(input, options = {}) {
@@ -915,11 +1552,29 @@ function installStyles() {
   const style = document.createElement("style");
   style.id = "codexpp-thread-summary-profiles-style";
   style.textContent = `
-    [${SECTION_ATTR}="true"] { box-sizing: border-box; width: 100%; max-width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 14px 28px 16px; border-top: 1px solid var(--border-light, rgba(127,127,127,.18)); }
-    .codexpp-thread-summary-profiles__title { font-size: 12px; line-height: 16px; font-weight: 650; color: var(--text-primary, currentColor); padding: 0; }
-    .codexpp-thread-summary-profiles__row { box-sizing: border-box; width: 100%; min-width: 0; min-height: 30px; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; border: 0; background: transparent; color: inherit; text-align: left; text-decoration: none; padding: 3px 0; border-radius: 6px; font: inherit; }
+    [${SECTION_ATTR}="true"] { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; flex: 0 0 100%; grid-column: 1 / -1; }
+    [${SECTION_ATTR}="true"].codexpp-thread-summary-profiles--fallback { padding: 14px 28px 16px; border-top: 1px solid var(--border-light, rgba(127,127,127,.18)); font: inherit; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__details { width: 100%; max-width: 100%; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary { box-sizing: border-box; display: flex; min-width: 0; width: 100%; align-items: center; gap: 8px; padding: 0; list-style: none; color: var(--text-secondary, #6b7280); font: inherit; font-weight: 400; cursor: pointer; user-select: none; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary::-webkit-details-marker { display: none; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary::marker { content: ""; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary:focus-visible { outline: 2px solid var(--focus-border, rgba(37,99,235,.6)); outline-offset: 2px; border-radius: 4px; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-weight: inherit; color: inherit; padding: 0; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__chevron { width: 8px; height: 8px; flex: 0 0 auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform .16s ease; opacity: .9; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__details:not([open]) .codexpp-thread-summary-profiles__chevron { transform: rotate(-45deg); }
+    .codexpp-thread-summary-profiles__collapsed-summary { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary, #6b7280); font: inherit; opacity: .85; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__content { display: flex; flex-direction: column; gap: 6px; padding-top: 12px; }
+    .codexpp-thread-summary-profiles__row { box-sizing: border-box; width: 100%; min-width: 0; border: 0; background: transparent; color: inherit; text-align: left; text-decoration: none; font: inherit; }
+    .codexpp-thread-summary-profiles__row:not(.codexpp-thread-summary-profiles__row--native) { min-height: 30px; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; padding: 3px 0; border-radius: 6px; }
+    .codexpp-thread-summary-profiles__row--native { color: inherit; }
     button.codexpp-thread-summary-profiles__row, a.codexpp-thread-summary-profiles__row { cursor: pointer; }
     button.codexpp-thread-summary-profiles__row:hover, a.codexpp-thread-summary-profiles__row:hover, button.codexpp-thread-summary-profiles__row:focus-visible, a.codexpp-thread-summary-profiles__row:focus-visible { background: var(--background-modifier-hover, rgba(127,127,127,.12)); outline: none; }
+    .codexpp-thread-summary-profiles__native-icon { flex: 0 0 auto; color: inherit; opacity: .9; }
+    .codexpp-thread-summary-profiles__provider-icon { display: block; width: 1em; height: 1em; color: currentColor; }
+    .codexpp-thread-summary-profiles__native-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; font: inherit; line-height: inherit; }
+    .codexpp-thread-summary-profiles__static-content { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .codexpp-thread-summary-profiles__static-icon { display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1em; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; text-decoration: none; cursor: default; }
+    button.codexpp-thread-summary-profiles__static-icon, a.codexpp-thread-summary-profiles__static-icon { cursor: pointer; }
     .codexpp-thread-summary-profiles__icon { position: relative; width: 14px; height: 14px; margin-top: 2px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; opacity: .9; overflow: hidden; flex: 0 0 auto; }
     .codexpp-thread-summary-profiles__icon::before, .codexpp-thread-summary-profiles__icon::after { content: ""; position: absolute; box-sizing: border-box; }
     .codexpp-thread-summary-profiles__icon.icon-chrome { border-radius: 50%; background: conic-gradient(#e11d48 0 33%, #f59e0b 0 66%, #16a34a 0); }
@@ -931,16 +1586,24 @@ function installStyles() {
     .codexpp-thread-summary-profiles__icon.icon-gmail { border-radius: 3px; border: 2px solid #dc2626; border-top-color: #f59e0b; background: transparent; }
     .codexpp-thread-summary-profiles__icon.icon-modal { border-radius: 3px; background: currentColor; }
     .codexpp-thread-summary-profiles__icon.icon-modal::after { inset: 3px; border-left: 2px solid var(--background-primary, #fff); border-right: 2px solid var(--background-primary, #fff); }
+    .codexpp-thread-summary-profiles__icon.icon-decodo { border-radius: 50%; background: currentColor; }
+    .codexpp-thread-summary-profiles__icon.icon-decodo::after { inset: 4px; border-radius: 50%; background: var(--background-primary, #fff); }
+    .codexpp-thread-summary-profiles__icon.icon-railway { background: currentColor; clip-path: polygon(50% 0, 95% 86%, 5% 86%); }
     .codexpp-thread-summary-profiles__body { min-width: 0; display: flex; flex-direction: column; gap: 0; }
     .codexpp-thread-summary-profiles__main { min-width: 0; display: grid; grid-template-columns: minmax(58px, .42fr) minmax(0, 1fr); align-items: baseline; gap: 10px; }
     .codexpp-thread-summary-profiles__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; color: var(--text-secondary, #6b7280); }
     .codexpp-thread-summary-profiles__value { min-width: 0; max-width: 100%; justify-self: end; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; color: var(--text-primary, currentColor); }
     .codexpp-thread-summary-profiles__meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 15px; color: var(--text-secondary, #6b7280); }
+    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__body { flex: 1 1 auto; min-width: 0; }
+    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__main { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
+    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__label, .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__value { font: inherit; line-height: inherit; color: inherit; }
+    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__value { margin-left: auto; }
+    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__meta { font: inherit; line-height: inherit; color: var(--text-secondary, #6b7280); opacity: .9; }
     .codexpp-thread-summary-profiles__empty[hidden] { display: none !important; }
     .codexpp-thread-summary-profiles__row.is-warning .codexpp-thread-summary-profiles__meta { color: #b45309; }
     .codexpp-thread-summary-profiles__row.is-error .codexpp-thread-summary-profiles__meta { color: #b91c1c; }
     @media (max-width: 420px) {
-      [${SECTION_ATTR}="true"] { padding-left: 22px; padding-right: 22px; }
+      [${SECTION_ATTR}="true"].codexpp-thread-summary-profiles--fallback { padding-left: 22px; padding-right: 22px; }
       .codexpp-thread-summary-profiles__main { grid-template-columns: minmax(48px, .38fr) minmax(0, 1fr); gap: 8px; }
     }
   `;
@@ -957,6 +1620,29 @@ function fileAction(target) {
 
 function externalAction(target) {
   return { type: "external", target };
+}
+
+function currentTimeMs(options = {}) {
+  return Number.isFinite(options.now) ? Number(options.now) : Date.now();
+}
+
+function cacheTtlMs(value, fallback) {
+  if (value == null) return fallback;
+  const ttl = Number(value);
+  return Number.isFinite(ttl) ? Math.max(0, ttl) : fallback;
+}
+
+function cloneSummary(summary) {
+  return {
+    projectPath: summary?.projectPath || "",
+    projectName: summary?.projectName || "",
+    rows: Array.isArray(summary?.rows) ? summary.rows.map((row) => ({ ...row, action: row.action ? { ...row.action } : null })) : [],
+  };
+}
+
+function clearThreadProfileCaches() {
+  summaryCache = new Map();
+  modalCliCache = new Map();
 }
 
 function safeExternalUrl(value) {
@@ -976,7 +1662,11 @@ function looksSecret(value) {
 function isAllowedProfileFileTarget(target) {
   if (!target || looksSecret(target)) return false;
   const normalized = String(target).replace(/\\/g, "/");
-  return normalized === ".codex/config.toml" || normalized.endsWith("/.codex/config.toml");
+  return normalized === ".codex/config.toml" ||
+    normalized.endsWith("/.codex/config.toml") ||
+    normalized.endsWith("/.railway/project.json") ||
+    normalized.endsWith("/.railway/environment.json") ||
+    normalized.endsWith("/railway.json");
 }
 
 function freshness(prefix, updatedAt) {
@@ -994,6 +1684,20 @@ function cleanText(value, limit) {
   return text.length > limit ? `${text.slice(0, Math.max(0, limit - 1))}...` : text;
 }
 
+function readProfilesOpenState(storage, fallback = true) {
+  try {
+    return storage?.get?.(OPEN_STATE_KEY, fallback) !== false;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeProfilesOpenState(storage, open) {
+  try {
+    storage?.set?.(OPEN_STATE_KEY, !!open);
+  } catch {}
+}
+
 function normalizeVisibleText(value) {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -1004,6 +1708,32 @@ function isPlainObject(value) {
 
 function isElement(node) {
   return node && typeof node === "object" && node.nodeType === 1;
+}
+
+function isEditableTree(node) {
+  if (!isElement(node)) return false;
+  for (let current = node; isElement(current); current = current.parentElement) {
+    if (isEditableSurface(current)) return true;
+  }
+  return hasEditableDescendant(node);
+}
+
+function hasEditableDescendant(node) {
+  const children = Array.from(node?.children || []);
+  for (const child of children) {
+    if (isEditableSurface(child) || hasEditableDescendant(child)) return true;
+  }
+  return false;
+}
+
+function isEditableSurface(node) {
+  if (!isElement(node)) return false;
+  const tagName = String(node.tagName || "").toLowerCase();
+  if (["input", "textarea", "select"].includes(tagName)) return true;
+  const contentEditable = String(node.getAttribute?.("contenteditable") || "").trim().toLowerCase();
+  if (contentEditable && contentEditable !== "false") return true;
+  const role = String(node.getAttribute?.("role") || "").trim().toLowerCase();
+  return ["textbox", "combobox", "searchbox"].includes(role);
 }
 
 function escapeRegExp(value) {

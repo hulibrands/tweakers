@@ -10,7 +10,12 @@ import vm from "node:vm";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, "..", "index.js"), "utf8");
 
-test("settings-search mounts once, filters settings nav, clears, and cleans up", () => {
+// Dormant: settings-search is delisted from FEATURE_DEFS + DEFAULT_FEATURE_FLAGS
+// (native Codex now provides its own settings search), so start() no longer
+// activates it and these tests can't mount the field through the flag path.
+// The handler is retained; to revive, re-add the id to both registries and
+// remove these skip flags. See feature-matrix RETIRED_HANDLER_IDS.
+test("settings-search mounts once, filters settings nav, clears, and cleans up", { skip: "settings-search delisted; native Codex provides it" }, () => {
   const fixture = createSettingsSearchFixture();
 
   runTweak(fixture);
@@ -46,7 +51,8 @@ test("settings-search mounts once, filters settings nav, clears, and cleans up",
   assert.equal(fixture.document.querySelectorAll("input[data-codexpp-settings-search]").length, 0);
 });
 
-test("settings-search mounts after Settings appears and does not duplicate on later mutations", () => {
+// Dormant: see note on the first settings-search test above.
+test("settings-search mounts after Settings appears and does not duplicate on later mutations", { skip: "settings-search delisted; native Codex provides it" }, () => {
   const fixture = createFixture({ enabledFeature: "settings-search" });
 
   runTweak(fixture);
