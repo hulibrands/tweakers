@@ -23,6 +23,7 @@
   ],
   "scope": "both",
   "main": "index.js",
+  "mainStartupTimeoutMs": 15000,
   "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/ui-improvements",
   "permissions": [
     "ipc",
