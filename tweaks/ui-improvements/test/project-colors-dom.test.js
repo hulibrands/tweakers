@@ -68,6 +68,28 @@ test("DOM fixture marks sidebar project rows and applies bridge color changes", 
   assert.equal(fixture.childButton.style.getPropertyValue("--codexpp-project-child-light"), "15%");
 });
 
+test("project background marking preserves sidebar scroll position", () => {
+  const fixture = createProjectSidebarFixture();
+  fixture.list.scrollTop = 64;
+  fixture.list.scrollHeight = 1000;
+  fixture.list.clientHeight = 200;
+  fixture.list._jumpScrollOnProjectMark = true;
+
+  vm.runInNewContext(source, fixture.context, {
+    filename: join(__dirname, "..", "index.js"),
+  });
+
+  fixture.context.module.exports.start(fixture.api);
+  fixture.flushTimers();
+
+  assert.equal(fixture.list.scrollTop, 64);
+
+  fixture.context.window.__codexppUiImprovements.setProjectColor("Alpha", "blue");
+  fixture.flushTimers();
+
+  assert.equal(fixture.list.scrollTop, 64);
+});
+
 function createProjectSidebarFixture() {
   const timers = [];
   const storage = new Map([
@@ -275,6 +297,12 @@ class FakeElement {
     this.isConnected = false;
     this._textContent = "";
     this._rect = { left: 0, top: 0, width: 1, height: 1, right: 1, bottom: 1 };
+    this.clientHeight = 1;
+    this.clientWidth = 1;
+    this.scrollHeight = 1;
+    this.scrollLeft = 0;
+    this.scrollTop = 0;
+    this.scrollWidth = 1;
   }
 
   set textContent(value) {
@@ -340,6 +368,13 @@ class FakeElement {
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
     if (name === "class") this.className = String(value);
+    if (
+      this._jumpScrollOnProjectMark &&
+      name === "data-codexpp-sidebar-project-backgrounds" &&
+      value === "project-list"
+    ) {
+      this.scrollTop = this.scrollHeight - this.clientHeight;
+    }
   }
 
   getAttribute(name) {
@@ -436,6 +471,7 @@ function createEventTarget(base) {
 function matchesSelector(element, selector) {
   if (!selector) return false;
   if (selector.includes(":")) return false;
+  if (selector === "*") return true;
   const tag = selector.match(/^[a-zA-Z][\w-]*/)?.[0];
   if (tag && element.tagName.toLowerCase() !== tag.toLowerCase()) return false;
 

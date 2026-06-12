@@ -4,6 +4,7 @@ const CHROME_TWEAK_ID = "co.thomashulihan.project-chrome-profile";
 const IPC_GET_SUMMARY = "getThreadProfileSummary";
 const IPC_OPEN_ACTION = "openThreadProfileAction";
 const SECTION_ATTR = "data-codexpp-thread-summary-profiles";
+const SECTION_SIGNATURE_ATTR = "data-codexpp-thread-summary-profiles-signature";
 const OPEN_STATE_KEY = "profiles-section:open";
 const ROW_ORDER = Object.freeze(["chrome", "supabase", "github", "google-drive", "gmail", "modal", "decodo", "railway"]);
 const SUMMARY_CACHE_TTL_MS = 5000;
@@ -48,6 +49,8 @@ module.exports = {
     extractProjectPathFromVisibleText,
     injectProfilesSection,
     findThreadSummaryPanels,
+    profileSectionSignature,
+    shouldIgnoreProfileMutations,
     createProfilesSection,
     clearThreadProfileCaches,
   },
@@ -94,7 +97,10 @@ function startRenderer(api, cleanup) {
   };
 
   schedule();
-  const observer = new MutationObserver(schedule);
+  const observer = new MutationObserver((mutations) => {
+    if (shouldIgnoreProfileMutations(mutations)) return;
+    schedule();
+  });
   observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
   cleanup.push(() => {
     observer.disconnect();
@@ -387,17 +393,68 @@ async function injectProfilesSection(rootDocument, api) {
       panel.querySelector(`[${SECTION_ATTR}="true"]`)?.remove();
       continue;
     }
+    const signature = profileSectionSignature(summary, rows, template);
+    const existing = panel.querySelector(`[${SECTION_ATTR}="true"]`);
+    if (existing?.getAttribute(SECTION_SIGNATURE_ATTR) === signature) {
+      count += 1;
+      continue;
+    }
     const next = createProfilesSection(summary, {
       template,
       storage: api.storage,
       onAction: (action) => handleRendererAction(api, action),
     });
-    const existing = panel.querySelector(`[${SECTION_ATTR}="true"]`);
+    next.setAttribute(SECTION_SIGNATURE_ATTR, signature);
     if (existing) existing.remove();
     insertProfilesSection(panel, next, template);
     count += 1;
   }
   return count;
+}
+
+function profileSectionSignature(summary = {}, rows = [], template = null) {
+  const templateShape = template
+    ? {
+        mode: template.mode || "native",
+        heading: template.heading || "",
+        hasTrigger: Boolean(template.trigger),
+        hasContent: Boolean(template.content),
+        hasRow: Boolean(template.row),
+      }
+    : { mode: "fallback", heading: "", hasTrigger: false, hasContent: false, hasRow: false };
+  return JSON.stringify({
+    projectPath: cleanText(summary.projectPath || "", 240),
+    projectName: cleanText(summary.projectName || "", 120),
+    template: templateShape,
+    rows: rows.map((row) => ({
+      id: row.id,
+      label: row.label,
+      value: row.value,
+      detail: row.detail,
+      status: row.status,
+      freshness: row.freshness,
+      href: row.href,
+      state: row.state,
+      action: row.action,
+    })),
+  });
+}
+
+function shouldIgnoreProfileMutations(mutations = []) {
+  const list = Array.from(mutations || []);
+  return list.length > 0 && list.every((mutation) => {
+    if (isProfileSectionOwnedNode(mutation.target)) return true;
+    const changed = [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])];
+    return changed.length > 0 && changed.every(isProfileSectionOwnedNode);
+  });
+}
+
+function isProfileSectionOwnedNode(node) {
+  if (!isElement(node)) return false;
+  for (let current = node; isElement(current); current = current.parentElement) {
+    if (current.getAttribute?.(SECTION_ATTR) === "true" || current.hasAttribute?.(SECTION_ATTR)) return true;
+  }
+  return false;
 }
 
 function pruneOrphanProfilesSections(rootDocument, panels) {

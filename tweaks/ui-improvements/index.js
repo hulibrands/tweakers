@@ -3074,7 +3074,7 @@ const FEATURES = {
     };
 
     const nativeMenuItems = (root) =>
-      Array.from(root.querySelectorAll('[role="menuitem"], [data-radix-collection-item], button, div'))
+      Array.from(root.querySelectorAll('[role="menuitem"], [data-radix-collection-item], button'))
         .filter((item) => item instanceof HTMLElement && isVisibleElement(item));
 
     const onClick = (event) => {
@@ -3192,7 +3192,7 @@ const FEATURES = {
     const openMenuRoots = () => {
       const roots = Array.from(document.querySelectorAll('[role="menu"][data-state="open"], [role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]'))
         .filter((node) => node instanceof HTMLElement && isVisibleElement(node));
-      for (const item of Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [data-radix-collection-item], div'))) {
+      for (const item of Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [data-radix-collection-item]'))) {
         if (!(item instanceof HTMLElement) || !/open in mini window/i.test(menuText(item))) continue;
         const root = closestNativeMenu(item);
         if (root && !roots.includes(root)) roots.push(root);
@@ -3355,6 +3355,7 @@ const FEATURES = {
     let disposed = false;
     let refreshInFlight = false;
     let lastRefreshAt = 0;
+    let lastRenderedSignature = "";
 
     document.getElementById(STYLE_ID)?.remove();
     const style = document.createElement("style");
@@ -3786,13 +3787,47 @@ const FEATURES = {
       });
     };
 
+    const labelGeometrySignature = (row, host, title) => {
+      const rowRect = row?.getBoundingClientRect?.();
+      const titleRect = title?.getBoundingClientRect?.();
+      const hostRect = host?.getBoundingClientRect?.();
+      return [
+        Math.round(rowRect?.width || 0),
+        Math.round(hostRect?.left || 0),
+        Math.round(hostRect?.right || 0),
+        Math.round(titleRect?.left || 0),
+        Math.round(titleRect?.right || 0),
+      ].join(":");
+    };
+
+    const pinnedChatProjectLabelsSignature = (entries, showAllLocalChats, showDot) =>
+      [
+        showAllLocalChats ? "all-local" : "pinned-only",
+        showDot ? "dot" : "plain",
+        ...entries.map(({ id, pinned, row, host, title, info }) =>
+          [
+            id,
+            pinned ? "pinned" : "unpinned",
+            info.label,
+            info.color,
+            labelGeometrySignature(row, host, title),
+          ].join("\t"),
+        ),
+      ].join("\n");
+
     const renderLabels = () => {
       const rows = threadRows();
       const showAllLocalChats = isChronologicalList();
+      const showDot = readFlag(api, "sidebar-project-backgrounds", true) && !showAllLocalChats;
+      const entries = rows.map((row) => ({
+        ...row,
+        info: projectInfoFor(labels.get(row.id)),
+      }));
+      const signature = pinnedChatProjectLabelsSignature(entries, showAllLocalChats, showDot);
+      if (signature === lastRenderedSignature) return;
+      lastRenderedSignature = signature;
       removeStaleLabels(rows);
-      for (const { row, host, title, id, pinned } of rows) {
-        const record = labels.get(id);
-        const info = projectInfoFor(record);
+      for (const { row, host, title, pinned, info } of entries) {
         const label = info.label;
         const target = host instanceof HTMLElement ? host : row;
         const existing = target.querySelector(`[${ATTR}="label"]`);
@@ -4911,7 +4946,7 @@ const FEATURES = {
     const openMenuRoots = () => {
       const roots = Array.from(document.querySelectorAll('[role="menu"][data-state="open"], [role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]'))
         .filter((node) => node instanceof HTMLElement && visible(node));
-      for (const item of Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [data-radix-collection-item], div'))) {
+      for (const item of Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [data-radix-collection-item]'))) {
         if (!(item instanceof HTMLElement) || !isKnownNativeMenuText(menuText(item))) continue;
         const root = closestNativeMenu(item);
         if (root && !roots.includes(root)) roots.push(root);
@@ -4920,7 +4955,7 @@ const FEATURES = {
     };
 
     const nativeMenuItems = (root) =>
-      Array.from(root.querySelectorAll('[role="menuitem"], [data-radix-collection-item], button, div'))
+      Array.from(root.querySelectorAll('[role="menuitem"], [data-radix-collection-item], button'))
         .filter((item) => item instanceof HTMLElement && visible(item));
 
     const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -5244,31 +5279,69 @@ const FEATURES = {
         return;
       }
 
-      sidebar.querySelectorAll("div[role='listitem'][aria-label]").forEach((row) => {
-        if (isExcludedProjectRow(row)) clearRowMarks(row);
-      });
-
-      let rows = candidateRows(sidebar);
-      rows = rows.filter((node, index) => rows.indexOf(node) === index);
-      const seenLabels = new Set();
-      rows = rows.filter((node) => {
-        const label = labelFor(node);
-        if (!label || seenLabels.has(label)) return false;
-        seenLabels.add(label);
-        return true;
-      });
-      if (!rows.length) {
-        return;
-      }
-
-      reconcileMarkedRows(rows);
-      markRows(rows);
-      if (apply._lastCount !== rows.length) {
-        apply._lastCount = rows.length;
-        api.log.info("sidebar project backgrounds marked rows", {
-          count: rows.length,
-          labels: rows.slice(0, 8).map(labelFor),
+      preserveSidebarScroll(sidebar, () => {
+        sidebar.querySelectorAll("div[role='listitem'][aria-label]").forEach((row) => {
+          if (isExcludedProjectRow(row)) clearRowMarks(row);
         });
+
+        let rows = candidateRows(sidebar);
+        rows = rows.filter((node, index) => rows.indexOf(node) === index);
+        const seenLabels = new Set();
+        rows = rows.filter((node) => {
+          const label = labelFor(node);
+          if (!label || seenLabels.has(label)) return false;
+          seenLabels.add(label);
+          return true;
+        });
+        if (!rows.length) {
+          return;
+        }
+
+        reconcileMarkedRows(rows);
+        markRows(rows);
+        if (apply._lastCount !== rows.length) {
+          apply._lastCount = rows.length;
+          api.log.info("sidebar project backgrounds marked rows", {
+            count: rows.length,
+            labels: rows.slice(0, 8).map(labelFor),
+          });
+        }
+      });
+    };
+
+    const preserveSidebarScroll = (sidebar, mutate) => {
+      const snapshots = sidebarScrollSnapshots(sidebar);
+      try {
+        mutate();
+      } finally {
+        restoreSidebarScroll(snapshots);
+        if (typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(() => restoreSidebarScroll(snapshots));
+        }
+      }
+    };
+
+    const sidebarScrollSnapshots = (sidebar) => {
+      const nodes = [sidebar, ...Array.from(sidebar.querySelectorAll("*"))];
+      return nodes
+        .filter((node) => (
+          node instanceof HTMLElement &&
+          typeof node.scrollTop === "number" &&
+          typeof node.scrollLeft === "number" &&
+          (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1)
+        ))
+        .map((node) => ({
+          node,
+          top: node.scrollTop,
+          left: node.scrollLeft,
+        }));
+    };
+
+    const restoreSidebarScroll = (snapshots) => {
+      for (const snapshot of snapshots) {
+        if (!(snapshot.node instanceof HTMLElement) || !snapshot.node.isConnected) continue;
+        if (snapshot.node.scrollTop !== snapshot.top) snapshot.node.scrollTop = snapshot.top;
+        if (snapshot.node.scrollLeft !== snapshot.left) snapshot.node.scrollLeft = snapshot.left;
       }
     };
 

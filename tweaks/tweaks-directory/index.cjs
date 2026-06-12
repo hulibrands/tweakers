@@ -68,6 +68,8 @@ function sortOptionsForMode(mode) {
 const NATIVE_DIRECTORY_MODES = ["plugins", "skills"];
 const NATIVE_DIRECTORY_CONTROLS_ENABLED = false;
 const NATIVE_DIRECTORY_META_CACHE_TTL_MS = 2000;
+const OBSERVER_WORK_DELAY_MS = 120;
+const NATIVE_OBSERVER_REFRESH_MS = 10_000;
 
 const DOM_SCAN_LIMIT = 650;
 const DEBUG_NODE_SAMPLE_LIMIT = 8;
@@ -148,6 +150,8 @@ module.exports.__test = {
   groupNativeSkillRowsByPlugin,
   createNativeDirectoryMetaCache,
   pluginStatusesSignature,
+  nativeObserverWorkSignature,
+  shouldRefreshNativeObserverData,
 };
 
 function startMain(api) {
@@ -809,6 +813,9 @@ function startRenderer(api) {
     },
     nativeDirectoryMarketplaceNormalized: Object.create(null),
     observerTimer: null,
+    nativeObserverSignature: "",
+    nativeObserverDataLoadAt: 0,
+    nativeObserverDataLoadQueued: false,
     loadToken: 0,
     settingsPageHandle: null,
   };
@@ -1320,8 +1327,7 @@ function scheduleObserverWork(state) {
     mountWhenReady(state);
     syncNativePluginFilesSection(state, false);
     syncNativePluginIncludesIcons(state);
-    void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
-    void loadNativeDirectoryMeta(state).then(() => syncNativeDirectoryControls(state));
+    refreshNativeObserverData(state);
     // If the directory subtree was torn down (user navigated away via
     // sidebar / hotkey / pushState), our captured `state.root` becomes
     // disconnected. Restore any nodes we hid before React recycles them
@@ -1335,7 +1341,7 @@ function scheduleObserverWork(state) {
     run();
     return;
   }
-  state.observerTimer = timerHost.setTimeout(run, 40);
+  state.observerTimer = timerHost.setTimeout(run, OBSERVER_WORK_DELAY_MS);
 }
 
 function clearObserverTimer(state) {
@@ -1343,6 +1349,45 @@ function clearObserverTimer(state) {
   const timerHost = getTimerHost();
   if (timerHost) timerHost.clearTimeout(state.observerTimer);
   state.observerTimer = null;
+}
+
+function nativeObserverWorkSignature(state) {
+  const root = state && state.root;
+  const detail = typeof document !== "undefined" ? findNativePluginDetailSurface() : null;
+  let surface = "none";
+  if (detail) surface = `detail:${detail.key || detail.title || detail.candidate || ""}`;
+  else if (root && root.isConnected && isPluginsDirectorySurface(root)) surface = "directory";
+  const path = typeof location !== "undefined" ? `${location.pathname || ""}${location.search || ""}` : "";
+  return [
+    path,
+    surface,
+    state && state.active ? "active" : "idle",
+    state && state.detailRowKey ? state.detailRowKey : "",
+    root && root.isConnected ? "connected" : "detached",
+    nativePatchesSafeMode(state) ? "safe" : "patches",
+  ].join("|");
+}
+
+function shouldRefreshNativeObserverData(state, now = Date.now(), signature = nativeObserverWorkSignature(state)) {
+  if (!state || nativePatchesSafeMode(state)) return false;
+  if (state.nativeObserverDataLoadQueued) return false;
+  if (state.nativeObserverSignature !== signature) return true;
+  return now - (state.nativeObserverDataLoadAt || 0) >= NATIVE_OBSERVER_REFRESH_MS;
+}
+
+function refreshNativeObserverData(state) {
+  const signature = nativeObserverWorkSignature(state);
+  const now = Date.now();
+  if (!shouldRefreshNativeObserverData(state, now, signature)) return;
+  state.nativeObserverSignature = signature;
+  state.nativeObserverDataLoadAt = now;
+  state.nativeObserverDataLoadQueued = true;
+  Promise.all([
+    loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state)),
+    loadNativeDirectoryMeta(state).then(() => syncNativeDirectoryControls(state)),
+  ]).finally(() => {
+    state.nativeObserverDataLoadQueued = false;
+  });
 }
 
 async function loadPluginStatuses(state, attempt = 0) {
@@ -4360,6 +4405,9 @@ function renderTweakDetailPage(state, panel, row) {
   if (manifest.author) infoCard.appendChild(detailRow("Developer", authorText(manifest.author)));
   if (manifest.tags && manifest.tags.length) infoCard.appendChild(detailRow("Tags", manifest.tags.join(", ")));
   if (manifest.scope) infoCard.appendChild(detailRow("Scope", manifest.scope));
+  if (typeof manifest.mainStartupTimeoutMs === "number") {
+    infoCard.appendChild(detailRow("Main startup timeout", `${manifest.mainStartupTimeoutMs} ms`));
+  }
   info.appendChild(infoCard);
   main.appendChild(info);
 

@@ -26,6 +26,28 @@ test("renderer inserts Profiles once and replaces stale content", async () => {
   }
 });
 
+test("renderer keeps the existing Profiles node when content is unchanged", async () => {
+  const restore = installFakeDom();
+  try {
+    const panel = document.createElement("aside");
+    panel.append(section("Environment", "cwd /repo"), section("Sources", "files"), section("Progress", "done"));
+    document.body.appendChild(panel);
+
+    const api = fakeApi("Work");
+    assert.equal(await tweak.injectProfilesSection(document, api), 1);
+    const first = panel.querySelector(`[${tweak.SECTION_ATTR}="true"]`);
+
+    assert.equal(await tweak.injectProfilesSection(document, api), 1);
+    assert.equal(panel.querySelector(`[${tweak.SECTION_ATTR}="true"]`), first);
+
+    api.value = "Personal";
+    assert.equal(await tweak.injectProfilesSection(document, api), 1);
+    assert.notEqual(panel.querySelector(`[${tweak.SECTION_ATTR}="true"]`), first);
+  } finally {
+    restore();
+  }
+});
+
 test("renderer removes stale Profiles sections outside the active summary card", async () => {
   const restore = installFakeDom();
   try {

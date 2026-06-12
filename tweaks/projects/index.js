@@ -569,15 +569,9 @@ function loadAgentsWriter() {
 
 function loadChromeRouting() {
   if (typeof require !== "function") return null;
-  for (const candidate of [
-    "./chrome-routing",
-    "../co.thomashulihan.project-chrome-profile/chrome-routing",
-    "../thomashulihan-project-chrome-profile/chrome-routing",
-  ]) {
-    try {
-      return require(candidate);
-    } catch {}
-  }
+  try {
+    return require("./chrome-routing");
+  } catch {}
   return null;
 }
 
@@ -4452,7 +4446,8 @@ function installSidebarReorderStyle() {
 }
 
 function scanSidebarProjectRowsFromDom() {
-  const headers = Array.from(document.querySelectorAll("div,span,p"))
+  const sidebar = sidebarHeadingSearchRoot();
+  const headers = Array.from(sidebar.querySelectorAll("div,span,p"))
     .filter((node) => compactText(node.textContent) === "Projects");
   for (const header of headers) {
     const rows = sidebarProjectNodesForHeader(header)
@@ -4553,7 +4548,8 @@ function isSidebarProjectBoundaryNode(node) {
 }
 
 function scanSidebarProjectsFromDom() {
-  const headers = Array.from(document.querySelectorAll("div,span,p"))
+  const sidebar = sidebarHeadingSearchRoot();
+  const headers = Array.from(sidebar.querySelectorAll("div,span,p"))
     .filter((node) => compactText(node.textContent) === "Projects");
   for (const header of headers) {
     const projects = [];
@@ -4572,7 +4568,8 @@ function scanSidebarProjectsFromDom() {
 
 function sidebarProjectNodesForHeader(header) {
   const headerRect = header.getBoundingClientRect?.();
-  const boundary = Array.from(document.querySelectorAll("div,span,p"))
+  const sidebar = header.closest("aside") || sidebarHeadingSearchRoot();
+  const boundary = Array.from(sidebar.querySelectorAll("div,span,p"))
     .filter((node) => compactText(node.textContent) === "Chats")
     .map((node) => ({ node, rect: node.getBoundingClientRect?.() }))
     .filter(({ rect }) => rect && rect.height > 0 && rect.top >= (headerRect?.bottom ?? 0))
@@ -4580,7 +4577,6 @@ function sidebarProjectNodesForHeader(header) {
   if (!boundary?.rect) return [];
 
   if (headerRect) {
-    const sidebar = header.closest("aside") || document.body;
     const nodes = Array.from(sidebar.querySelectorAll("[data-app-action-sidebar-project-id]"))
       .map((node) => node.closest?.("div[role='listitem']") || node)
       .filter((node, index, all) => node instanceof HTMLElement && all.indexOf(node) === index)
@@ -4604,6 +4600,10 @@ function sidebarProjectNodesForHeader(header) {
     node = node.nextElementSibling;
   }
   return nodes.filter((node, index, all) => node instanceof HTMLElement && all.indexOf(node) === index);
+}
+
+function sidebarHeadingSearchRoot() {
+  return document.querySelector("aside") || document.body || document.documentElement;
 }
 
 function projectFromSidebarNode(node) {
