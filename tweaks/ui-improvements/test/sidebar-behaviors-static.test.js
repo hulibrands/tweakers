@@ -41,6 +41,12 @@ test("pinned chat project labels use main-process project lookup and live color 
   assert.match(source, /window\.addEventListener\(BRIDGE_EVENT, scheduleApply\)/);
 });
 
+test("pinned chat project label cache resets when rows are temporarily absent", () => {
+  assert.match(source, /const removeStaleLabels = \(activeRows\) => \{/);
+  assert.match(source, /if \(active\.size === 0\) lastRenderedSignature = "";/);
+  assert.match(source, /removeStaleLabels\(\[\]\);\s+return;/);
+});
+
 test("settings render is idempotent and main providers become inert on stop", () => {
   assert.match(source, /function renderSettings\(root, state\) \{\n\s+root\.replaceChildren\(\);/);
   assert.match(source, /startMainMetricsProvider\(api\)/);

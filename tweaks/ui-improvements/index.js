@@ -3766,6 +3766,7 @@ const FEATURES = {
 
     const removeStaleLabels = (activeRows) => {
       const active = new Set(activeRows.map((item) => item.row));
+      if (active.size === 0) lastRenderedSignature = "";
       document.querySelectorAll(`[${ATTR}="label"]`).forEach((node) => {
         const row = node.closest("[role='listitem']");
         if (!row || !active.has(row)) node.remove();
