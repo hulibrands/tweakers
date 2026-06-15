@@ -15,6 +15,7 @@ const CHANNELS = {
   getPluginFileTree: "get-plugin-file-tree",
   getPluginStatuses: "get-plugin-statuses",
   getDirectoryMeta: "get-directory-meta",
+  reconcilePluginDirectory: "reconcile-plugin-directory",
 };
 
 const STORE_FILTERS = [
@@ -66,7 +67,7 @@ function sortOptionsForMode(mode) {
   return TWEAKS_SORT_OPTIONS;
 }
 const NATIVE_DIRECTORY_MODES = ["plugins", "skills"];
-const NATIVE_DIRECTORY_CONTROLS_ENABLED = false;
+const NATIVE_DIRECTORY_CONTROLS_ENABLED = true;
 const NATIVE_DIRECTORY_META_CACHE_TTL_MS = 2000;
 const OBSERVER_WORK_DELAY_MS = 120;
 const NATIVE_OBSERVER_REFRESH_MS = 10_000;
@@ -131,6 +132,8 @@ module.exports.__test = {
   ensurePanelForTest: ensurePanel,
   getNativeDirectoryMeta,
   getRuntimePluginStatuses,
+  buildPluginDirectoryHealth,
+  syncNativeDirectoryInstalledAction,
   normalizeNativeDirectoryMeta,
   nativeDirectoryRecordVisible,
   compareDirectoryRecords,
@@ -225,6 +228,12 @@ function startMain(api) {
     }),
     api.ipc.handle(CHANNELS.getPluginStatuses, () => pluginStatuses()),
     api.ipc.handle(CHANNELS.getDirectoryMeta, (options) => nativeMetaCache.get(options)),
+    api.ipc.handle(CHANNELS.reconcilePluginDirectory, () => {
+      clearNativeMetaCache();
+      const statuses = pluginStatuses();
+      const meta = nativeMetaCache.get({ force: true, statuses });
+      return buildPluginDirectoryHealth(statuses, meta);
+    }),
   ];
 
   return () => cleanups.forEach((cleanup) => cleanup());
@@ -281,7 +290,7 @@ function getNativeDirectoryMeta(options = {}) {
   const path = options.path || require("node:path");
   const os = options.os || require("node:os");
   const home = options.home || os.homedir();
-  const statuses = getRuntimePluginStatuses({ fs, path, os, home });
+  const statuses = options.statuses || getRuntimePluginStatuses({ fs, path, os, home });
   const plugins = [];
   const skills = [];
   const seenPluginDirs = new Set();
@@ -315,6 +324,11 @@ function getNativeDirectoryMeta(options = {}) {
       plugins.push(plugin);
       for (const skill of pluginSkillsForDir(fs, path, real, plugin, meta)) skills.push(skill);
     }
+  }
+  for (const item of statuses.items || []) {
+    if (!item || !item.configured) continue;
+    const exists = plugins.some((plugin) => pluginMatchesConfiguredStatus(plugin, item));
+    if (!exists) plugins.push(syntheticNativePluginFromStatus(item));
   }
   const dedupedPlugins = dedupeNativeMetaItems(plugins, nativePluginDedupeKey);
   const dedupedSkills = dedupeNativeMetaItems(skills, nativeSkillDedupeKey);
@@ -381,6 +395,35 @@ function nativePluginDedupeKey(plugin) {
   return slugKey(plugin && (plugin.displayName || plugin.label || plugin.name || plugin.id));
 }
 
+function syntheticNativePluginFromStatus(status) {
+  const id = cleanText(status && (status.slug || status.id || ""));
+  const displayName = cleanText(status && (status.displayName || status.name || titleFromSlug(id)));
+  return {
+    id,
+    name: cleanText(status && (status.name || id)),
+    displayName,
+    label: displayName || id,
+    sourceId: id,
+    dir: "",
+    enabled: status && status.enabled !== false,
+    installed: true,
+    configured: true,
+    createdAtMs: 0,
+    updatedAtMs: 0,
+    lastUsedAtMs: 0,
+  };
+}
+
+function pluginMatchesConfiguredStatus(plugin, status) {
+  if (!plugin || !status) return false;
+  const source = slugKey(plugin.sourceId || plugin.id || plugin.name || plugin.displayName);
+  const slug = slugKey(status.slug || status.id || "");
+  if (source && slug && source === slug) return true;
+  const pluginKeys = [plugin.id, plugin.name, plugin.displayName, plugin.label].map(directoryKey).filter(Boolean);
+  const statusKeys = [status.id, status.slug, status.name, status.displayName].map(directoryKey).filter(Boolean);
+  return pluginKeys.some((key) => statusKeys.includes(key));
+}
+
 function nativeSkillDedupeKey(skill) {
   const plugin = slugKey(skill && (skill.pluginLabel || skill.pluginName || skill.pluginId));
   const name = slugKey(skill && (skill.displayName || skill.name || skill.slash));
@@ -410,11 +453,14 @@ function nativePluginSourceId(path, root, dir) {
 function nativePluginRoots(path, home) {
   return [
     path.join(home, ".codex", "plugins"),
+    path.join(home, ".codex", ".tmp", "plugins"),
+    path.join(home, ".codex", ".tmp", "plugins", "plugins"),
     path.join(home, ".codex", "plugins", "cache", "local-plugins"),
     path.join(home, ".codex", "plugins", "cache", "openai-curated"),
     path.join(home, ".codex", "plugins", "cache", "openai-bundled"),
     path.join(home, ".codex", "plugins", "cache", "openai-primary-runtime"),
     path.join(home, ".codex", "plugins", "cache", "openai-curated-remote"),
+    path.join(home, ".cache", "codex-runtimes", "codex-primary-runtime", "plugins", "openai-primary-runtime"),
   ];
 }
 
@@ -688,6 +734,10 @@ function pluginMetadataRoots(id, source, deps) {
     roots.push(path.join(codexRoot, id));
   } else if (source === "openai-curated") {
     roots.push(path.join(codexRoot, "cache", "openai-curated", id));
+    roots.push(path.join(codexRoot, "cache", "openai-curated-remote", id));
+  } else if (source === "openai-curated-remote") {
+    roots.push(path.join(codexRoot, "cache", "openai-curated-remote", id));
+    roots.push(path.join(codexRoot, "cache", "openai-curated", id));
   } else if (source === "openai-bundled") {
     roots.push(path.join(codexRoot, "cache", "openai-bundled", id));
   } else if (source === "openai-primary-runtime") {
@@ -717,11 +767,15 @@ function readPluginMetadata(root, deps) {
         const json = safeReadJson(fs, file);
         if (!json) continue;
         const nested = json.plugin && typeof json.plugin === "object" ? json.plugin : json;
+        const iface = nested.interface && typeof nested.interface === "object" && !Array.isArray(nested.interface)
+          ? nested.interface
+          : null;
+        const interfaceDisplayName = iface && typeof iface.displayName === "string" ? iface.displayName : "";
         return {
           id: nested.id || nested.name,
-          name: nested.title || nested.displayName || nested.name,
-          displayName: nested.displayName || nested.title || nested.name,
-          interface: nested.interface && typeof nested.interface === "object" ? nested.interface : null,
+          name: nested.title || nested.displayName || interfaceDisplayName || nested.name,
+          displayName: nested.displayName || nested.title || interfaceDisplayName || nested.name,
+          interface: iface,
         };
       }
     }
@@ -927,6 +981,7 @@ function renderTweaksDirectorySettings(root, state) {
   style.textContent = settingsCss();
   root.appendChild(style);
   root.appendChild(tweaksHealthPanel(state));
+  root.appendChild(pluginDirectoryHealthPanel(state));
   const card = document.createElement("section");
   card.className = "codexpp-td-settings-card";
   const safeModeExplanation = settingsNotice("");
@@ -1013,6 +1068,115 @@ function tweaksHealthPanel(state) {
   repair.addEventListener("click", () => repairMissingRegisteredSettingsPages(state, repair, summary));
   void loadTweaksHealth(state, summary, list, repair);
   return card;
+}
+
+function pluginDirectoryHealthPanel(state) {
+  const card = document.createElement("section");
+  card.className = "codexpp-td-settings-card codexpp-td-health-card";
+  const header = document.createElement("div");
+  header.className = "codexpp-td-health-header";
+  const text = document.createElement("span");
+  text.className = "codexpp-td-settings-text";
+  const title = document.createElement("strong");
+  title.textContent = "Plugin health";
+  const summary = document.createElement("span");
+  summary.textContent = "Checking enabled, cache-backed, and UI-added plugin state...";
+  text.append(title, summary);
+  const reconcile = document.createElement("button");
+  reconcile.type = "button";
+  reconcile.className = "codexpp-td-settings-button";
+  reconcile.textContent = "Reconcile plugins";
+  header.append(text, reconcile);
+  const list = document.createElement("div");
+  list.className = "codexpp-td-health-list";
+  list.textContent = "Loading plugin health...";
+  card.append(header, list);
+  reconcile.addEventListener("click", () => reconcilePluginDirectory(state, reconcile, summary, list));
+  void loadPluginDirectoryHealth(state, summary, list);
+  return card;
+}
+
+async function loadPluginDirectoryHealth(state, summary, list) {
+  try {
+    const [statuses, meta] = await Promise.all([
+      state.api.ipc.invoke(CHANNELS.getPluginStatuses),
+      state.api.ipc.invoke(CHANNELS.getDirectoryMeta, { force: true }),
+    ]);
+    renderPluginDirectoryHealth(summary, list, buildPluginDirectoryHealth(statuses, meta));
+  } catch (error) {
+    summary.textContent = "Plugin health could not load.";
+    summary.classList.add("is-error");
+    list.textContent = errorMessage(error);
+  }
+}
+
+async function reconcilePluginDirectory(state, button, summary, list) {
+  button.disabled = true;
+  button.textContent = "Reconciling...";
+  summary.textContent = "Refreshing config and marketplace cache state...";
+  try {
+    const health = await state.api.ipc.invoke(CHANNELS.reconcilePluginDirectory);
+    renderPluginDirectoryHealth(summary, list, health);
+    await loadPluginStatuses(state);
+    await loadNativeDirectoryMeta(state, 0, { force: true });
+    syncNativeDirectoryControls(state);
+  } catch (error) {
+    summary.textContent = `Could not reconcile plugins: ${errorMessage(error)}`;
+    summary.classList.add("is-error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Reconcile plugins";
+  }
+}
+
+function buildPluginDirectoryHealth(statuses, meta) {
+  const items = Array.isArray(statuses && statuses.items) ? statuses.items : [];
+  const plugins = Array.isArray(meta && meta.plugins) ? meta.plugins : [];
+  const enabled = items.filter((item) => item && item.enabled !== false);
+  const disabled = items.filter((item) => item && item.enabled === false);
+  const cacheBacked = enabled.filter((item) => pluginHasNativeMeta(item, plugins));
+  const missing = enabled.filter((item) => !pluginHasNativeMeta(item, plugins));
+  return {
+    status: "ok",
+    configured: items.length,
+    enabled: enabled.length,
+    disabled: disabled.length,
+    directoryPlugins: plugins.length,
+    cacheBacked: cacheBacked.length,
+    missing: missing.map((item) => ({
+      id: item.slug || item.id || item.key,
+      name: item.displayName || item.name || titleFromSlug(item.slug || item.id || item.key),
+      detail: item.key || "",
+      status: "failed",
+    })),
+  };
+}
+
+function pluginHasNativeMeta(status, plugins) {
+  return (plugins || []).some((plugin) => pluginMatchesConfiguredStatus(plugin, status) && plugin.installed !== false);
+}
+
+function renderPluginDirectoryHealth(summary, list, health) {
+  summary.classList.remove("is-error");
+  const missing = Array.isArray(health && health.missing) ? health.missing : [];
+  summary.textContent = `${health.enabled || 0} enabled, ${health.cacheBacked || 0} cache-backed, ${missing.length} missing metadata.`;
+  list.textContent = "";
+  const totals = document.createElement("div");
+  totals.className = "codexpp-td-health-group";
+  const strong = document.createElement("strong");
+  strong.textContent = "Current state";
+  const detail = document.createElement("span");
+  detail.textContent = `${health.configured || 0} configured, ${health.disabled || 0} disabled, ${health.directoryPlugins || 0} directory records.`;
+  totals.append(strong, detail);
+  list.appendChild(totals);
+  if (missing.length === 0) return;
+  const group = document.createElement("div");
+  group.className = "codexpp-td-health-group";
+  const title = document.createElement("strong");
+  title.textContent = "Enabled but missing metadata";
+  group.appendChild(title);
+  for (const row of missing.slice(0, 12)) group.appendChild(tweaksHealthRow(row));
+  list.appendChild(group);
 }
 
 async function loadTweaksHealth(state, summary, list, repair) {
@@ -1133,6 +1297,11 @@ async function repairMissingRegisteredSettingsPages(state, repair, summary) {
   repair.textContent = "Repairing...";
   summary.textContent = "Reloading installed tweaks and refreshing this window...";
   try {
+    try {
+      await state.api.ipc.invoke(CHANNELS.reconcilePluginDirectory);
+    } catch (error) {
+      state.api.log.warn(`Tweaks Directory plugin reconciliation before repair reload failed: ${errorMessage(error)}`);
+    }
     await state.api.ipc.invoke(CHANNELS.reload);
     location.reload();
   } catch (error) {
@@ -2007,6 +2176,9 @@ function removeNativeDirectoryControls() {
     delete node.dataset.codexppNativeDirectoryDisplay;
     delete node.dataset.codexppNativeDirectoryHidden;
   }
+  for (const button of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-installed-action]"))) {
+    restoreNativeInstalledActionButton(button);
+  }
   restoreNativeDirectorySearchRowLayout();
   restoreNativeDirectoryGroupLabels(document);
 }
@@ -2018,6 +2190,7 @@ function applyNativeDirectoryControls(state, pair, mode) {
   controls.query = nativeDirectorySearchValue(pair, mode);
   const rows = nativeDirectoryRows(root, pair.tabRow);
   const rowRecords = rows.map((row, index) => nativeDirectoryRowRecord(state, row, mode, index));
+  if (mode === "plugins") syncNativeDirectoryInstalledActions(rowRecords);
   const visible = rowRecords.filter((record) => nativeDirectoryRecordVisible(record, controls));
   const visibleSet = new Set(visible.map((record) => record.row));
   for (const record of rowRecords) setNativeDirectoryRowHidden(record.row, !visibleSet.has(record.row));
@@ -2032,6 +2205,69 @@ function applyNativeDirectoryControls(state, pair, mode) {
     removeNativeDirectoryGroupHeadings(root);
     applyNativeDirectoryRowOrder(visible);
   }
+}
+
+function syncNativeDirectoryInstalledActions(records) {
+  for (const record of records || []) syncNativeDirectoryInstalledAction(record);
+}
+
+function syncNativeDirectoryInstalledAction(record) {
+  const row = record && record.row;
+  if (!row || typeof row.querySelectorAll !== "function") return false;
+  const button = Array.from(row.querySelectorAll("button,[role='button']")).find(isNativeAddPluginAction);
+  if (!button) {
+    for (const existing of Array.from(row.querySelectorAll("[data-codexpp-native-plugin-installed-action]"))) {
+      restoreNativeInstalledActionButton(existing);
+    }
+    return false;
+  }
+  if (record.installed && record.enabled) {
+    markNativeInstalledActionButton(button);
+    return true;
+  }
+  restoreNativeInstalledActionButton(button);
+  return false;
+}
+
+function isNativeAddPluginAction(node) {
+  if (!node) return false;
+  if (node.dataset && node.dataset.codexppNativePluginInstalledAction === "true") return true;
+  const text = compactText(node.textContent || "");
+  const aria = compactText(typeof node.getAttribute === "function" ? node.getAttribute("aria-label") || "" : "");
+  return text === "Add plugin" || aria === "Add plugin" || text === "+";
+}
+
+function markNativeInstalledActionButton(button) {
+  if (!button || !button.dataset) return;
+  if (button.dataset.codexppNativePluginInstalledAction !== "true") {
+    button.dataset.codexppNativePluginInstalledActionText = button.textContent || "";
+    button.dataset.codexppNativePluginInstalledActionDisabled = button.disabled ? "true" : "false";
+    button.dataset.codexppNativePluginInstalledActionAria = typeof button.getAttribute === "function" ? button.getAttribute("aria-label") || "" : "";
+  }
+  button.dataset.codexppNativePluginInstalledAction = "true";
+  button.classList && button.classList.add("codexpp-native-plugin-installed-action");
+  button.textContent = "Installed";
+  button.disabled = true;
+  if (typeof button.setAttribute === "function") {
+    button.setAttribute("aria-label", "Installed");
+    button.setAttribute("title", "Enabled in Codex config");
+  }
+}
+
+function restoreNativeInstalledActionButton(button) {
+  if (!button || !button.dataset || button.dataset.codexppNativePluginInstalledAction !== "true") return;
+  button.textContent = button.dataset.codexppNativePluginInstalledActionText || "Add plugin";
+  button.disabled = button.dataset.codexppNativePluginInstalledActionDisabled === "true";
+  if (typeof button.setAttribute === "function") {
+    const aria = button.dataset.codexppNativePluginInstalledActionAria || "Add plugin";
+    button.setAttribute("aria-label", aria);
+    button.removeAttribute && button.removeAttribute("title");
+  }
+  button.classList && button.classList.remove("codexpp-native-plugin-installed-action");
+  delete button.dataset.codexppNativePluginInstalledAction;
+  delete button.dataset.codexppNativePluginInstalledActionText;
+  delete button.dataset.codexppNativePluginInstalledActionDisabled;
+  delete button.dataset.codexppNativePluginInstalledActionAria;
 }
 
 function nativeDirectoryRows(root, tabRow) {
@@ -5489,6 +5725,13 @@ function injectStyles() {
       font-weight: 550;
       letter-spacing: 0;
       box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    .codexpp-native-plugin-installed-action {
+      cursor: default !important;
+      opacity: .72;
+      border-color: var(--border, rgba(0,0,0,.18)) !important;
+      background: var(--muted, rgba(0,0,0,.04)) !important;
+      color: var(--text-secondary, rgba(0,0,0,.58)) !important;
     }
     .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files *, .codexpp-native-directory-controls, .codexpp-native-directory-controls * { box-sizing: border-box; }
     .codexpp-tweaks-directory, .codexpp-td-native-plugin-files, .codexpp-native-directory-controls {

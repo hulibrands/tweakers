@@ -45,6 +45,8 @@ const {
   groupNativeSkillRowsByPlugin,
   createNativeDirectoryMetaCache,
   pluginStatusesSignature,
+  buildPluginDirectoryHealth,
+  syncNativeDirectoryInstalledAction,
 } = require("../index.cjs").__test;
 
 // ---------------------------------------------------------------------------
@@ -831,15 +833,15 @@ test("native directory Date Used uses persisted plugin usage timestamps", () => 
   assert.equal(updated.skills[0].lastUsedAtMs, 12345);
 });
 
-test("directory state preferences persist tweaks state and omit gated native controls", () => {
+test("directory state preferences persist tweaks and native directory controls", () => {
   const normalized = normalizeDirectoryState({
     tweaks: { filter: "store", sort: "used", installedEnabledOnly: true },
     plugins: { sort: "updated", installedEnabledOnly: true },
     skills: { sort: "created", groupBy: "plugin", installedEnabledOnly: true },
   });
   assert.deepEqual(normalized.tweaks, { filter: "store", sort: "used", installedEnabledOnly: true });
-  assert.equal(Object.hasOwn(normalized, "plugins"), false);
-  assert.equal(Object.hasOwn(normalized, "skills"), false);
+  assert.deepEqual(normalized.plugins, { sort: "updated", installedEnabledOnly: true });
+  assert.deepEqual(normalized.skills, { sort: "created", groupBy: "plugin", installedEnabledOnly: true });
 });
 
 test("native directory metadata cache bounds scans and supports explicit refresh", () => {
@@ -937,6 +939,35 @@ function writeNativePluginFixture(home, id, displayName, version) {
     },
   }, null, 2));
 }
+
+test("plugin health reports enabled config entries missing cache metadata", () => {
+  const health = buildPluginDirectoryHealth({
+    items: [
+      { key: "supabase@openai-curated", id: "supabase", slug: "supabase", displayName: "Supabase", enabled: true },
+      { key: "disabled@local-plugins", id: "disabled", slug: "disabled", displayName: "Disabled", enabled: false },
+    ],
+  }, {
+    plugins: [{ id: "other", displayName: "Other", installed: true, enabled: true }],
+  });
+  assert.equal(health.configured, 2);
+  assert.equal(health.enabled, 1);
+  assert.equal(health.disabled, 1);
+  assert.equal(health.cacheBacked, 0);
+  assert.deepEqual(health.missing.map((item) => item.id), ["supabase"]);
+});
+
+test("native plugin row action rewrites Add plugin for installed enabled config plugins", () => {
+  const doc = new FakeDocument();
+  const row = doc.createElement("div");
+  const action = doc.createElement("button");
+  action.textContent = "Add plugin";
+  row.appendChild(action);
+  const changed = syncNativeDirectoryInstalledAction({ row, installed: true, enabled: true });
+  assert.equal(changed, true);
+  assert.equal(action.textContent, "Installed");
+  assert.equal(action.disabled, true);
+  assert.equal(action.dataset.codexppNativePluginInstalledAction, "true");
+});
 
 test("native directory sort orders default rows by original order", () => {
   const first = { title: "B", originalIndex: 0, meta: { updatedAtMs: 100 } };
