@@ -1,18 +1,19 @@
 {
   "id": "co.thomashulihan.titlebar-controls",
-  "name": "Titlebar Controls",
+  "name": "ShadGPT Titlebar Controls",
   "version": "0.1.0",
-  "githubRepo": "hulibrands/tweakers",
-  "description": "Align Codex titlebar controls with the native macOS window buttons.",
+  "githubRepo": "hulibrands/codex-tweaks",
+  "description": "ShadGPT-owned titlebar control alignment for Codex's native macOS window buttons.",
   "author": {
     "name": "Thomas Hulihan"
   },
-  "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/titlebar-controls",
+  "homepage": "https://github.com/hulibrands/codex-tweaks/tree/main/titlebar-controls",
   "tags": [
     "ui",
     "titlebar",
     "macos"
   ],
   "scope": "renderer",
+  "permissions": [],
   "main": "index.js"
 }

@@ -133,6 +133,7 @@ module.exports.__test = {
   getNativeDirectoryMeta,
   getRuntimePluginStatuses,
   buildPluginDirectoryHealth,
+  syncConfiguredPluginActionButtons,
   syncNativeDirectoryInstalledAction,
   normalizeNativeDirectoryMeta,
   nativeDirectoryRecordVisible,
@@ -881,7 +882,10 @@ function startRenderer(api) {
   scanForMount(state);
   syncNativePluginIncludesIcons(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
-  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => syncNativeDirectoryControls(state));
+  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => {
+    syncNativeDirectoryControls(state);
+    syncConfiguredPluginActionButtons(state);
+  });
   state.observer = new MutationObserver((mutations) => {
     if (mutations && mutations.length > 0 && mutations.every((mutation) => isOwnedPanelMutation(state, mutation))) return;
     scheduleObserverWork(state);
@@ -1477,7 +1481,10 @@ function applyNativePatchPreferences(state) {
   syncNativePluginFilesSection(state, true);
   syncNativePluginIncludesIcons(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
-  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => syncNativeDirectoryControls(state));
+  void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => {
+    syncNativeDirectoryControls(state);
+    syncConfiguredPluginActionButtons(state);
+  });
 }
 
 function shouldAutoDeactivate(state) {
@@ -1496,6 +1503,7 @@ function scheduleObserverWork(state) {
     mountWhenReady(state);
     syncNativePluginFilesSection(state, false);
     syncNativePluginIncludesIcons(state);
+    syncConfiguredPluginActionButtons(state);
     refreshNativeObserverData(state);
     // If the directory subtree was torn down (user navigated away via
     // sidebar / hotkey / pushState), our captured `state.root` becomes
@@ -1553,7 +1561,10 @@ function refreshNativeObserverData(state) {
   state.nativeObserverDataLoadQueued = true;
   Promise.all([
     loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state)),
-    loadNativeDirectoryMeta(state).then(() => syncNativeDirectoryControls(state)),
+    loadNativeDirectoryMeta(state).then(() => {
+      syncNativeDirectoryControls(state);
+      syncConfiguredPluginActionButtons(state);
+    }),
   ]).finally(() => {
     state.nativeObserverDataLoadQueued = false;
   });
@@ -2209,6 +2220,69 @@ function applyNativeDirectoryControls(state, pair, mode) {
 
 function syncNativeDirectoryInstalledActions(records) {
   for (const record of records || []) syncNativeDirectoryInstalledAction(record);
+}
+
+function syncConfiguredPluginActionButtons(state, root = document) {
+  if (!root || typeof root.querySelectorAll !== "function") return 0;
+  if (nativePatchesSafeMode(state)) {
+    for (const button of Array.from(root.querySelectorAll("[data-codexpp-native-plugin-installed-action]"))) {
+      restoreNativeInstalledActionButton(button);
+    }
+    return 0;
+  }
+  let changed = 0;
+  for (const button of Array.from(root.querySelectorAll("button,[role='button']")).filter(isNativeAddPluginAction)) {
+    const record = configuredPluginActionRecord(state, button);
+    if (record && record.installed && record.enabled) {
+      markNativeInstalledActionButton(button);
+      changed += 1;
+    } else {
+      restoreNativeInstalledActionButton(button);
+    }
+  }
+  return changed;
+}
+
+function configuredPluginActionRecord(state, button) {
+  const meta = state && state.nativeDirectoryMeta || {};
+  let node = button && button.parentElement;
+  let hops = 0;
+  while (node && node !== document.body && hops < 8) {
+    if (!isConfiguredPluginActionCardCandidate(node, button)) {
+      node = node.parentElement;
+      hops += 1;
+      continue;
+    }
+    const text = compactText(node.textContent || "");
+    const title = nativeDirectoryRowTitle(node, text);
+    const plugin = nativePluginRowMeta(meta, title, text);
+    if (plugin) {
+      return {
+        row: node,
+        title,
+        text,
+        meta: plugin,
+        installed: plugin.installed !== false,
+        enabled: plugin.enabled !== false,
+      };
+    }
+    node = node.parentElement;
+    hops += 1;
+  }
+  return null;
+}
+
+function isConfiguredPluginActionCardCandidate(node, button) {
+  if (!node || node === button || typeof node.querySelectorAll !== "function") return false;
+  if (node.dataset && (node.dataset.codexppNativeDirectoryControls || node.dataset.codexppTweaksDirectoryPanel)) return false;
+  if (typeof node.closest === "function" && node.closest("[data-codexpp-native-directory-controls],[data-codexpp-tweaks-directory-panel]")) return false;
+  if (looksLikeAppSidebar(node) || isInsideAppSidebar(node)) return false;
+  const text = compactText(node.textContent || "");
+  if (text.length < 3 || text.length > 520) return false;
+  const actionText = compactText(button.textContent || "");
+  if (text === actionText) return false;
+  if (!/\bAdd plugin\b|^\+$/.test(actionText) && !(button.dataset && button.dataset.codexppNativePluginInstalledAction === "true")) return false;
+  return hasRowVisualSignal(node) || Boolean(node.querySelector("h1,h2,h3,h4,strong"));
 }
 
 function syncNativeDirectoryInstalledAction(record) {
