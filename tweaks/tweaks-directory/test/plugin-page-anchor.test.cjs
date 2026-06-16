@@ -46,6 +46,7 @@ const {
   createNativeDirectoryMetaCache,
   pluginStatusesSignature,
   buildPluginDirectoryHealth,
+  syncConfiguredPluginActionButtons,
   syncNativeDirectoryInstalledAction,
 } = require("../index.cjs").__test;
 
@@ -967,6 +968,35 @@ test("native plugin row action rewrites Add plugin for installed enabled config 
   assert.equal(action.textContent, "Installed");
   assert.equal(action.disabled, true);
   assert.equal(action.dataset.codexppNativePluginInstalledAction, "true");
+});
+
+test("generic plugin cards rewrite Add plugin for enabled configured plugins", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const card = doc.createElement("div");
+    const title = doc.createElement("h3");
+    title.textContent = "Supabase";
+    const description = doc.createElement("p");
+    description.textContent = "Supabase skills and MCP tools for Codex";
+    const action = doc.createElement("button");
+    action.textContent = "Add plugin";
+    card.append(title, description, action);
+    doc.body.appendChild(card);
+    const state = {
+      preferences: { nativePatchesSafeMode: false },
+      nativeDirectoryMeta: normalizeNativeDirectoryMeta({
+        plugins: [{ id: "supabase", name: "Supabase", displayName: "Supabase", label: "Supabase", installed: true, enabled: true }],
+        skills: [],
+      }),
+    };
+    const changed = syncConfiguredPluginActionButtons(state, doc.body);
+    assert.equal(changed, 1);
+    assert.equal(action.textContent, "Installed");
+    assert.equal(action.disabled, true);
+  } finally {
+    restore();
+  }
 });
 
 test("native directory sort orders default rows by original order", () => {
