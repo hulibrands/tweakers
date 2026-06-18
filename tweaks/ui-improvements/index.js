@@ -3136,30 +3136,6 @@ const FEATURES = {
 
     const clickElement = (node) => {
       if (!(node instanceof HTMLElement)) return false;
-      node.dispatchEvent(new MouseEvent("pointerdown", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        button: 0,
-      }));
-      node.dispatchEvent(new MouseEvent("mousedown", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        button: 0,
-      }));
-      node.dispatchEvent(new MouseEvent("pointerup", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        button: 0,
-      }));
-      node.dispatchEvent(new MouseEvent("mouseup", {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        button: 0,
-      }));
       node.click();
       return true;
     };

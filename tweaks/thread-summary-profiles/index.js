@@ -16,18 +16,14 @@ let modalCliCache = new Map();
 
 module.exports = {
   start(api) {
+    stopActiveCleanup();
     activeCleanup = [];
     if (api.process === "main") startMain(api, activeCleanup);
     if (api.process === "renderer") startRenderer(api, activeCleanup);
   },
 
   stop() {
-    for (const cleanup of activeCleanup) {
-      try {
-        cleanup();
-      } catch {}
-    }
-    activeCleanup = [];
+    stopActiveCleanup();
   },
 
   __test: {
@@ -55,6 +51,15 @@ module.exports = {
     clearThreadProfileCaches,
   },
 };
+
+function stopActiveCleanup() {
+  for (const cleanup of activeCleanup) {
+    try {
+      cleanup();
+    } catch {}
+  }
+  activeCleanup = [];
+}
 
 function startMain(api, cleanup) {
   const fs = require("node:fs");

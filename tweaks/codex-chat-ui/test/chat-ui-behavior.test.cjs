@@ -82,6 +82,52 @@ test("scanMessages renders chat UI, hides source, and action clicks insert safe 
   }
 });
 
+test("action clicks target the active composer instead of an earlier settings textarea", () => {
+  const restore = installFakeDom();
+  try {
+    const settingsTextarea = document.createElement("textarea");
+    settingsTextarea.value = "settings";
+    const composer = document.createElement("textarea");
+    composer.value = "Start: ";
+    composer.selectionStart = composer.value.length;
+    composer.selectionEnd = composer.value.length;
+    document.activeElement = composer;
+    const message = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [
+        {
+          kind: "summary_card",
+          props: {
+            title: "Patch ready",
+            actions: [
+              {
+                type: "send_message",
+                label: "Apply",
+                prompt: "Apply the safe patch",
+              },
+            ],
+          },
+        },
+      ],
+    });
+    document.body.append(settingsTextarea, composer, message);
+
+    tweak.scanMessages({
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: { summary_card: true },
+    });
+
+    message.querySelector("button").click();
+    assert.equal(settingsTextarea.value, "settings");
+    assert.equal(composer.value, "Start: Apply the safe patch");
+  } finally {
+    restore();
+  }
+});
+
 test("file previews render typed file and status icons with list semantics", () => {
   const restore = installFakeDom();
   const previousFetch = global.fetch;
