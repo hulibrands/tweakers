@@ -289,8 +289,12 @@ function readSupabaseBinding(projectPathInput, options = {}) {
   const configPath = path.join(projectPath, ".codex", "config.toml");
   if (!fs.existsSync(configPath)) return null;
   const text = fs.readFileSync(configPath, "utf8");
-  const projectRef = firstTomlString(text, "project_id") || firstTomlString(text, "projectRef");
-  const bearerTokenEnvVar = firstTomlString(text, "bearer_token_env_var") || firstTomlString(text, "bearerTokenEnvVar");
+  const block = findTomlTableBlock(text, "mcp_servers.supabase") || text;
+  const projectRef =
+    firstTomlString(block, "project_id") ||
+    firstTomlString(block, "projectRef") ||
+    projectRefFromSupabaseMcpUrl(firstTomlString(block, "url"));
+  const bearerTokenEnvVar = firstTomlString(block, "bearer_token_env_var") || firstTomlString(block, "bearerTokenEnvVar");
   if (!projectRef && !bearerTokenEnvVar) return null;
   return { projectRef, bearerTokenEnvVar };
 }
@@ -299,6 +303,29 @@ function firstTomlString(text, key) {
   const pattern = new RegExp(`^\\s*${key}\\s*=\\s*["']([^"']+)["']`, "m");
   const match = pattern.exec(String(text || ""));
   return match ? match[1] : "";
+}
+
+function projectRefFromSupabaseMcpUrl(url) {
+  try {
+    return new URL(String(url || "")).searchParams.get("project_ref") || "";
+  } catch {
+    return "";
+  }
+}
+
+function findTomlTableBlock(content, tableName) {
+  const text = String(content || "");
+  const header = new RegExp(`^\\s*\\[${escapeRegExp(tableName)}\\]\\s*$`, "m");
+  const match = header.exec(text);
+  if (!match) return "";
+  const bodyStart = match.index + match[0].length;
+  const rest = text.slice(bodyStart);
+  const next = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function upsertAgentsBlock(existing, block) {

@@ -331,7 +331,7 @@ test("Project Settings writes managed AGENTS.md plugin profile blocks", () => {
   fs.writeFileSync(path.join(projectPath, "AGENTS.md"), "# Repo\n", "utf8");
   fs.writeFileSync(path.join(projectPath, ".codex", "config.toml"), [
     "[mcp_servers.supabase]",
-    'project_id = "trrproject"',
+    'url = "https://mcp.supabase.com/mcp?project_ref=trrproject&features=database,docs"',
     'bearer_token_env_var = "SUPABASE_ACCESS_TOKEN"',
     "",
   ].join("\n"), "utf8");
