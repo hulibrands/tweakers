@@ -132,6 +132,7 @@ module.exports.__test = {
   ensurePanelForTest: ensurePanel,
   getNativeDirectoryMeta,
   getRuntimePluginStatuses,
+  pluginDirectoryCounts,
   buildPluginDirectoryHealth,
   syncConfiguredPluginActionButtons,
   syncNativeDirectoryInstalledAction,
@@ -143,6 +144,7 @@ module.exports.__test = {
   groupedRows,
   normalizeDirectoryState,
   applyPluginUsageToNativeMeta,
+  renderNativeDirectoryCounts,
   nativeDirectoryToolbarAnchor,
   nativeDirectorySearchFallbackAnchor,
   nativeDirectoryRowMeta,
@@ -1136,15 +1138,18 @@ async function reconcilePluginDirectory(state, button, summary, list) {
 function buildPluginDirectoryHealth(statuses, meta) {
   const items = Array.isArray(statuses && statuses.items) ? statuses.items : [];
   const plugins = Array.isArray(meta && meta.plugins) ? meta.plugins : [];
-  const enabled = items.filter((item) => item && item.enabled !== false);
-  const disabled = items.filter((item) => item && item.enabled === false);
+  const counts = pluginDirectoryCounts(statuses, meta);
+  const installed = items.filter(pluginStatusInstalled);
+  const enabled = installed.filter((item) => item && item.enabled !== false);
+  const disabled = installed.filter((item) => item && item.enabled === false);
   const cacheBacked = enabled.filter((item) => pluginHasNativeMeta(item, plugins));
   const missing = enabled.filter((item) => !pluginHasNativeMeta(item, plugins));
   return {
     status: "ok",
     configured: items.length,
-    enabled: enabled.length,
-    disabled: disabled.length,
+    installed: counts.installed,
+    enabled: counts.enabled,
+    disabled: counts.disabled,
     directoryPlugins: plugins.length,
     cacheBacked: cacheBacked.length,
     missing: missing.map((item) => ({
@@ -1156,6 +1161,28 @@ function buildPluginDirectoryHealth(statuses, meta) {
   };
 }
 
+function pluginDirectoryCounts(statuses, meta) {
+  const items = Array.isArray(statuses && statuses.items) ? statuses.items : [];
+  const plugins = Array.isArray(meta && meta.plugins) ? meta.plugins : [];
+  const installed = items.filter(pluginStatusInstalled);
+  const enabled = installed.filter((item) => item && item.enabled !== false);
+  const disabled = installed.filter((item) => item && item.enabled === false);
+  const directoryInstalled = plugins.filter((plugin) => plugin && plugin.installed !== false);
+  const directoryEnabled = directoryInstalled.filter((plugin) => plugin && plugin.enabled !== false);
+  return {
+    configured: items.length,
+    installed: installed.length,
+    enabled: enabled.length,
+    disabled: disabled.length,
+    directoryInstalled: directoryInstalled.length,
+    directoryEnabled: directoryEnabled.length,
+  };
+}
+
+function pluginStatusInstalled(item) {
+  return Boolean(item) && item.configured !== false && item.installed !== false;
+}
+
 function pluginHasNativeMeta(status, plugins) {
   return (plugins || []).some((plugin) => pluginMatchesConfiguredStatus(plugin, status) && plugin.installed !== false);
 }
@@ -1163,14 +1190,14 @@ function pluginHasNativeMeta(status, plugins) {
 function renderPluginDirectoryHealth(summary, list, health) {
   summary.classList.remove("is-error");
   const missing = Array.isArray(health && health.missing) ? health.missing : [];
-  summary.textContent = `${health.enabled || 0} enabled, ${health.cacheBacked || 0} cache-backed, ${missing.length} missing metadata.`;
+  summary.textContent = `${health.installed || 0} installed, ${health.enabled || 0} enabled, ${missing.length} missing metadata.`;
   list.textContent = "";
   const totals = document.createElement("div");
   totals.className = "codexpp-td-health-group";
   const strong = document.createElement("strong");
   strong.textContent = "Current state";
   const detail = document.createElement("span");
-  detail.textContent = `${health.configured || 0} configured, ${health.disabled || 0} disabled, ${health.directoryPlugins || 0} directory records.`;
+  detail.textContent = `${health.configured || 0} configured, ${health.disabled || 0} disabled, ${health.cacheBacked || 0} metadata-backed, ${health.directoryPlugins || 0} directory records.`;
   totals.append(strong, detail);
   list.appendChild(totals);
   if (missing.length === 0) return;
@@ -1875,12 +1902,38 @@ function renderNativeDirectoryControlStrip(state, mode) {
   }));
   strip.appendChild(pills);
 
+  const counts = renderNativeDirectoryCounts(state, mode);
+  if (counts) strip.appendChild(counts);
+
   strip.appendChild(sortSelect(controls, () => {
     persistDirectoryState(state);
     syncNativeDirectoryControls(state);
   }, `${mode} sort`, mode));
   strip.appendChild(resetFiltersButton(() => resetNativeDirectoryFilters(state, mode)));
   return strip;
+}
+
+function renderNativeDirectoryCounts(state, mode) {
+  const node = document.createElement("span");
+  node.className = "codexpp-native-directory-counts";
+  node.dataset.codexppNativeDirectoryCounts = "true";
+  if (mode === "skills") {
+    const skills = Array.isArray(state && state.nativeDirectoryMeta && state.nativeDirectoryMeta.skills)
+      ? state.nativeDirectoryMeta.skills
+      : [];
+    const installed = skills.filter((item) => item && item.installed !== false).length;
+    const enabled = skills.filter((item) => item && item.installed !== false && item.enabled !== false).length;
+    node.textContent = `${installed} installed skills · ${enabled} enabled`;
+    node.title = "Installed skill count and enabled skill count";
+    return node;
+  }
+  const counts = pluginDirectoryCounts(
+    state && state.pluginStatuses,
+    state && state.nativeDirectoryMeta
+  );
+  node.textContent = `${counts.installed} installed · ${counts.enabled} enabled`;
+  node.title = "Installed plugin count and enabled plugin count";
+  return node;
 }
 
 function nativeControlsForMode(state, mode) {
@@ -2231,8 +2284,12 @@ function syncConfiguredPluginActionButtons(state, root = document) {
     return 0;
   }
   let changed = 0;
-  for (const button of Array.from(root.querySelectorAll("button,[role='button']")).filter(isNativeAddPluginAction)) {
-    const record = configuredPluginActionRecord(state, button);
+  for (const button of Array.from(root.querySelectorAll("button,[role='button']")).filter(isNativeAddPluginActionLoose)) {
+    // Bare "Add" (search/library cards) resolves DETERMINISTICALLY only, so a
+    // generic "Add" never fuzzy-matches an unrelated plugin and gets wrongly
+    // flipped to "Installed". "Add plugin"/"+" keep the existing fuzzy path.
+    const exactOnly = !isNativeAddPluginAction(button);
+    const record = configuredPluginActionRecord(state, button, exactOnly);
     if (record && record.installed && record.enabled) {
       markNativeInstalledActionButton(button);
       changed += 1;
@@ -2243,7 +2300,7 @@ function syncConfiguredPluginActionButtons(state, root = document) {
   return changed;
 }
 
-function configuredPluginActionRecord(state, button) {
+function configuredPluginActionRecord(state, button, exactOnly) {
   const meta = state && state.nativeDirectoryMeta || {};
   let node = button && button.parentElement;
   let hops = 0;
@@ -2255,7 +2312,7 @@ function configuredPluginActionRecord(state, button) {
     }
     const text = compactText(node.textContent || "");
     const title = nativeDirectoryRowTitle(node, text);
-    const plugin = nativePluginRowMeta(meta, title, text);
+    const plugin = exactOnly ? nativePluginRowMetaExact(meta, title, text) : nativePluginRowMeta(meta, title, text);
     if (plugin) {
       return {
         row: node,
@@ -2281,7 +2338,7 @@ function isConfiguredPluginActionCardCandidate(node, button) {
   if (text.length < 3 || text.length > 520) return false;
   const actionText = compactText(button.textContent || "");
   if (text === actionText) return false;
-  if (!/\bAdd plugin\b|^\+$/.test(actionText) && !(button.dataset && button.dataset.codexppNativePluginInstalledAction === "true")) return false;
+  if (!/^Add\b/i.test(actionText) && actionText !== "+" && !(button.dataset && button.dataset.codexppNativePluginInstalledAction === "true")) return false;
   return hasRowVisualSignal(node) || Boolean(node.querySelector("h1,h2,h3,h4,strong"));
 }
 
@@ -2309,6 +2366,17 @@ function isNativeAddPluginAction(node) {
   const text = compactText(node.textContent || "");
   const aria = compactText(typeof node.getAttribute === "function" ? node.getAttribute("aria-label") || "" : "");
   return text === "Add plugin" || aria === "Add plugin" || text === "+";
+}
+
+// Looser variant for the document-wide sweep: also treats a bare "Add" button
+// (used by the plugin SEARCH/LIBRARY result cards, vs the directory's "Add
+// plugin") as a candidate. The rewrite stays gated on a DETERMINISTIC
+// installed+enabled plugin match (configuredPluginActionRecord exactOnly), so
+// an unrelated "Add …" button never resolves and is never mutated.
+function isNativeAddPluginActionLoose(node) {
+  if (isNativeAddPluginAction(node)) return true;
+  if (!node) return false;
+  return /^Add\b/i.test(compactText(node.textContent || ""));
 }
 
 function markNativeInstalledActionButton(button) {
@@ -2474,6 +2542,20 @@ function nativeSkillRowMeta(meta, title, text) {
   }
   const skillSlug = slugKey(skillNeedle);
   return meta.bySkillSlug && meta.bySkillSlug[skillSlug] || bestSlugMatch(meta.skills || [], ["name", "displayName", "slash"], skillNeedle) || null;
+}
+
+// Deterministic plugin resolution: exact title/text key or slug, with NO fuzzy
+// bestSlugMatch fallback. Used for bare-"Add" buttons so a generic "Add" can
+// only flip to "Installed" when its card title unambiguously names a configured
+// plugin (the fuzzy substring matcher is the false-positive risk for bare "Add").
+function nativePluginRowMetaExact(meta, title, text) {
+  const keys = [title, text].map(directoryKey).filter(Boolean);
+  for (const key of keys) {
+    const direct = meta.byPlugin && meta.byPlugin[key];
+    if (direct) return direct;
+  }
+  const titleSlug = slugKey(title);
+  return meta.byPluginSlug && meta.byPluginSlug[titleSlug] || null;
 }
 
 function nativePluginRowMeta(meta, title, text) {
@@ -5850,6 +5932,7 @@ function injectStyles() {
       border-color: color-mix(in srgb, var(--codexpp-td-ring) 44%, var(--codexpp-td-border));
     }
     .codexpp-td-pill-group { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+    .codexpp-native-directory-counts { flex: 0 0 auto; min-height: 28px; display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--codexpp-td-border) 78%, transparent); border-radius: 999px; padding: 0 9px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-muted); font: inherit; font-size: 12px; line-height: 1.2; white-space: nowrap; }
     .codexpp-td-pill { height: 36px; min-width: 0; border: 1px solid var(--codexpp-td-border); border-radius: 999px; padding: 0 10px; background: var(--codexpp-td-background); color: var(--codexpp-td-muted); font: inherit; font-size: 13px; cursor: pointer; }
     .codexpp-td-pill.active { background: var(--codexpp-td-foreground); border-color: var(--codexpp-td-foreground); color: var(--codexpp-td-background); }
     .codexpp-td-filter-select { flex: 0 0 auto; height: 36px; min-width: 96px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 0 8px 0 10px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-foreground); }

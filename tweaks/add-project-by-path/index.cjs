@@ -25,6 +25,7 @@ module.exports = {
   },
 
   stop() {
+    cleanupMain();
     const state = this._state || globalThis[STATE_KEY];
     if (!state) return;
     cleanupRenderer(state);
@@ -34,11 +35,27 @@ module.exports = {
 
 function startMain(api) {
   if (!globalThis[MAIN_HANDLER_KEY]) {
-    api.ipc.handle(IPC_VALIDATE_PATH, (rawPath) => validateProjectPath(rawPath));
-    api.ipc.handle(IPC_CREATE_PATH, (rawPath) => createProjectPath(rawPath));
-    globalThis[MAIN_HANDLER_KEY] = true;
+    const disposers = [
+      api.ipc.handle(IPC_VALIDATE_PATH, (rawPath) => validateProjectPath(rawPath)),
+      api.ipc.handle(IPC_CREATE_PATH, (rawPath) => createProjectPath(rawPath)),
+    ].filter((dispose) => typeof dispose === "function");
+    globalThis[MAIN_HANDLER_KEY] = { disposers };
   }
   api.log.info("[add-project-by-path] main validation handler active");
+}
+
+function cleanupMain() {
+  const state = globalThis[MAIN_HANDLER_KEY];
+  if (!state || state === true) return;
+  const disposers = Array.isArray(state.disposers) ? state.disposers : [];
+  for (const dispose of disposers.splice(0).reverse()) {
+    try {
+      dispose();
+    } catch {
+      /* handler may already be gone */
+    }
+  }
+  delete globalThis[MAIN_HANDLER_KEY];
 }
 
 function validateProjectPath(rawPath) {
@@ -452,6 +469,7 @@ function installStyles() {
 
 function openModal(state) {
   closeModal(state);
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
   const backdrop = document.createElement("div");
   backdrop.className = "codexpp-path-entry-backdrop";
@@ -537,14 +555,19 @@ function openModal(state) {
   backdrop.appendChild(dialog);
   document.body.appendChild(backdrop);
 
-  state.modal = { backdrop, input, error, submit, create };
+  state.modal = { backdrop, input, error, submit, create, previousFocus };
 
   const onCancel = () => closeModal(state);
   const onBackdropPointerDown = (event) => {
     if (event.target === backdrop) closeModal(state);
   };
   const onKeyDown = (event) => {
-    if (event.key === "Escape") closeModal(state);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModal(state);
+      return;
+    }
+    if (event.key === "Tab") trapModalFocus(event, dialog);
   };
   const onSubmit = async (event) => {
     event.preventDefault();
@@ -622,9 +645,45 @@ function openModal(state) {
 
 function closeModal(state) {
   if (!state?.modal) return;
+  const previousFocus = state.modal.previousFocus;
   state.modal.dispose?.();
   state.modal.backdrop.remove();
   state.modal = null;
+  try {
+    previousFocus?.focus?.();
+  } catch {}
+}
+
+function trapModalFocus(event, dialog) {
+  const focusable = modalFocusableElements(dialog);
+  if (!focusable.length) {
+    event.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+    return;
+  }
+  if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function modalFocusableElements(dialog) {
+  return Array.from(dialog.querySelectorAll([
+    "button",
+    "input",
+    "select",
+    "textarea",
+    "a[href]",
+    "[tabindex]",
+  ].join(", "))).filter((node) => node instanceof HTMLElement && !node.disabled && node.tabIndex !== -1 && !node.hidden);
 }
 
 function setInputPath(state, value) {

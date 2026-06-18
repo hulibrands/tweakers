@@ -32,8 +32,15 @@ const tools = [
   },
   {
     name: "projects_google_workspace_list_assignments",
-    description: "List configured per-project Gmail and Google Drive assignments.",
-    inputSchema: { type: "object", properties: {} },
+    description: "List configured Gmail and Google Drive assignments for one project. Redacts account details unless debug is true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectPath: { type: "string", description: "Absolute project path or cwd." },
+        debug: { type: "boolean", description: "Return raw local paths and account identifiers." },
+      },
+      required: ["projectPath"],
+    },
   },
   {
     name: "projects_chrome_profile_resolve",
@@ -48,8 +55,15 @@ const tools = [
   },
   {
     name: "projects_chrome_profile_list_assignments",
-    description: "List configured project-to-Chrome-profile assignments.",
-    inputSchema: { type: "object", properties: {} },
+    description: "List configured Chrome profile assignments for one project. Redacts local paths and aliases unless debug is true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectPath: { type: "string", description: "Absolute project path or cwd." },
+        debug: { type: "boolean", description: "Return raw local paths and account identifiers." },
+      },
+      required: ["projectPath"],
+    },
   },
 ];
 
@@ -172,6 +186,29 @@ function listAssignments() {
   }));
 }
 
+function listProjectAssignments(projectPath, options = {}) {
+  const result = resolveProject(requireProjectPath(projectPath), options.service || "");
+  if (!result) return [];
+  return [options.debug ? result : redactGoogleWorkspaceAssignment(result)];
+}
+
+function redactGoogleWorkspaceAssignment(result) {
+  return {
+    projectName: path.basename(result.projectPath),
+    projectPath: redactPath(result.projectPath),
+    services: Object.fromEntries(Object.entries(result.services || {}).map(([service, assignment]) => [
+      service,
+      assignment ? {
+        service,
+        accountId: redactIdentifier(assignment.accountId),
+        email: redactEmail(assignment.email),
+        source: assignment.source || "",
+        updatedAt: assignment.updatedAt || "",
+      } : null,
+    ])),
+  };
+}
+
 function resolveChromeProject(projectPath) {
   if (typeof projectPath !== "string" || projectPath.trim() === "") return null;
   const normalized = path.resolve(projectPath.trim());
@@ -180,6 +217,32 @@ function resolveChromeProject(projectPath) {
     .filter((entry) => normalized === entry.projectPath || normalized.startsWith(`${entry.projectPath}${path.sep}`))
     .sort((a, b) => b.projectPath.length - a.projectPath.length);
   return entries[0] || null;
+}
+
+function listChromeProjectAssignments(projectPath, options = {}) {
+  const match = resolveChromeProject(requireProjectPath(projectPath));
+  if (!match) return [];
+  return [options.debug ? match : redactChromeAssignment(match)];
+}
+
+function redactChromeAssignment(assignment) {
+  return {
+    projectName: path.basename(assignment.projectPath || ""),
+    projectPath: redactPath(assignment.projectPath),
+    profileDirectory: assignment.profileDirectory || "",
+    profileName: assignment.profileName || "",
+    profileAliases: normalizeProfileAliases(assignment.profileAliases).map(redactEmail),
+    preferencesPath: redactPath(assignment.preferencesPath),
+    userDataDir: redactPath(assignment.userDataDir),
+    preferredProfiles: normalizePreferredProfiles(assignment).map((profile) => ({
+      profileDirectory: profile.profileDirectory || "",
+      profileName: profile.profileName || "",
+      profileAliases: normalizeProfileAliases(profile.profileAliases).map(redactEmail),
+      preferencesPath: redactPath(profile.preferencesPath),
+      userDataDir: redactPath(profile.userDataDir),
+    })),
+    updatedAt: assignment.updatedAt || "",
+  };
 }
 
 function normalizePreferredProfiles(assignment) {
@@ -246,6 +309,28 @@ function text(value) {
   return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
 }
 
+function requireProjectPath(projectPath) {
+  if (typeof projectPath !== "string" || !projectPath.trim()) {
+    throw new Error("projectPath is required for assignment list tools.");
+  }
+  return projectPath;
+}
+
+function redactPath(value) {
+  if (typeof value !== "string" || !value) return "";
+  return value.startsWith("/") ? `[redacted]/${path.basename(value)}` : value;
+}
+
+function redactIdentifier(value) {
+  if (typeof value !== "string" || !value) return "";
+  return "[redacted]";
+}
+
+function redactEmail(value) {
+  if (typeof value !== "string" || !value) return "";
+  return value.includes("@") ? "[redacted-email]" : value;
+}
+
 async function handle(message) {
   if (message.method === "initialize") {
     return {
@@ -268,7 +353,7 @@ async function handle(message) {
       });
     }
     if (name === "projects_google_workspace_list_assignments") {
-      return text({ storageFile: STORAGE_FILE, assignments: listAssignments() });
+      return text({ assignments: listProjectAssignments(args.projectPath, { debug: args.debug === true }) });
     }
     if (name === "projects_chrome_profile_resolve") {
       const match = resolveChromeProject(args.projectPath);
@@ -284,7 +369,7 @@ async function handle(message) {
       });
     }
     if (name === "projects_chrome_profile_list_assignments") {
-      return text({ storageFile: STORAGE_FILE, legacyStorageFile: LEGACY_CHROME_STORAGE_FILE, assignments: Object.values(chromeAssignments()) });
+      return text({ assignments: listChromeProjectAssignments(args.projectPath, { debug: args.debug === true }) });
     }
     throw new Error(`Unknown tool: ${name}`);
   }

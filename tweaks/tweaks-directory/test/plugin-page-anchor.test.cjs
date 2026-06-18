@@ -34,6 +34,7 @@ const {
   groupedRows,
   normalizeDirectoryState,
   applyPluginUsageToNativeMeta,
+  renderNativeDirectoryCounts,
   nativeDirectoryToolbarAnchor,
   nativeDirectorySearchFallbackAnchor,
   nativeDirectoryRowMeta,
@@ -45,6 +46,7 @@ const {
   groupNativeSkillRowsByPlugin,
   createNativeDirectoryMetaCache,
   pluginStatusesSignature,
+  pluginDirectoryCounts,
   buildPluginDirectoryHealth,
   syncConfiguredPluginActionButtons,
   syncNativeDirectoryInstalledAction,
@@ -951,10 +953,58 @@ test("plugin health reports enabled config entries missing cache metadata", () =
     plugins: [{ id: "other", displayName: "Other", installed: true, enabled: true }],
   });
   assert.equal(health.configured, 2);
+  assert.equal(health.installed, 2);
   assert.equal(health.enabled, 1);
   assert.equal(health.disabled, 1);
   assert.equal(health.cacheBacked, 0);
   assert.deepEqual(health.missing.map((item) => item.id), ["supabase"]);
+});
+
+test("plugin counts separate installed from enabled state", () => {
+  const counts = pluginDirectoryCounts({
+    items: [
+      { key: "enabled@local-plugins", id: "enabled", configured: true, installed: true, enabled: true },
+      { key: "disabled@local-plugins", id: "disabled", configured: true, installed: true, enabled: false },
+      { key: "available@local-plugins", id: "available", configured: false, installed: false, enabled: false },
+    ],
+  }, {
+    plugins: [
+      { id: "enabled", installed: true, enabled: true },
+      { id: "disabled", installed: true, enabled: false },
+      { id: "available", installed: false, enabled: false },
+    ],
+  });
+  assert.equal(counts.configured, 3);
+  assert.equal(counts.installed, 2);
+  assert.equal(counts.enabled, 1);
+  assert.equal(counts.disabled, 1);
+  assert.equal(counts.directoryInstalled, 2);
+  assert.equal(counts.directoryEnabled, 1);
+});
+
+test("native plugin toolbar count shows installed and enabled separately", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const count = renderNativeDirectoryCounts({
+      pluginStatuses: {
+        items: [
+          { key: "enabled@local-plugins", id: "enabled", configured: true, installed: true, enabled: true },
+          { key: "disabled@local-plugins", id: "disabled", configured: true, installed: true, enabled: false },
+        ],
+      },
+      nativeDirectoryMeta: {
+        plugins: [
+          { id: "enabled", installed: true, enabled: true },
+          { id: "disabled", installed: true, enabled: false },
+        ],
+      },
+    }, "plugins");
+    assert.equal(count.textContent, "2 installed · 1 enabled");
+    assert.equal(count.dataset.codexppNativeDirectoryCounts, "true");
+  } finally {
+    restore();
+  }
 });
 
 test("native plugin row action rewrites Add plugin for installed enabled config plugins", () => {
@@ -994,6 +1044,67 @@ test("generic plugin cards rewrite Add plugin for enabled configured plugins", (
     assert.equal(changed, 1);
     assert.equal(action.textContent, "Installed");
     assert.equal(action.disabled, true);
+  } finally {
+    restore();
+  }
+});
+
+test("generic plugin cards rewrite bare Add (search/library) for installed enabled plugins", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const card = doc.createElement("div");
+    const title = doc.createElement("h3");
+    title.textContent = "Stripe";
+    const description = doc.createElement("p");
+    description.textContent = "Payments and business tools";
+    const action = doc.createElement("button");
+    action.textContent = "Add"; // search/library list uses bare "Add", not "Add plugin"
+    card.append(title, description, action);
+    doc.body.appendChild(card);
+    const state = {
+      preferences: { nativePatchesSafeMode: false },
+      nativeDirectoryMeta: normalizeNativeDirectoryMeta({
+        plugins: [{ id: "stripe", name: "Stripe", displayName: "Stripe", label: "Stripe", installed: true, enabled: true }],
+        skills: [],
+      }),
+    };
+    const changed = syncConfiguredPluginActionButtons(state, doc.body);
+    assert.equal(changed, 1);
+    assert.equal(action.textContent, "Installed");
+    assert.equal(action.disabled, true);
+  } finally {
+    restore();
+  }
+});
+
+test("bare Add is NOT flipped when the card only FUZZY-matches a plugin (deterministic guard)", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const card = doc.createElement("div");
+    const title = doc.createElement("h3");
+    title.textContent = "Stripe Atlas"; // a different product whose slug merely CONTAINS "stripe"
+    const description = doc.createElement("p");
+    description.textContent = "Incorporate a company";
+    const action = doc.createElement("button");
+    action.textContent = "Add";
+    card.append(title, description, action);
+    doc.body.appendChild(card);
+    const state = {
+      preferences: { nativePatchesSafeMode: false },
+      nativeDirectoryMeta: normalizeNativeDirectoryMeta({
+        plugins: [{ id: "stripe", name: "Stripe", displayName: "Stripe", label: "Stripe", installed: true, enabled: true }],
+        skills: [],
+      }),
+    };
+    // Fuzzy bestSlugMatch WOULD match "stripe" ⊂ "stripeatlas"; the bare-Add path
+    // resolves deterministically only, so this unrelated card stays "Add".
+    const changed = syncConfiguredPluginActionButtons(state, doc.body);
+    assert.equal(changed, 0);
+    assert.equal(action.textContent, "Add");
+    assert.ok(!action.disabled);
+    assert.equal(action.dataset.codexppNativePluginInstalledAction, undefined);
   } finally {
     restore();
   }

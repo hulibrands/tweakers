@@ -1251,23 +1251,73 @@ function insertIntoComposer(text) {
   const value = cleanText(text || "", 2_000);
   if (!value) return;
 
-  const textarea = document.querySelector("textarea");
+  const target = findComposerSurface();
+  const textarea = target instanceof HTMLTextAreaElement ? target : null;
   if (textarea instanceof HTMLTextAreaElement) {
-    textarea.focus();
-    textarea.value = value;
+    insertTextIntoTextarea(textarea, value);
     textarea.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
     return;
   }
 
-  const editable = document.querySelector('[contenteditable="true"]');
+  const editable = target instanceof HTMLElement ? target : null;
   if (editable instanceof HTMLElement) {
     editable.focus();
-    editable.innerText = value;
+    if (!insertTextIntoContenteditable(editable, value)) editable.innerText = value;
     editable.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
     return;
   }
 
   navigator.clipboard?.writeText(value).catch(() => {});
+}
+
+function findComposerSurface() {
+  const active = document.activeElement;
+  if (isComposerSurface(active)) return active;
+  const candidates = Array.from(document.querySelectorAll(
+    'textarea, [contenteditable="true"], [contenteditable="plaintext-only"]',
+  )).filter(isComposerSurface);
+  const scoped = candidates.find((node) => node.closest?.([
+    "form",
+    "[data-testid*='composer']",
+    "[data-testid*='prompt']",
+    "[aria-label*='composer']",
+    "[aria-label*='message']",
+    "[data-codex-composer]",
+  ].join(", ")));
+  return scoped || candidates[candidates.length - 1] || null;
+}
+
+function isComposerSurface(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  if (node instanceof HTMLTextAreaElement) return !node.disabled && !node.readOnly;
+  return node.getAttribute("contenteditable") === "true" || node.getAttribute("contenteditable") === "plaintext-only";
+}
+
+function insertTextIntoTextarea(textarea, value) {
+  textarea.focus();
+  const currentValue = String(textarea.value || "");
+  const start = Number.isInteger(textarea.selectionStart) ? textarea.selectionStart : currentValue.length;
+  const end = Number.isInteger(textarea.selectionEnd) ? textarea.selectionEnd : start;
+  if (typeof textarea.setRangeText === "function") {
+    textarea.setRangeText(value, start, end, "end");
+  } else {
+    textarea.value = `${currentValue.slice(0, start)}${value}${currentValue.slice(end)}`;
+  }
+}
+
+function insertTextIntoContenteditable(editable, value) {
+  editable.focus();
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0) return false;
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer;
+  if (!editable.contains(container.nodeType === Node.ELEMENT_NODE ? container : container.parentNode)) return false;
+  range.deleteContents();
+  range.insertNode(document.createTextNode(value));
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
 }
 
 function samplePayloadText() {

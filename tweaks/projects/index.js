@@ -84,6 +84,7 @@ let rendererProjectEnvScanTimeoutMs = DEFAULT_PROJECT_ENV_SCAN_TIMEOUT_MS;
 
 module.exports = {
   start(api) {
+    stopActiveCleanup();
     activeCleanup = [];
     if (api.process === "main") {
       try {
@@ -97,12 +98,7 @@ module.exports = {
   },
 
   stop() {
-    for (const cleanup of activeCleanup) {
-      try {
-        cleanup();
-      } catch {}
-    }
-    activeCleanup = [];
+    stopActiveCleanup();
   },
 
   __test: {
@@ -112,6 +108,7 @@ module.exports = {
     parseSupabaseConfigToml,
     upsertSupabaseConfigToml,
     projectCandidates,
+    assertKnownProjectPath,
     saveChromeAssignmentToStorage,
     clearChromeAssignmentFromStorage,
     googleWorkspaceAccountsForProject,
@@ -172,19 +169,25 @@ module.exports = {
   },
 };
 
+function stopActiveCleanup() {
+  for (const cleanup of activeCleanup) {
+    try {
+      cleanup();
+    } catch {}
+  }
+  activeCleanup = [];
+}
+
 function startMain(api, cleanup) {
   const handlers = createMainHandlers(api);
-  if (chromeRouting?.patchBundledChromeRouting) {
+  if (chromeRouting?.auditBundledChromeRouting) {
     try {
-      const results = chromeRouting.patchBundledChromeRouting({ home: require("node:os").homedir(), logger: api.log });
-      const changed = results.filter((result) => result.changed).length;
-      if (changed) api.log?.info?.(`[projects] patched ${changed} bundled Chrome routing scripts at startup`);
+      const results = chromeRouting.auditBundledChromeRouting({ home: require("node:os").homedir(), logger: api.log });
+      const missing = results.filter((result) => !result.patched).length;
+      if (missing) api.log?.warn?.(`[projects] ${missing} bundled Chrome routing scripts need explicit repair`);
     } catch (error) {
-      api.log?.warn?.("[projects] bundled Chrome routing patch failed at startup", error?.message || String(error));
+      api.log?.warn?.("[projects] bundled Chrome routing audit failed at startup", error?.message || String(error));
     }
-  }
-  if (chromeRouting?.startChromePluginCacheWatcher) {
-    cleanup.push(chromeRouting.startChromePluginCacheWatcher({ home: require("node:os").homedir(), logger: api.log }));
   }
   cleanup.push(api.ipc.handle("listProjects", () => handlers.listProjects()));
   cleanup.push(api.ipc.handle("listProjectSettingsPages", () => handlers.listProjectSettingsPages()));
@@ -242,6 +245,14 @@ function createMainHandlers(api) {
     sidebarProjects: readSidebarProjects(api),
     projectOrder: readSidebarProjectOrder(api),
   });
+  const knownProjectOptions = () => ({
+    fs,
+    path,
+    home,
+    allowedProjectPaths: knownProjectPathsForSensitiveActions(listProjects, { fs, path, home }),
+  });
+  const requireKnownProject = (projectPathInput) => assertKnownProjectPath(projectPathInput, knownProjectOptions());
+  const agentsWriterOptions = () => ({ userRoot, ...knownProjectOptions() });
 
   const listProjectSettingsPages = () => {
     const projectColorStorage = readProjectColorStorage(userRoot);
@@ -318,8 +329,7 @@ function createMainHandlers(api) {
   };
 
   const applySupabaseProfile = (input) => {
-    const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
-    assertLocalProjectPath(projectPath, { fs, path });
+    const projectPath = requireKnownProject(input?.projectPath);
     const profile = input?.profile || listSupabaseProfiles().find((candidate) => candidate.id === String(input?.profileId || ""));
     const normalized = normalizeSupabaseProfile(profile);
     const codexDir = path.join(projectPath, ".codex");
@@ -331,7 +341,7 @@ function createMainHandlers(api) {
     return { configPath, binding: parseSupabaseConfigToml(next) };
   };
 
-  const syncAgentsInstruction = (input) => agentsWriter.syncProjectConnectionInstructions(input, { userRoot, fs, path, home });
+  const syncAgentsInstruction = (input) => agentsWriter.syncProjectConnectionInstructions(input, agentsWriterOptions());
 
   const withAgentsInstruction = (payload, input) => ({
     ...payload,
@@ -339,7 +349,7 @@ function createMainHandlers(api) {
   });
 
   const setAgentsInstructionWritePreference = (input) => {
-    const preference = agentsWriter.setProjectAgentsInstructionWriteDisabled(input, { userRoot, fs, path, home });
+    const preference = agentsWriter.setProjectAgentsInstructionWriteDisabled(input, agentsWriterOptions());
     return {
       ...preference,
       agentsInstruction: preference.disabled
@@ -355,15 +365,15 @@ function createMainHandlers(api) {
   };
 
   const setAgentsInstructionPluginWritePreference = (input) => {
-    const preference = agentsWriter.setProjectAgentsInstructionPluginWriteDisabled(input, { userRoot, fs, path, home });
+    const preference = agentsWriter.setProjectAgentsInstructionPluginWriteDisabled(input, agentsWriterOptions());
     return {
       ...preference,
-      preview: agentsWriter.previewProjectConnectionInstructions(input, { userRoot, fs, path, home }),
+      preview: agentsWriter.previewProjectConnectionInstructions(input, agentsWriterOptions()),
       agentsInstruction: syncAgentsInstruction(input),
     };
   };
 
-  const previewProjectAgentsInstruction = (input) => agentsWriter.previewProjectConnectionInstructions(input, { userRoot, fs, path, home });
+  const previewProjectAgentsInstruction = (input) => agentsWriter.previewProjectConnectionInstructions(input, agentsWriterOptions());
 
   const runChromeRoutingVerifier = (input = {}) => {
     if (!chromeRouting?.verifyBundledChromeRouting) {
@@ -373,11 +383,12 @@ function createMainHandlers(api) {
         sections: { profile: false, extension: false, backend: false, locks: false },
       };
     }
-    const projectPath = input?.projectPath ? normalizeProjectPath(input.projectPath, { home, path }) : "";
+    const projectPath = input?.projectPath ? requireKnownProject(input.projectPath) : "";
     const result = chromeRouting.verifyBundledChromeRouting({
       userRoot,
       home,
       projectPath,
+      readOnly: input?.repair !== true,
     });
     return projectPath ? saveChromeVerifierResult(projectPath, result, { userRoot }) : result;
   };
@@ -386,20 +397,20 @@ function createMainHandlers(api) {
     const repair = chromeRouting?.repairStaleChromeLocks
       ? chromeRouting.repairStaleChromeLocks({ home })
       : { removed: [], staleSharedLockDirs: [] };
-    const verifier = runChromeRoutingVerifier(input);
+    const verifier = runChromeRoutingVerifier({ ...input, repair: true });
     return { repair, verifier };
   };
 
   const repairProjectAgentsInstruction = (input) => ({
     agentsInstruction: syncAgentsInstruction(input),
-    preview: agentsWriter.previewProjectConnectionInstructions(input, { userRoot, fs, path, home }),
+    preview: agentsWriter.previewProjectConnectionInstructions(input, agentsWriterOptions()),
     chromeVerifier: runChromeRoutingVerifier(input),
   });
 
   const getProjectOverview = (projectPathInput) => {
     const projectName = typeof projectPathInput?.name === "string" ? projectPathInput.name : "";
     const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
-    const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
+    const projectPath = requireKnownProject(rawProjectPath);
     const chromeStorage = readChromeStorage(userRoot);
     const chromeAssignment = chromeStorage.assignments[projectPath] || null;
     const googleWorkspaceStorage = readGoogleWorkspaceStorage(userRoot);
@@ -433,9 +444,9 @@ function createMainHandlers(api) {
       modalWorkspaceConflict: modalWorkspaceConflict(modalWorkspaceAssignment, modalWorkspaceCliContext),
       supabaseBinding,
       supabaseProfiles: listSupabaseProfiles(),
-      agentsInstructionWritesDisabled: agentsWriter.isProjectAgentsInstructionWriteDisabled(projectPath, { userRoot, fs, path, home }),
-      agentsInstructionPluginWriteDisabled: agentsWriter.projectAgentsInstructionPluginWriteDisabled(projectPath, { userRoot, fs, path, home }),
-      agentsInstructionPreview: agentsWriter.previewProjectConnectionInstructions({ projectPath, projectName }, { userRoot, fs, path, home }),
+      agentsInstructionWritesDisabled: agentsWriter.isProjectAgentsInstructionWriteDisabled(projectPath, agentsWriterOptions()),
+      agentsInstructionPluginWriteDisabled: agentsWriter.projectAgentsInstructionPluginWriteDisabled(projectPath, agentsWriterOptions()),
+      agentsInstructionPreview: agentsWriter.previewProjectConnectionInstructions({ projectPath, projectName }, agentsWriterOptions()),
       projectColor: projectColorStorage[projectColorKey] || "auto",
       projectOverlayIntensity: projectOverlayStorage[projectColorKey] || DEFAULT_PROJECT_OVERLAY_INTENSITY,
       projectColorKey,
@@ -448,7 +459,7 @@ function createMainHandlers(api) {
     }
     const projectName = typeof projectPathInput?.name === "string" ? projectPathInput.name : "";
     const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
-    const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
+    const projectPath = requireKnownProject(rawProjectPath);
     const result = chromeRouting.writeActiveChromeProfileSignal({ projectPath, projectName }, { userRoot, home });
     return {
       ...result,
@@ -458,8 +469,8 @@ function createMainHandlers(api) {
 
   const getProjectEnvInventory = (projectPathInput) => {
     const rawProjectPath = typeof projectPathInput?.projectPath === "string" ? projectPathInput.projectPath : projectPathInput;
-    const projectPath = normalizeProjectPath(rawProjectPath, { home, path });
-    return scanEnvInventory(projectPath, { fs, path });
+    const projectPath = requireKnownProject(rawProjectPath);
+    return scanEnvInventory(projectPath, knownProjectOptions());
   };
 
   return {
@@ -481,12 +492,12 @@ function createMainHandlers(api) {
     getProjectEnvInventory,
     listChromeProfiles,
     saveChromeAssignment: (input) => {
-      const assignment = saveChromeAssignmentToStorage(input, { userRoot, profiles: listChromeProfiles(), home, path, fs });
+      const assignment = saveChromeAssignmentToStorage(input, { userRoot, profiles: listChromeProfiles(), ...knownProjectOptions() });
       return withAgentsInstruction({ assignment }, { projectPath: assignment.projectPath, projectName: input?.projectName || input?.name });
     },
     clearChromeAssignment: (projectPathInput) => {
-      const projectPath = normalizeProjectPath(projectPathInput?.projectPath || projectPathInput, { home, path });
-      clearChromeAssignmentFromStorage(projectPath, { userRoot, home, path });
+      const projectPath = requireKnownProject(projectPathInput?.projectPath || projectPathInput);
+      clearChromeAssignmentFromStorage(projectPath, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ cleared: true }, { projectPath, projectName: projectPathInput?.projectName || projectPathInput?.name });
     },
     listGoogleWorkspaceAccounts,
@@ -500,12 +511,12 @@ function createMainHandlers(api) {
         if (account) saveGoogleWorkspaceAccountToStorage(account, { userRoot });
       }
       if (!account) throw new Error("Select a Google account first.");
-      const assignment = saveGoogleWorkspaceAssignmentToStorage(input, { userRoot, home, path });
+      const assignment = saveGoogleWorkspaceAssignmentToStorage(input, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ assignment }, { projectPath: assignment.projectPath, projectName: input?.projectName || input?.name });
     },
     clearGoogleWorkspaceAssignment: (input) => {
-      const projectPath = normalizeProjectPath(input?.projectPath || input, { home, path });
-      clearGoogleWorkspaceAssignmentFromStorage(input, { userRoot, home, path });
+      const projectPath = requireKnownProject(input?.projectPath || input);
+      clearGoogleWorkspaceAssignmentFromStorage(input, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ cleared: true }, { projectPath, projectName: input?.projectName || input?.name });
     },
     saveModalWorkspaceAccount: (input) => saveModalWorkspaceAccountToStorage(input, { userRoot }),
@@ -516,12 +527,12 @@ function createMainHandlers(api) {
         if (account) saveModalWorkspaceAccountToStorage(account, { userRoot });
       }
       if (!account) throw new Error("Select a Modal workspace first.");
-      const assignment = saveModalWorkspaceAssignmentToStorage(input, { userRoot, home, path });
+      const assignment = saveModalWorkspaceAssignmentToStorage(input, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ assignment }, { projectPath: assignment.projectPath, projectName: input?.projectName || input?.name });
     },
     clearModalWorkspaceAssignment: (input) => {
-      const projectPath = normalizeProjectPath(input?.projectPath || input, { home, path });
-      clearModalWorkspaceAssignmentFromStorage(input, { userRoot, home, path });
+      const projectPath = requireKnownProject(input?.projectPath || input);
+      clearModalWorkspaceAssignmentFromStorage(input, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ cleared: true }, { projectPath, projectName: input?.projectName || input?.name });
     },
     saveDecodoAccount: (input) => saveDecodoAccountToStorage(input, { userRoot }),
@@ -532,12 +543,12 @@ function createMainHandlers(api) {
         if (account) saveDecodoAccountToStorage(account, { userRoot });
       }
       if (!account) throw new Error("Select a Decodo account first.");
-      const assignment = saveDecodoAssignmentToStorage(input, { userRoot, home, path });
+      const assignment = saveDecodoAssignmentToStorage(input, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ assignment }, { projectPath: assignment.projectPath, projectName: input?.projectName || input?.name });
     },
     clearDecodoAssignment: (input) => {
-      const projectPath = normalizeProjectPath(input?.projectPath || input, { home, path });
-      clearDecodoAssignmentFromStorage(input, { userRoot, home, path });
+      const projectPath = requireKnownProject(input?.projectPath || input);
+      clearDecodoAssignmentFromStorage(input, { userRoot, ...knownProjectOptions() });
       return withAgentsInstruction({ cleared: true }, { projectPath, projectName: input?.projectName || input?.name });
     },
     listSupabaseProfiles,
@@ -546,8 +557,8 @@ function createMainHandlers(api) {
       projectPath: input?.projectPath,
       projectName: input?.projectName || input?.name,
     }),
-    revealEnvValue: (input) => revealEnvValueFromDisk(input, { fs, path, home }),
-    updateEnvValue: (input) => updateEnvValueOnDisk(input, { fs, path, home }),
+    revealEnvValue: (input) => revealEnvValueFromDisk(input, knownProjectOptions()),
+    updateEnvValue: (input) => updateEnvValueOnDisk(input, knownProjectOptions()),
     saveProjectColor: (input) => saveProjectColorToStorage(input, { userRoot }),
     saveProjectOverlay: (input) => saveProjectOverlayToStorage(input, { userRoot }),
   };
@@ -1153,6 +1164,7 @@ function saveGoogleWorkspaceAssignmentToStorage(input, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const service = normalizeGoogleWorkspaceService(input?.service);
   const accountId = String(input?.accountId || "").trim();
   const storage = readGoogleWorkspaceStorage(options.userRoot);
@@ -1205,6 +1217,7 @@ function saveModalWorkspaceAssignmentToStorage(input, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const accountId = String(input?.accountId || "").trim();
   const storage = readModalWorkspaceStorage(options.userRoot);
   const account = storage.accounts.find((candidate) => candidate.id === accountId)
@@ -1255,6 +1268,7 @@ function saveDecodoAssignmentToStorage(input, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const accountId = String(input?.accountId || "").trim();
   const storage = readDecodoStorage(options.userRoot);
   const account = storage.accounts.find((candidate) => candidate.id === accountId)
@@ -1280,6 +1294,7 @@ function clearModalWorkspaceAssignmentFromStorage(input, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath || input, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const storage = readModalWorkspaceStorage(options.userRoot);
   delete storage.assignments[projectPath];
   storage.updatedAt = new Date().toISOString();
@@ -1291,6 +1306,7 @@ function clearDecodoAssignmentFromStorage(input, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath || input, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const storage = readDecodoStorage(options.userRoot);
   delete storage.assignments[projectPath];
   storage.updatedAt = new Date().toISOString();
@@ -1302,6 +1318,7 @@ function clearGoogleWorkspaceAssignmentFromStorage(input, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath || input, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const service = normalizeGoogleWorkspaceService(input?.service);
   const storage = readGoogleWorkspaceStorage(options.userRoot);
   if (isPlainObject(storage.assignments[projectPath])) {
@@ -1488,6 +1505,7 @@ function saveChromeAssignmentToStorage(input, options = {}) {
   const fs = options.fs || require("node:fs");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const preferencesPaths = normalizePreferencesPaths(input?.preferencesPaths || input?.preferencesPath);
   if (!preferencesPaths.length) throw new Error("Select at least one Chrome profile.");
   for (const preferencesPath of preferencesPaths) validatePreferencesPath(preferencesPath, { fs, path });
@@ -1543,6 +1561,7 @@ function clearChromeAssignmentFromStorage(projectPathInput, options = {}) {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(projectPathInput, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const storage = readChromeStorage(options.userRoot);
   delete storage.assignments[projectPath];
   storage[CHROME_ASSIGNMENTS_KEY] = storage.assignments;
@@ -1915,11 +1934,72 @@ function assertLocalProjectPath(projectPath, options = {}) {
   }
 }
 
+function assertKnownProjectPath(projectPathInput, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const projectPath = normalizeProjectPath(projectPathInput, { home, path });
+  assertLocalProjectPath(projectPath, { fs });
+  if (!Array.isArray(options.allowedProjectPaths)) return projectPath;
+  const allowed = normalizeAllowedProjectPaths(options.allowedProjectPaths, { fs, path, home });
+  if (!allowed.length) {
+    throw new Error("Project path must be one of the known Codex projects before Projects can update files.");
+  }
+  const realProjectPath = realpathOrResolved(projectPath, { fs, path });
+  if (!allowed.includes(realProjectPath)) {
+    throw new Error("Project path must be one of the known Codex projects before Projects can update files.");
+  }
+  return realProjectPath;
+}
+
+function knownProjectPathsForSensitiveActions(listProjects, options = {}) {
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const values = [];
+  try {
+    for (const project of listProjects()) {
+      if (typeof project?.projectPath === "string") values.push(project.projectPath);
+    }
+  } catch {}
+  for (const envKey of ["CODEX_PROJECT_ROOT", "CODEX_WORKSPACE_ROOT", "CODEX_WORKSPACE", "PROJECT_ROOT"]) {
+    if (typeof process.env[envKey] === "string" && process.env[envKey].trim()) values.push(process.env[envKey]);
+  }
+  if (process.cwd()) values.push(process.cwd());
+  return normalizeAllowedProjectPaths(values, { ...options, path, home });
+}
+
+function normalizeAllowedProjectPaths(values, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const normalized = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    if (typeof value !== "string" || !value.trim() || value.startsWith("codex-sidebar://") || isCloudProjectPath(value)) continue;
+    try {
+      const projectPath = normalizeProjectPath(value, { home, path });
+      if (!fs.existsSync(projectPath)) continue;
+      normalized.push(realpathOrResolved(projectPath, { fs, path }));
+    } catch {}
+  }
+  return [...new Set(normalized)].sort();
+}
+
+function realpathOrResolved(value, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
 function scanEnvInventory(projectPathInput, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(projectPathInput, { home, path });
+  assertKnownProjectPath(projectPath, options);
   if (projectPath.startsWith("codex-sidebar://") || !fs.existsSync(projectPath)) return { fileCount: 0, keyCount: 0, files: [] };
   const files = scanEnvFiles(projectPath, { fs, path, maxDepth: options.maxDepth ?? MAX_ENV_SCAN_DEPTH })
     .filter((filePath) => !isExampleEnvFileName(path.basename(filePath)))
@@ -2127,6 +2207,7 @@ function resolveProjectEnvFile(input, options = {}, action = "used") {
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(input?.projectPath, { home, path });
+  assertKnownProjectPath(projectPath, options);
   const requestedPath = path.resolve(String(input?.filePath || ""));
   const stat = fs.lstatSync(requestedPath);
   if (stat.isSymbolicLink()) throw new Error("Environment file cannot be a symlink.");

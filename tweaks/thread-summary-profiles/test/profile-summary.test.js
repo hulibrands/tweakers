@@ -6,6 +6,12 @@ const test = require("node:test");
 
 const tweak = require("../index.js").__test;
 
+test("source cleanup runs before repeated starts install new observers", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
+  assert.match(source, /function stopActiveCleanup\(\)/);
+  assert.match(source, /start\(api\) \{\s+stopActiveCleanup\(\);/);
+});
+
 test("resolver emits project-scoped profile rows in stable order with local metadata", () => {
   const root = tempDir();
   const projectPath = path.join(root, "repo");

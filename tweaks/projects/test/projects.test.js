@@ -1027,6 +1027,45 @@ test("env reveal rejects files whose real path is outside the project", (t) => {
   );
 });
 
+test("env reveal and edit require a known project when allowlist is provided", () => {
+  const projectPath = tempDir();
+  const outsideProject = tempDir();
+  const envPath = path.join(projectPath, ".env.local");
+  const outsideEnvPath = path.join(outsideProject, ".env.local");
+  fs.writeFileSync(envPath, "OPENAI_API_KEY=inside\n", "utf8");
+  fs.writeFileSync(outsideEnvPath, "OPENAI_API_KEY=outside\n", "utf8");
+  const options = { fs, path, home: projectPath, allowedProjectPaths: [projectPath] };
+
+  assert.equal(
+    tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY" }, options).value,
+    "inside",
+  );
+  assert.throws(
+    () => tweak.revealEnvValueFromDisk({ projectPath: outsideProject, filePath: outsideEnvPath, key: "OPENAI_API_KEY" }, options),
+    /known Codex projects/,
+  );
+  assert.throws(
+    () => tweak.updateEnvValueOnDisk({ projectPath: outsideProject, filePath: outsideEnvPath, key: "OPENAI_API_KEY", value: "changed" }, options),
+    /known Codex projects/,
+  );
+  assert.equal(fs.readFileSync(outsideEnvPath, "utf8"), "OPENAI_API_KEY=outside\n");
+});
+
+test("AGENTS writer rejects projects outside the allowlist", () => {
+  const projectPath = tempDir();
+  const outsideProject = tempDir();
+  fs.writeFileSync(path.join(outsideProject, "AGENTS.md"), "# Outside\n", "utf8");
+
+  assert.throws(
+    () => tweak.writeProjectConnectionInstructions(
+      { projectPath: outsideProject, projectName: "Outside" },
+      { fs, path, home: projectPath, allowedProjectPaths: [projectPath] },
+    ),
+    /known Codex projects/,
+  );
+  assert.equal(fs.readFileSync(path.join(outsideProject, "AGENTS.md"), "utf8"), "# Outside\n");
+});
+
 test("renderer source registers Projects settings page and accordion markers", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
@@ -1049,6 +1088,12 @@ test("renderer source registers Projects settings page and accordion markers", (
   assert.match(source, /dataset\.projectsEnvRedacted/);
   assert.match(source, /compactText\(node\.textContent\) === "Chats"/);
   assert.match(source, /Managed by Projects for this project\./);
+  assert.match(source, /function stopActiveCleanup\(\)/);
+  assert.match(source, /start\(api\) \{\s+stopActiveCleanup\(\);/);
+  assert.match(source, /auditBundledChromeRouting/);
+  assert.match(source, /readOnly: input\?\.repair !== true/);
+  assert.doesNotMatch(source, /startChromePluginCacheWatcher\(\{ home/);
+  assert.doesNotMatch(source, /patchBundledChromeRouting\(\{ home: require\("node:os"\)\.homedir\(\)/);
   assert.doesNotMatch(source, /existing Plugin Profiles assignment store/);
   assert.doesNotMatch(source, /sk-secret|postgres:\/\/user:pass/);
 });

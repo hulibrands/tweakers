@@ -15,6 +15,7 @@ function syncProjectConnectionInstructions(input, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
   const projectPath = normalizeProjectPath(input?.projectPath || input, options);
+  assertKnownProjectPath(projectPath, options);
   if (isProjectAgentsInstructionWriteDisabled(projectPath, options)) {
     return agentsInstructionResult(projectPath, {
       path,
@@ -34,6 +35,7 @@ function syncProjectConnectionInstructions(input, options = {}) {
 function projectConnectionInstructionSummary(input, options = {}) {
   const path = options.path || require("node:path");
   const projectPath = normalizeProjectPath(input?.projectPath || input, options);
+  assertKnownProjectPath(projectPath, options);
   const projectStorage = readStorageFile(PROJECTS_TWEAK_ID, options);
   const chromeStorage = readStorageFile(CHROME_TWEAK_ID, options);
   const projectChromeAssignments = projectStorage[CHROME_ASSIGNMENTS_KEY] || {};
@@ -54,6 +56,7 @@ function previewProjectConnectionInstructions(input, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
   const projectPath = normalizeProjectPath(input?.projectPath || input, options);
+  assertKnownProjectPath(projectPath, options);
   const summary = projectConnectionInstructionSummary(input, options);
   const block = buildProjectConnectionInstructionBlock(summary, options);
   const target = projectPath && !projectPath.startsWith("codex-sidebar://") ? path.join(projectPath, "AGENTS.md") : "";
@@ -72,6 +75,7 @@ function writeProjectConnectionInstructions(summary, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
   const projectPath = normalizeProjectPath(summary?.projectPath, options);
+  assertKnownProjectPath(projectPath, options);
   if (projectPath.startsWith("codex-sidebar://") || !fs.existsSync(projectPath)) {
     return agentsInstructionResult(projectPath, {
       path,
@@ -171,6 +175,7 @@ function buildProjectConnectionInstructionBlock(summary, options = {}) {
 
 function setProjectAgentsInstructionWriteDisabled(input, options = {}) {
   const projectPath = normalizeProjectPath(input?.projectPath || input, options);
+  assertKnownProjectPath(projectPath, options);
   const disabled = Boolean(input?.disabled);
   const storage = readStorageFile(PROJECTS_TWEAK_ID, options);
   const current = normalizeDisabledProjects(storage[AGENTS_WRITE_DISABLED_PROJECTS_KEY]);
@@ -185,6 +190,7 @@ function setProjectAgentsInstructionWriteDisabled(input, options = {}) {
 
 function setProjectAgentsInstructionPluginWriteDisabled(input, options = {}) {
   const projectPath = normalizeProjectPath(input?.projectPath || input, options);
+  assertKnownProjectPath(projectPath, options);
   const pluginId = normalizePluginId(input?.pluginId);
   const disabled = Boolean(input?.disabled);
   const storage = readStorageFile(PROJECTS_TWEAK_ID, options);
@@ -202,12 +208,14 @@ function setProjectAgentsInstructionPluginWriteDisabled(input, options = {}) {
 
 function isProjectAgentsInstructionWriteDisabled(projectPathInput, options = {}) {
   const projectPath = normalizeProjectPath(projectPathInput, options);
+  assertKnownProjectPath(projectPath, options);
   const storage = readStorageFile(PROJECTS_TWEAK_ID, options);
   return normalizeDisabledProjects(storage[AGENTS_WRITE_DISABLED_PROJECTS_KEY]).includes(projectPath);
 }
 
 function projectAgentsInstructionPluginWriteDisabled(projectPathInput, options = {}) {
   const projectPath = normalizeProjectPath(projectPathInput, options);
+  assertKnownProjectPath(projectPath, options);
   const storage = readStorageFile(PROJECTS_TWEAK_ID, options);
   return normalizePluginDisabledMap(storage[AGENTS_PLUGIN_WRITE_DISABLED_KEY])[projectPath] || [];
 }
@@ -349,6 +357,52 @@ function normalizeProjectPath(input, options = {}) {
   if (typeof input !== "string" || input.trim() === "") throw new Error("Project path is required.");
   if (input.startsWith("codex-sidebar://")) return input;
   return path.resolve(input.replace(/^~(?=$|\/|\\)/, home));
+}
+
+function assertKnownProjectPath(projectPathInput, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const projectPath = normalizeProjectPath(projectPathInput, { home, path });
+  if (projectPath.startsWith("codex-sidebar://") || !fs.existsSync(projectPath)) {
+    throw new Error("This project needs a local path before Projects can update AGENTS.md.");
+  }
+  if (!Array.isArray(options.allowedProjectPaths)) return projectPath;
+  const allowed = normalizeAllowedProjectPaths(options.allowedProjectPaths, { fs, path, home });
+  if (!allowed.length) {
+    throw new Error("Project path must be one of the known Codex projects before Projects can update AGENTS.md.");
+  }
+  const realProjectPath = realpathOrResolved(projectPath, { fs, path });
+  if (!allowed.includes(realProjectPath)) {
+    throw new Error("Project path must be one of the known Codex projects before Projects can update AGENTS.md.");
+  }
+  return realProjectPath;
+}
+
+function normalizeAllowedProjectPaths(values, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const normalized = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    if (typeof value !== "string" || !value.trim() || value.startsWith("codex-sidebar://")) continue;
+    try {
+      const projectPath = normalizeProjectPath(value, { home, path });
+      if (!fs.existsSync(projectPath)) continue;
+      normalized.push(realpathOrResolved(projectPath, { fs, path }));
+    } catch {}
+  }
+  return [...new Set(normalized)].sort();
+}
+
+function realpathOrResolved(value, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
 }
 
 function userRootForPlatform(home, path) {

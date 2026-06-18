@@ -99,6 +99,14 @@ test("sidebar chat multi-select wires selection markers and native batch menu", 
   assert.match(source, /label: `Open \$\{count\} mini window\$\{suffix\}`/);
 });
 
+test("sidebar chat multi-select uses a single native click activation path", () => {
+  const match = /const clickElement = \(node\) => \{([\s\S]*?)\n    \};/.exec(source);
+  assert.ok(match, "clickElement helper should be present");
+  assert.match(match[1], /node\.click\(\)/);
+  assert.doesNotMatch(match[1], /dispatchEvent/);
+  assert.doesNotMatch(match[1], /pointerdown|mousedown|pointerup|mouseup/);
+});
+
 test("sidebar chat multi-select recognizes non-Radix Codex menu popovers", () => {
   assert.match(source, /closestNativeMenu/);
   assert.match(source, /isBoundedMenuPopover/);

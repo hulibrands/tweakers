@@ -196,3 +196,62 @@ test("Projects MCP resolves Chrome profile assignments from Projects storage", a
   assert.deepEqual(payload.preferredProfiles[0].profileAliases, ["projects@example.com", "Projects Alias"]);
   assert.equal(payload.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
 });
+
+test("Projects MCP list tools require a project and redact broad account metadata by default", async () => {
+  const projectPath = path.join(os.tmpdir(), "projects-mcp-list");
+  const preferencesPath = path.join(os.tmpdir(), "Chrome", "Profile 9", "Preferences");
+  const result = await runServer(
+    [
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "projects_google_workspace_list_assignments",
+          arguments: { projectPath },
+        },
+      }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "projects_chrome_profile_list_assignments",
+          arguments: { projectPath },
+        },
+      }),
+    ],
+    {
+      googleWorkspaceAccounts: [{ id: "personal", email: "tommyhulihan@gmail.com" }],
+      googleWorkspaceAssignments: {
+        [projectPath]: {
+          gmail: { projectPath, service: "gmail", accountId: "personal", email: "tommyhulihan@gmail.com" },
+        },
+      },
+      chromeAssignments: {
+        [projectPath]: {
+          projectPath,
+          profileDirectory: "Profile 9",
+          profileName: "Projects Owned",
+          profileAliases: ["projects@example.com", "Projects Alias"],
+          preferencesPath,
+          preferredProfiles: [{
+            profileDirectory: "Profile 9",
+            profileName: "Projects Owned",
+            preferencesPath,
+          }],
+        },
+      },
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const googlePayload = JSON.parse(result.messages[0].result.content[0].text);
+  const chromePayload = JSON.parse(result.messages[1].result.content[0].text);
+  assert.equal(googlePayload.assignments[0].projectName, path.basename(projectPath));
+  assert.equal(googlePayload.assignments[0].services.gmail.email, "[redacted-email]");
+  assert.equal(googlePayload.assignments[0].services.gmail.accountId, "[redacted]");
+  assert.equal(chromePayload.assignments[0].preferencesPath, `[redacted]/${path.basename(preferencesPath)}`);
+  assert.deepEqual(chromePayload.assignments[0].profileAliases, ["[redacted-email]", "Projects Alias"]);
+  assert.doesNotMatch(JSON.stringify({ googlePayload, chromePayload }), /tommyhulihan|projects@example\.com|Chrome\/Profile 9/);
+});

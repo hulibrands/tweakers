@@ -10,6 +10,7 @@ const {
   createProjectPath,
   validateProjectPath,
 } = require("../index.cjs").__test;
+const tweak = require("../index.cjs");
 
 function makeTempRoot(t) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "add-project-path-"));
@@ -112,4 +113,33 @@ test("unreadable folders are rejected when permissions can be enforced", (t) => 
   } finally {
     fs.chmodSync(locked, 0o700);
   }
+});
+
+test("main IPC handlers are disposed on stop", () => {
+  delete globalThis.__codexppAddProjectByPathMainHandler;
+  const disposed = [];
+  const channels = [];
+  tweak.start({
+    process: "main",
+    log: { info() {} },
+    ipc: {
+      handle(channel) {
+        channels.push(channel);
+        return () => disposed.push(channel);
+      },
+    },
+  });
+
+  assert.deepEqual(channels.sort(), ["create-project-path", "validate-project-path"]);
+  tweak.stop();
+  assert.deepEqual(disposed.sort(), ["create-project-path", "validate-project-path"]);
+  assert.equal(globalThis.__codexppAddProjectByPathMainHandler, undefined);
+});
+
+test("path entry modal traps tab focus and restores previous focus", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "index.cjs"), "utf8");
+  assert.match(source, /function trapModalFocus/);
+  assert.match(source, /function modalFocusableElements/);
+  assert.match(source, /previousFocus\?\.focus\?\.\(\)/);
+  assert.match(source, /event\.key === "Tab"/);
 });
