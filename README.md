@@ -8,7 +8,6 @@ This repository exists for users who want individual tweaks without installing o
 
 - `account-switcher` - Easy Account Switcher
 - `add-project-by-path` - ShadGPT Add Project by Path
-- `better-browser-agent` - Better Browser Agent
 - `codex-chat-ui` - ShadGPT Codex Chat UI
 - `followup` - Codex Follow-up
 - `github-accounts` - GitHub Accounts
