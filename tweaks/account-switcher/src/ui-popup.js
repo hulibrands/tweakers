@@ -327,8 +327,11 @@ function confirmSwitchAccount(state, accountState, name) {
     overlay.addEventListener("pointerdown", (event) => {
       if (event.target === overlay) finish(false);
     });
-    dialog.addEventListener("pointerdown", (event) => event.stopPropagation(), true);
-    dialog.addEventListener("click", (event) => event.stopPropagation(), true);
+    // Bubble phase, not capture: a capture-phase stopPropagation on the dialog
+    // fires before the click reaches the Cancel/Switch buttons and kills it,
+    // leaving the buttons dead. Bubbling lets the buttons handle it first.
+    dialog.addEventListener("pointerdown", (event) => event.stopPropagation());
+    dialog.addEventListener("click", (event) => event.stopPropagation());
     cancel.addEventListener("click", () => finish(false));
     confirm.addEventListener("click", () => finish(true));
     document.addEventListener("keydown", onKeyDown, true);

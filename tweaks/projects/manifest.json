@@ -16,6 +16,7 @@
     "env"
   ],
   "scope": "both",
+  "mainStartupTimeoutMs": 15000,
   "permissions": [
     "ipc",
     "filesystem",
