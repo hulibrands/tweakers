@@ -19,5 +19,6 @@
     "codex.views"
   ],
   "scope": "both",
+  "mainStartupTimeoutMs": 10000,
   "main": "index.cjs"
 }

@@ -1491,8 +1491,8 @@ var require_ui_popup = __commonJS({
         overlay.addEventListener("pointerdown", (event) => {
           if (event.target === overlay) finish(false);
         });
-        dialog.addEventListener("pointerdown", (event) => event.stopPropagation(), true);
-        dialog.addEventListener("click", (event) => event.stopPropagation(), true);
+        dialog.addEventListener("pointerdown", (event) => event.stopPropagation());
+        dialog.addEventListener("click", (event) => event.stopPropagation());
         cancel.addEventListener("click", () => finish(false));
         confirm.addEventListener("click", () => finish(true));
         document.addEventListener("keydown", onKeyDown, true);
