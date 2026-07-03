@@ -1015,9 +1015,25 @@ test("native plugin row action rewrites Add plugin for installed enabled config 
   row.appendChild(action);
   const changed = syncNativeDirectoryInstalledAction({ row, installed: true, enabled: true });
   assert.equal(changed, true);
-  assert.equal(action.textContent, "Installed");
+  assert.equal(action.textContent, "✓");
   assert.equal(action.disabled, true);
+  assert.equal(action.getAttribute("aria-label"), "Installed and enabled");
   assert.equal(action.dataset.codexppNativePluginInstalledAction, "true");
+});
+
+test("native plugin row action rewrites enabled switch controls to installed checkmarks", () => {
+  const doc = new FakeDocument();
+  const row = doc.createElement("div");
+  const toggle = doc.createElement("button");
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", "true");
+  row.appendChild(toggle);
+  const changed = syncNativeDirectoryInstalledAction({ row, installed: true, enabled: true });
+  assert.equal(changed, true);
+  assert.equal(toggle.textContent, "✓");
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.getAttribute("aria-label"), "Installed and enabled");
+  assert.equal(toggle.dataset.codexppNativePluginInstalledAction, "true");
 });
 
 test("generic plugin cards rewrite Add plugin for enabled configured plugins", () => {
@@ -1042,7 +1058,7 @@ test("generic plugin cards rewrite Add plugin for enabled configured plugins", (
     };
     const changed = syncConfiguredPluginActionButtons(state, doc.body);
     assert.equal(changed, 1);
-    assert.equal(action.textContent, "Installed");
+    assert.equal(action.textContent, "✓");
     assert.equal(action.disabled, true);
   } finally {
     restore();
@@ -1071,8 +1087,39 @@ test("generic plugin cards rewrite bare Add (search/library) for installed enabl
     };
     const changed = syncConfiguredPluginActionButtons(state, doc.body);
     assert.equal(changed, 1);
-    assert.equal(action.textContent, "Installed");
+    assert.equal(action.textContent, "✓");
     assert.equal(action.disabled, true);
+  } finally {
+    restore();
+  }
+});
+
+test("generic plugin cards rewrite enabled switches for installed enabled plugins", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const card = doc.createElement("div");
+    const title = doc.createElement("h3");
+    title.textContent = "Projections Market";
+    const description = doc.createElement("p");
+    description.textContent = "Event-contract research and watchlists";
+    const toggle = doc.createElement("button");
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", "true");
+    card.append(title, description, toggle);
+    doc.body.appendChild(card);
+    const state = {
+      preferences: { nativePatchesSafeMode: false },
+      nativeDirectoryMeta: normalizeNativeDirectoryMeta({
+        plugins: [{ id: "projections-market", name: "Projections Market", displayName: "Projections Market", label: "Projections Market", installed: true, enabled: true }],
+        skills: [],
+      }),
+    };
+    const changed = syncConfiguredPluginActionButtons(state, doc.body);
+    assert.equal(changed, 1);
+    assert.equal(toggle.textContent, "✓");
+    assert.equal(toggle.disabled, true);
+    assert.equal(toggle.getAttribute("aria-label"), "Installed and enabled");
   } finally {
     restore();
   }

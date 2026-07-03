@@ -2284,10 +2284,13 @@ function syncConfiguredPluginActionButtons(state, root = document) {
     return 0;
   }
   let changed = 0;
-  for (const button of Array.from(root.querySelectorAll("button,[role='button']")).filter(isNativeAddPluginActionLoose)) {
+  for (const button of Array.from(root.querySelectorAll("button,[role='button'],[role='switch'],[role='checkbox']")).filter(isNativeInstalledActionControlLoose)) {
     // Bare "Add" (search/library cards) resolves DETERMINISTICALLY only, so a
     // generic "Add" never fuzzy-matches an unrelated plugin and gets wrongly
-    // flipped to "Installed". "Add plugin"/"+" keep the existing fuzzy path.
+    // flipped to an installed checkmark. "Add plugin"/"+" keep the existing fuzzy path.
+    // Native switches follow the deterministic path too, so unrelated settings
+    // toggles are not rewritten unless the surrounding card exactly resolves to
+    // an installed+enabled plugin.
     const exactOnly = !isNativeAddPluginAction(button);
     const record = configuredPluginActionRecord(state, button, exactOnly);
     if (record && record.installed && record.enabled) {
@@ -2337,27 +2340,26 @@ function isConfiguredPluginActionCardCandidate(node, button) {
   const text = compactText(node.textContent || "");
   if (text.length < 3 || text.length > 520) return false;
   const actionText = compactText(button.textContent || "");
+  const actionIsInstalledControl = button.dataset && button.dataset.codexppNativePluginInstalledAction === "true"
+    || isNativePluginEnabledControl(button);
   if (text === actionText) return false;
-  if (!/^Add\b/i.test(actionText) && actionText !== "+" && !(button.dataset && button.dataset.codexppNativePluginInstalledAction === "true")) return false;
+  if (!/^Add\b/i.test(actionText) && actionText !== "+" && !actionIsInstalledControl) return false;
   return hasRowVisualSignal(node) || Boolean(node.querySelector("h1,h2,h3,h4,strong"));
 }
 
 function syncNativeDirectoryInstalledAction(record) {
   const row = record && record.row;
   if (!row || typeof row.querySelectorAll !== "function") return false;
-  const button = Array.from(row.querySelectorAll("button,[role='button']")).find(isNativeAddPluginAction);
-  if (!button) {
-    for (const existing of Array.from(row.querySelectorAll("[data-codexpp-native-plugin-installed-action]"))) {
-      restoreNativeInstalledActionButton(existing);
-    }
-    return false;
+  const installedEnabled = record.installed && record.enabled;
+  const action = nativeInstalledActionCandidate(row);
+  if (!action) {
+    return restoreNativeInstalledActionButtons(row);
   }
-  if (record.installed && record.enabled) {
-    markNativeInstalledActionButton(button);
+  if (installedEnabled) {
+    markNativeInstalledActionButton(action);
     return true;
   }
-  restoreNativeInstalledActionButton(button);
-  return false;
+  return restoreNativeInstalledActionButtons(row);
 }
 
 function isNativeAddPluginAction(node) {
@@ -2379,6 +2381,41 @@ function isNativeAddPluginActionLoose(node) {
   return /^Add\b/i.test(compactText(node.textContent || ""));
 }
 
+function isNativeInstalledActionControlLoose(node) {
+  return isNativeAddPluginActionLoose(node) || isNativePluginEnabledControl(node);
+}
+
+function nativeInstalledActionCandidate(row) {
+  if (!row || typeof row.querySelectorAll !== "function") return null;
+  const controls = Array.from(row.querySelectorAll("button,[role='button'],[role='switch'],[role='checkbox']"));
+  return controls.find(isNativeAddPluginAction)
+    || controls.find(isNativePluginEnabledControl)
+    || null;
+}
+
+function isNativePluginEnabledControl(node) {
+  if (!node) return false;
+  if (node.dataset && node.dataset.codexppNativePluginInstalledAction === "true") return true;
+  const text = compactText(node.textContent || "");
+  const aria = compactText(typeof node.getAttribute === "function" ? node.getAttribute("aria-label") || "" : "");
+  const role = cleanText(typeof node.getAttribute === "function" ? node.getAttribute("role") || "" : "").toLowerCase();
+  const ariaChecked = cleanText(typeof node.getAttribute === "function" ? node.getAttribute("aria-checked") || "" : "").toLowerCase();
+  const dataState = cleanText(typeof node.getAttribute === "function" ? node.getAttribute("data-state") || "" : node.dataset && node.dataset.state || "").toLowerCase();
+  if (/^(Try in chat|Add|Add plugin|\+)$/.test(text) || /^(Try in chat|Add|Add plugin)$/.test(aria)) return false;
+  if (role === "switch" || role === "checkbox") return ariaChecked !== "false" && dataState !== "unchecked";
+  return ariaChecked === "true" || dataState === "checked";
+}
+
+function restoreNativeInstalledActionButtons(root) {
+  if (!root || typeof root.querySelectorAll !== "function") return false;
+  let restored = false;
+  for (const existing of Array.from(root.querySelectorAll("[data-codexpp-native-plugin-installed-action]"))) {
+    restoreNativeInstalledActionButton(existing);
+    restored = true;
+  }
+  return restored;
+}
+
 function markNativeInstalledActionButton(button) {
   if (!button || !button.dataset) return;
   if (button.dataset.codexppNativePluginInstalledAction !== "true") {
@@ -2388,11 +2425,11 @@ function markNativeInstalledActionButton(button) {
   }
   button.dataset.codexppNativePluginInstalledAction = "true";
   button.classList && button.classList.add("codexpp-native-plugin-installed-action");
-  button.textContent = "Installed";
+  button.textContent = "✓";
   button.disabled = true;
   if (typeof button.setAttribute === "function") {
-    button.setAttribute("aria-label", "Installed");
-    button.setAttribute("title", "Enabled in Codex config");
+    button.setAttribute("aria-label", "Installed and enabled");
+    button.setAttribute("title", "Installed and enabled");
   }
 }
 
@@ -5883,11 +5920,27 @@ function injectStyles() {
       box-shadow: 0 1px 2px rgba(0,0,0,.04);
     }
     .codexpp-native-plugin-installed-action {
+      width: 28px !important;
+      min-width: 28px !important;
+      height: 28px !important;
+      min-height: 28px !important;
+      display: inline-grid !important;
+      place-items: center !important;
+      padding: 0 !important;
       cursor: default !important;
-      opacity: .72;
-      border-color: var(--border, rgba(0,0,0,.18)) !important;
-      background: var(--muted, rgba(0,0,0,.04)) !important;
-      color: var(--text-secondary, rgba(0,0,0,.58)) !important;
+      pointer-events: none !important;
+      opacity: .72 !important;
+      border: 0 !important;
+      border-radius: 999px !important;
+      background: transparent !important;
+      box-shadow: none !important;
+      color: color-mix(in srgb, var(--text-secondary, rgba(0,0,0,.58)) 78%, transparent) !important;
+      font: inherit !important;
+      font-size: 20px !important;
+      font-weight: 400 !important;
+      line-height: 1 !important;
+      appearance: none !important;
+      -webkit-appearance: none !important;
     }
     .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files *, .codexpp-native-directory-controls, .codexpp-native-directory-controls * { box-sizing: border-box; }
     .codexpp-tweaks-directory, .codexpp-td-native-plugin-files, .codexpp-native-directory-controls {
