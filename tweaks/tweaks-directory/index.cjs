@@ -13,6 +13,8 @@ const CHANNELS = {
   getUserPaths: "get-user-paths",
   getTweakFileTree: "get-tweak-file-tree",
   getPluginFileTree: "get-plugin-file-tree",
+  getAppActions: "get-app-actions",
+  getPluginContents: "get-plugin-contents",
   getPluginStatuses: "get-plugin-statuses",
   getDirectoryMeta: "get-directory-meta",
   reconcilePluginDirectory: "reconcile-plugin-directory",
@@ -34,7 +36,7 @@ const SORT_OPTIONS = [
   { key: "default", label: "Default" },
   { key: "created", label: "Date Created" },
   { key: "updated", label: "Date Updated" },
-  { key: "used", label: "Date Used" },
+  { key: "used", label: "File Accessed" },
   { key: "az", label: "A–Z" },
   { key: "plugin", label: "Plugin" },
 ];
@@ -44,7 +46,7 @@ const TWEAKS_SORT_OPTIONS = [
   { key: "default", label: "Default" },
   { key: "created", label: "Date Created" },
   { key: "updated", label: "Date Updated" },
-  { key: "used", label: "Date Used" },
+  { key: "used", label: "File Accessed" },
 ];
 // Native Plugins directory sort list. "Category" === native order (the default).
 const PLUGINS_SORT_OPTIONS = [
@@ -67,7 +69,8 @@ function sortOptionsForMode(mode) {
   return TWEAKS_SORT_OPTIONS;
 }
 const NATIVE_DIRECTORY_MODES = ["plugins", "skills"];
-const NATIVE_DIRECTORY_CONTROLS_ENABLED = true;
+// The Plugins/Skills library is React-owned; Tweaks Directory only owns its Tweaks panel by default.
+const NATIVE_DIRECTORY_CONTROLS_ENABLED = false;
 const NATIVE_DIRECTORY_META_CACHE_TTL_MS = 2000;
 const OBSERVER_WORK_DELAY_MS = 120;
 const NATIVE_OBSERVER_REFRESH_MS = 10_000;
@@ -75,6 +78,22 @@ const NATIVE_OBSERVER_REFRESH_MS = 10_000;
 const DOM_SCAN_LIMIT = 650;
 const DEBUG_NODE_SAMPLE_LIMIT = 8;
 const DEBUG_NODE_TEXT_LIMIT = 160;
+const NATIVE_PLUGIN_DETAIL_TITLE_REJECT = new Set([
+  "Make Codex work your way",
+  "Plugins",
+  "Skills",
+  "Tweaks",
+  "Installed",
+  "Featured",
+  "Recommended",
+  "Productivity",
+  "Files",
+  "Coding",
+  "By OpenAI",
+  "By your workspace",
+  "Personal",
+  "System",
+]);
 
 /**
  * Ordered fallback chain for anchoring onto Codex's plugin page.
@@ -114,7 +133,7 @@ const DEFAULT_DIRECTORY_STATE = {
   skills: { sort: DEFAULT_SORT, installedEnabledOnly: false, groupBy: "category" }, // groupBy retained for persisted back-compat; grouping is now driven by sort === "plugin"
 };
 
-/** @type {import("@codex-plusplus/sdk").Tweak} */
+/** @type {import("@shadgpt/sdk").Tweak} */
 module.exports = {
   start(api) {
     if (api.process === "main") return startMain(api);
@@ -123,7 +142,7 @@ module.exports = {
 };
 
 // Exported for unit tests only — not part of the public API.
-// See tweaks/base/tweaks-directory/test/ for the test harness.
+// See vendor/tweakers/tweaks/tweaks-directory/test/ for the test harness.
 module.exports.__test = {
   PLUGIN_PAGE_ANCHOR_CHAIN,
   isPluginsDirectorySurface,
@@ -154,10 +173,20 @@ module.exports.__test = {
   isNativeDirectoryRowCandidate,
   isInsideAppSidebar,
   groupNativeSkillRowsByPlugin,
+  pluginSkillsForDir,
+  nativePluginMetadataRows,
+  sanitizeNativeMetadataHref,
+  sanitizeNativeIconUrl,
+  isSafeRelativeAssetPath,
+  normalizeNativePluginClis,
+  renderNativePluginClisSection,
+  readPluginMetadata,
   createNativeDirectoryMetaCache,
   pluginStatusesSignature,
   nativeObserverWorkSignature,
+  nativeObserverMutationRoot,
   shouldRefreshNativeObserverData,
+  syncNativeDirectoryIconFrames,
 };
 
 function startMain(api) {
@@ -171,6 +200,12 @@ function startMain(api) {
   }
   if (typeof manager.getPluginFileTree !== "function") {
     api.log.warn("Tweaks Directory native plugin Files insertion is newer than the loaded ShadGPT runtime; restart Codex to enable plugin file trees.");
+  }
+  if (typeof manager.getAppActions !== "function") {
+    api.log.warn("Tweaks Directory app Actions insertion is newer than the loaded ShadGPT runtime; restart Codex to enable app action summaries.");
+  }
+  if (typeof manager.getPluginContents !== "function") {
+    api.log.warn("Tweaks Directory Plugin Contents tabs are newer than the loaded ShadGPT runtime; restart Codex to enable plugin contents.");
   }
 
   const nativeMetaCache = createNativeDirectoryMetaCache();
@@ -228,6 +263,26 @@ function startMain(api) {
         };
       }
       return manager.getPluginFileTree(String(id || ""), options && typeof options === "object" ? options : {});
+    }),
+    api.ipc.handle(CHANNELS.getAppActions, (id) => {
+      if (typeof manager.getAppActions !== "function") {
+        return {
+          status: "error",
+          appName: String(id || ""),
+          message: "This ShadGPT runtime cannot resolve app actions yet. Restart Codex after updating ShadGPT.",
+        };
+      }
+      return manager.getAppActions(String(id || ""));
+    }),
+    api.ipc.handle(CHANNELS.getPluginContents, (id) => {
+      if (typeof manager.getPluginContents !== "function") {
+        return {
+          status: "error",
+          pluginName: String(id || ""),
+          message: "This ShadGPT runtime cannot resolve plugin contents yet. Restart Codex after updating ShadGPT.",
+        };
+      }
+      return manager.getPluginContents(String(id || ""));
     }),
     api.ipc.handle(CHANNELS.getPluginStatuses, () => pluginStatuses()),
     api.ipc.handle(CHANNELS.getDirectoryMeta, (options) => nativeMetaCache.get(options)),
@@ -312,12 +367,38 @@ function getNativeDirectoryMeta(options = {}) {
       const displayName = cleanText(meta.displayName || meta.name || titleFromSlug(id || path.basename(real)));
       const status = pluginStatusForMeta(statuses, id, displayName, sourceId);
       const plugin = {
+        kind: "plugin",
         id,
         name: cleanText(meta.name || id),
         displayName,
         label: displayName || id,
         sourceId,
         dir: real,
+        description: cleanText(meta.description || ""),
+        website: cleanText(meta.website || ""),
+        github: cleanText(meta.github || ""),
+        githubRepoUrl: cleanText(meta.githubRepoUrl || ""),
+        githubRepo: cleanText(meta.githubRepo || ""),
+        githubStars: Number(meta.githubStars || 0),
+        documentation: cleanText(meta.documentation || ""),
+        upstreamVersion: cleanText(meta.upstreamVersion || ""),
+        currentVersion: cleanText(meta.currentVersion || ""),
+        githubLastUpdated: cleanText(meta.githubLastUpdated || ""),
+        tags: Array.isArray(meta.tags) ? meta.tags.map(cleanText).filter(Boolean) : [],
+        iconPath: cleanText(meta.iconPath || ""),
+        iconUrl: cleanText(meta.iconUrl || ""),
+        iconShape: cleanText(meta.iconShape || ""),
+        iconSource: cleanText(meta.iconSource || ""),
+        iconCacheKey: cleanText(meta.iconCacheKey || ""),
+        iconVariants: normalizeIconVariants(meta.iconVariants),
+        marketplaceIconUrl: cleanText(meta.marketplaceIconUrl || ""),
+        marketplaceIconPath: cleanText(meta.marketplaceIconPath || ""),
+        marketplaceIconShape: cleanText(meta.marketplaceIconShape || ""),
+        marketplaceIconSource: cleanText(meta.marketplaceIconSource || ""),
+        marketplaceIconCacheKey: cleanText(meta.marketplaceIconCacheKey || ""),
+        marketplaceIconVariants: normalizeIconVariants(meta.marketplaceIconVariants),
+        cliCommands: normalizeNativePluginClis({ commands: meta.cliCommands }),
+        metadataFetchedAt: cleanText(meta.metadataFetchedAt || ""),
         enabled: status ? status.enabled !== false : false,
         installed: Boolean(status),
         createdAtMs: stats.ctimeMs,
@@ -408,6 +489,24 @@ function syntheticNativePluginFromStatus(status) {
     label: displayName || id,
     sourceId: id,
     dir: "",
+    description: cleanText(status && status.description || ""),
+    website: cleanText(status && status.website || ""),
+    github: cleanText(status && status.github || ""),
+    githubRepoUrl: cleanText(status && status.githubRepoUrl || ""),
+    githubRepo: cleanText(status && status.githubRepo || ""),
+    githubStars: Number(status && status.githubStars || 0),
+    documentation: cleanText(status && status.documentation || ""),
+    upstreamVersion: cleanText(status && status.upstreamVersion || ""),
+    currentVersion: cleanText(status && status.currentVersion || ""),
+    githubLastUpdated: cleanText(status && status.githubLastUpdated || ""),
+    tags: Array.isArray(status && status.tags) ? status.tags.map(cleanText).filter(Boolean) : [],
+    iconPath: cleanText(status && status.iconPath || ""),
+    iconUrl: cleanText(status && status.iconUrl || ""),
+    iconShape: cleanText(status && status.iconShape || ""),
+    iconSource: cleanText(status && status.iconSource || ""),
+    iconCacheKey: cleanText(status && status.iconCacheKey || ""),
+    iconVariants: normalizeIconVariants(status && status.iconVariants),
+    metadataFetchedAt: cleanText(status && status.metadataFetchedAt || ""),
     enabled: status && status.enabled !== false,
     installed: true,
     configured: true,
@@ -538,12 +637,25 @@ function pluginSkillsForDir(fs, path, dir, plugin, meta) {
     if (!include || include.kind !== "skill") continue;
     const name = cleanText(include.name || include.slash || "");
     if (!name) continue;
+    const icon = skillIconForMeta(meta, plugin, {
+      name,
+      displayName: cleanText(include.displayName || include.title || name),
+      slash: cleanText(include.slash || `$${name}`),
+      basename: name,
+    });
     out.push(nativeSkillMeta(plugin, {
       name,
       displayName: cleanText(include.displayName || include.title || name),
       description: cleanText(include.description || ""),
       slash: cleanText(include.slash || `$${name}`),
       sourcePath: dir,
+      iconPath: icon.iconPath,
+      iconUrl: icon.iconUrl,
+      iconShape: icon.iconShape,
+      iconSource: icon.iconSource,
+      iconCacheKey: icon.iconCacheKey,
+      iconVariants: icon.iconVariants,
+      iconInheritedFromPlugin: icon.inheritedFromPlugin,
     }));
   }
   const skillRoots = [
@@ -559,12 +671,28 @@ function pluginSkillsForDir(fs, path, dir, plugin, meta) {
       if (!key || seen.has(key)) continue;
       seen.add(key);
       const stats = safeStatMs(fs, skillPath);
+      const icon = skillIconForMeta(meta, plugin, {
+        name,
+        displayName: parsed.displayName || name,
+        slash: `$${name}`,
+        sourcePath: skillPath,
+        basename: path.basename(path.dirname(skillPath)),
+        icon: parsed.icon,
+        skillDir: path.dirname(skillPath),
+      });
       out.push(nativeSkillMeta(plugin, {
         name,
         displayName: parsed.displayName || name,
         description: parsed.description,
         slash: `$${name}`,
         sourcePath: skillPath,
+        iconPath: icon.iconPath,
+        iconUrl: icon.iconUrl,
+        iconShape: icon.iconShape,
+        iconSource: icon.iconSource,
+        iconCacheKey: icon.iconCacheKey,
+        iconVariants: icon.iconVariants,
+        iconInheritedFromPlugin: icon.inheritedFromPlugin,
         createdAtMs: stats.ctimeMs,
         updatedAtMs: stats.mtimeMs,
         lastUsedAtMs: 0,
@@ -572,6 +700,59 @@ function pluginSkillsForDir(fs, path, dir, plugin, meta) {
     }
   }
   return out;
+}
+
+function skillIconForMeta(meta, plugin, skill) {
+  const direct = skillFrontmatterIcon(plugin, skill);
+  if (direct.iconPath || direct.iconUrl) return direct;
+  const skillIcons = meta && meta.skillIcons && typeof meta.skillIcons === "object" ? meta.skillIcons : {};
+  const candidates = [
+    skill && skill.name,
+    skill && skill.displayName,
+    skill && skill.slash,
+    skill && skill.slash && String(skill.slash).replace(/^\$/, ""),
+    skill && skill.basename,
+  ].map(directoryKey).filter(Boolean);
+  for (const candidate of candidates) {
+    const direct = skillIcons[candidate] || skillIcons[String(candidate)];
+    if (direct) return normalizeSkillIcon(direct, plugin, false);
+    for (const [key, value] of Object.entries(skillIcons)) {
+      if (directoryKey(key) === candidate || slugKey(key) === slugKey(candidate)) {
+        return normalizeSkillIcon(value, plugin, false);
+      }
+    }
+  }
+  return normalizeSkillIcon(null, plugin, true);
+}
+
+function skillFrontmatterIcon(plugin, skill) {
+  const raw = cleanText(skill && skill.icon || "");
+  if (!raw) return { iconPath: "", iconUrl: "", inheritedFromPlugin: true, iconShape: "", iconSource: "", iconCacheKey: "", iconVariants: [] };
+  if (/^(https?:|data:|file:)/i.test(raw)) return { iconPath: "", iconUrl: raw, inheritedFromPlugin: false, iconShape: "", iconSource: "skill-frontmatter", iconCacheKey: "", iconVariants: [] };
+  const pluginDir = cleanText(plugin && plugin.dir || "");
+  const skillDir = cleanText(skill && skill.skillDir || "");
+  if (!pluginDir || !skillDir) return { iconPath: "", iconUrl: "", inheritedFromPlugin: true, iconShape: "", iconSource: "", iconCacheKey: "", iconVariants: [] };
+  const absolute = raw.startsWith("/") ? raw : `${skillDir.replace(/\/+$/, "")}/${raw.replace(/^\.?\//, "")}`;
+  const rel = absolute.startsWith(`${pluginDir.replace(/\/+$/, "")}/`)
+    ? absolute.slice(pluginDir.replace(/\/+$/, "").length + 1)
+    : "";
+  return rel
+    ? { iconPath: `./${rel}`, iconUrl: "", inheritedFromPlugin: false, iconShape: "", iconSource: "skill-frontmatter", iconCacheKey: "", iconVariants: [] }
+    : { iconPath: "", iconUrl: "", inheritedFromPlugin: true, iconShape: "", iconSource: "", iconCacheKey: "", iconVariants: [] };
+}
+
+function normalizeSkillIcon(icon, plugin, defaultInherited) {
+  const data = icon && typeof icon === "object" ? icon : {};
+  const iconPath = cleanText(data.iconPath || plugin.iconPath || "");
+  const iconUrl = cleanText(data.iconUrl || plugin.iconUrl || "");
+  const iconShape = cleanText(data.iconShape || (data.inheritedFromPlugin !== false ? plugin.iconShape : "") || "");
+  const iconSource = cleanText(data.iconSource || (data.inheritedFromPlugin !== false ? plugin.iconSource : "") || "");
+  const iconCacheKey = cleanText(data.iconCacheKey || (data.inheritedFromPlugin !== false ? plugin.iconCacheKey : "") || "");
+  const iconVariants = normalizeIconVariants(data.iconVariants && data.iconVariants.length ? data.iconVariants : data.inheritedFromPlugin !== false ? plugin.iconVariants : []);
+  const inheritedFromPlugin = data.inheritedFromPlugin !== undefined
+    ? data.inheritedFromPlugin !== false
+    : Boolean(defaultInherited || (!data.iconPath && !data.iconUrl));
+  return { iconPath, iconUrl, inheritedFromPlugin, iconShape, iconSource, iconCacheKey, iconVariants };
 }
 
 function discoverSkillMarkdown(fs, path, root) {
@@ -597,10 +778,12 @@ function parseSkillMarkdown(fs, path, file) {
     const yaml = frontmatter ? frontmatter[1] : "";
     const name = (/^name:\s*(.+)$/m.exec(yaml) || [])[1];
     const description = (/^description:\s*(.+)$/m.exec(yaml) || [])[1];
+    const icon = (/^(?:icon|logo|composerIcon):\s*(.+)$/m.exec(yaml) || [])[1];
     return {
       name: cleanYamlScalar(name || path.basename(path.dirname(file))),
       displayName: cleanYamlScalar(name || ""),
       description: cleanYamlScalar(description || ""),
+      icon: cleanYamlScalar(icon || ""),
     };
   } catch {
     return {};
@@ -613,6 +796,7 @@ function cleanYamlScalar(value) {
 
 function nativeSkillMeta(plugin, skill) {
   return {
+    kind: "skill",
     name: cleanText(skill.name),
     displayName: cleanText(skill.displayName || skill.name),
     description: cleanText(skill.description || ""),
@@ -623,6 +807,14 @@ function nativeSkillMeta(plugin, skill) {
     installed: plugin.installed,
     enabled: plugin.enabled,
     sourcePath: skill.sourcePath || "",
+    dir: plugin.dir || "",
+    iconPath: cleanText(skill.iconPath || plugin.iconPath || ""),
+    iconUrl: cleanText(skill.iconUrl || plugin.iconUrl || ""),
+    iconShape: cleanText(skill.iconShape || (skill.iconInheritedFromPlugin !== false ? plugin.iconShape : "") || ""),
+    iconSource: cleanText(skill.iconSource || (skill.iconInheritedFromPlugin !== false ? plugin.iconSource : "") || ""),
+    iconCacheKey: cleanText(skill.iconCacheKey || (skill.iconInheritedFromPlugin !== false ? plugin.iconCacheKey : "") || ""),
+    iconVariants: normalizeIconVariants(skill.iconVariants && skill.iconVariants.length ? skill.iconVariants : skill.iconInheritedFromPlugin !== false ? plugin.iconVariants : []),
+    iconInheritedFromPlugin: skill.iconInheritedFromPlugin !== false,
     createdAtMs: Number(skill.createdAtMs || plugin.createdAtMs || 0),
     updatedAtMs: Number(skill.updatedAtMs || plugin.updatedAtMs || 0),
     lastUsedAtMs: Number(skill.lastUsedAtMs || 0),
@@ -679,6 +871,22 @@ function getRuntimePluginStatuses(options = {}) {
       source: entry.source,
       name: meta.name || meta.displayName || titleFromSlug(entry.id),
       displayName: meta.displayName || meta.name || titleFromSlug(entry.id),
+      description: meta.description || "",
+      website: meta.website || "",
+      github: meta.github || "",
+      githubRepoUrl: meta.githubRepoUrl || "",
+      githubRepo: meta.githubRepo || "",
+      githubStars: Number(meta.githubStars || 0),
+      documentation: meta.documentation || "",
+      upstreamVersion: meta.upstreamVersion || "",
+      currentVersion: meta.currentVersion || "",
+      githubLastUpdated: meta.githubLastUpdated || "",
+      tags: Array.isArray(meta.tags) ? meta.tags : [],
+      iconPath: meta.iconPath || "",
+      iconUrl: meta.iconUrl || "",
+      iconShape: meta.iconShape || "",
+      iconSource: meta.iconSource || "",
+      metadataFetchedAt: meta.metadataFetchedAt || "",
       enabled: entry.enabled !== false,
       configured: true,
       configPath,
@@ -745,6 +953,10 @@ function pluginMetadataRoots(id, source, deps) {
     roots.push(path.join(codexRoot, "cache", "openai-bundled", id));
   } else if (source === "openai-primary-runtime") {
     roots.push(path.join(home, ".cache", "codex-runtimes", "codex-primary-runtime", "plugins", "openai-primary-runtime", id));
+  } else if (source) {
+    roots.push(path.join(codexRoot, "cache", source, id));
+    roots.push(path.join(codexRoot, "cache", source, id, "local"));
+    roots.push(path.join(codexRoot, "cache", source, id, "latest"));
   }
   roots.push(path.join(codexRoot, id));
   return roots;
@@ -763,6 +975,7 @@ function readPluginMetadata(root, deps) {
     for (const dir of candidates) {
       for (const file of [
         path.join(dir, ".codex-plugin", "plugin.json"),
+        path.join(dir, ".claude-plugin", "plugin.json"),
         path.join(dir, "plugin.json"),
         path.join(dir, ".app.json"),
         path.join(dir, "package.json"),
@@ -773,17 +986,261 @@ function readPluginMetadata(root, deps) {
         const iface = nested.interface && typeof nested.interface === "object" && !Array.isArray(nested.interface)
           ? nested.interface
           : null;
+        const sidecar = readPluginMetadataSidecar(fs, path, dir);
+        const cliSidecar = readPluginCliMetadata(fs, path, dir);
+        const pluginSidecar = sidecar && sidecar.plugin && typeof sidecar.plugin === "object" ? sidecar.plugin : {};
+        const sidecarMarketplace = sidecar && sidecar.marketplace && typeof sidecar.marketplace === "object" ? sidecar.marketplace : {};
+        const sidecarSkills = sidecar && sidecar.skills && typeof sidecar.skills === "object" ? sidecar.skills : {};
+        const manifestSkillIcons = nested.skillIcons && typeof nested.skillIcons === "object" ? nested.skillIcons : {};
+        const marketplaceIcon = readMarketplaceIconMetadata(fs, path, dir);
+        const mergedMarketplaceIcon = {
+          iconUrl: sidecarMarketplace.iconUrl || marketplaceIcon.iconUrl || "",
+          iconPath: marketplaceIcon.iconPath || "",
+          iconShape: sidecarMarketplace.iconShape || marketplaceIcon.iconShape || "",
+          iconSource: sidecarMarketplace.iconSource || marketplaceIcon.iconSource || "",
+          iconCacheKey: sidecarMarketplace.iconCacheKey || marketplaceIcon.iconCacheKey || "",
+          iconVariants: normalizeIconVariants(sidecarMarketplace.iconVariants || marketplaceIcon.iconVariants),
+        };
+        const author = nested.author && typeof nested.author === "object" ? nested.author.name : nested.author;
         const interfaceDisplayName = iface && typeof iface.displayName === "string" ? iface.displayName : "";
         return {
           id: nested.id || nested.name,
           name: nested.title || nested.displayName || interfaceDisplayName || nested.name,
           displayName: nested.displayName || nested.title || interfaceDisplayName || nested.name,
           interface: iface,
+          description: nested.description || iface && (iface.shortDescription || iface.longDescription) || pluginSidecar.description,
+          author,
+          website: pluginSidecar.website || nested.homepage || iface && iface.websiteURL || "",
+          github: pluginSidecar.github || githubUrlFromManifest(nested) || "",
+          githubRepoUrl: pluginSidecar.githubRepoUrl || pluginSidecar.github || githubUrlFromManifest(nested) || "",
+          githubRepo: pluginSidecar.githubRepo || nested.githubRepo || githubRepoFromManifest(nested) || "",
+          githubStars: pluginSidecar.githubStars || 0,
+          documentation: pluginSidecar.documentation || nested.documentation || "",
+          upstreamVersion: pluginSidecar.upstreamVersion || nested.upstreamVersion || "",
+          currentVersion: pluginSidecar.currentVersion || nested.currentVersion || nested.version || "",
+          githubLastUpdated: pluginSidecar.githubLastUpdated || nested.githubLastUpdated || "",
+          tags: Array.isArray(pluginSidecar.tags) ? pluginSidecar.tags : Array.isArray(nested.tags) ? nested.tags : [],
+          iconPath: pluginSidecar.iconPath || iface && (iface.logo || iface.composerIcon) || mergedMarketplaceIcon.iconPath || "",
+          iconUrl: pluginSidecar.iconUrl || mergedMarketplaceIcon.iconUrl || "",
+          iconShape: pluginSidecar.iconShape || nested.iconShape || iface && iface.iconShape || mergedMarketplaceIcon.iconShape || "",
+          iconSource: pluginSidecar.iconSource || nested.iconSource || mergedMarketplaceIcon.iconSource || "",
+          iconCacheKey: pluginSidecar.iconCacheKey || nested.iconCacheKey || iface && iface.iconCacheKey || mergedMarketplaceIcon.iconCacheKey || "",
+          iconVariants: normalizeIconVariants(pluginSidecar.iconVariants || nested.iconVariants || iface && iface.iconVariants || mergedMarketplaceIcon.iconVariants),
+          marketplaceIconUrl: mergedMarketplaceIcon.iconUrl || "",
+          marketplaceIconPath: mergedMarketplaceIcon.iconPath || "",
+          marketplaceIconShape: mergedMarketplaceIcon.iconShape || "",
+          marketplaceIconSource: mergedMarketplaceIcon.iconSource || "",
+          marketplaceIconCacheKey: mergedMarketplaceIcon.iconCacheKey || "",
+          marketplaceIconVariants: normalizeIconVariants(mergedMarketplaceIcon.iconVariants),
+          cliCommands: normalizeNativePluginClis(cliSidecar),
+          skillIcons: normalizeSkillIconMap({ ...manifestSkillIcons, ...sidecarSkills }),
+          metadataFetchedAt: sidecar && sidecar.fetchedAt || "",
         };
       }
     }
   } catch {}
   return null;
+}
+
+function readMarketplaceIconMetadata(fs, path, pluginDir) {
+  let dir = pluginDir;
+  for (let depth = 0; dir && depth < 8; depth += 1) {
+    const sidecar = safeReadJson(fs, path.join(dir, ".codex-marketplace", "metadata.json"));
+    if (sidecar) {
+      const iconUrl = cleanText(sidecar.iconUrl || "");
+      const iconPath = cleanText(sidecar.iconPath || "");
+      const iconSource = cleanText(sidecar.iconSource || "");
+      const iconShape = marketplaceDefaultIconShape(sidecar, iconSource);
+      const iconCacheKey = cleanText(sidecar.iconCacheKey || "");
+      const iconVariants = normalizeIconVariants(sidecar.iconVariants);
+      const safeIconUrl = sanitizeNativeIconUrl(iconUrl);
+      if (safeIconUrl) return { iconUrl: appendIconCache(safeIconUrl, iconCacheKey), iconPath: "", iconShape, iconSource, iconCacheKey, iconVariants };
+      if (iconPath) return { iconUrl: marketplaceFileUrl(path, dir, iconPath, iconCacheKey), iconPath: "", iconShape, iconSource, iconCacheKey, iconVariants };
+    }
+    const marketplace = safeReadJson(fs, path.join(dir, ".agents", "plugins", "marketplace.json"));
+    const iface = marketplace && marketplace.interface && typeof marketplace.interface === "object" ? marketplace.interface : null;
+    const logo = cleanText(iface && (iface.logo || iface.composerIcon) || "");
+    const iconSource = cleanText(iface && iface.iconSource || "");
+    const iconShape = marketplaceDefaultIconShape(iface || {}, iconSource);
+    const iconCacheKey = cleanText(iface && iface.iconCacheKey || "");
+    const iconVariants = normalizeIconVariants(iface && iface.iconVariants);
+    if (logo) {
+      const safeLogo = sanitizeNativeIconUrl(logo);
+      if (safeLogo) return { iconUrl: appendIconCache(safeLogo, iconCacheKey), iconPath: "", iconShape, iconSource, iconCacheKey, iconVariants };
+      return { iconUrl: marketplaceFileUrl(path, dir, logo, iconCacheKey), iconPath: "", iconShape, iconSource, iconCacheKey, iconVariants };
+    }
+    const parent = path.dirname(dir);
+    if (!parent || parent === dir) break;
+    dir = parent;
+  }
+  return { iconPath: "", iconUrl: "", iconShape: "", iconSource: "", iconCacheKey: "", iconVariants: [] };
+}
+
+function marketplaceDefaultIconShape(data, iconSource = "") {
+  const source = cleanText(iconSource || data && data.iconSource || "");
+  const shape = cleanText(data && (data.iconShape || data.defaultIconShape) || "");
+  if (shape) return shape;
+  if (source === "github") return "circle";
+  if (source === "favicon") return "rounded";
+  return "";
+}
+
+function marketplaceFileUrl(path, root, relPath, cacheKey = "") {
+  try {
+    const { pathToFileURL } = require("node:url");
+    const clean = isSafeRelativeAssetPath(relPath);
+    if (!clean) return "";
+    return appendIconCache(pathToFileURL(path.resolve(root, clean)).href, cacheKey);
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeNativeMetadataHref(value) {
+  const raw = cleanText(value);
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeNativeIconUrl(value) {
+  const raw = cleanText(value);
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (url.protocol === "https:" || url.protocol === "http:") return url.href;
+    if (url.protocol === "data:" && isSafeImageDataUrl(raw)) return raw;
+  } catch {}
+  return "";
+}
+
+function isSafeImageDataUrl(value) {
+  return /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon);base64,[a-z0-9+/=\s]+$/i.test(String(value || ""));
+}
+
+function isSafeRelativeAssetPath(value) {
+  const input = String(value || "").trim();
+  if (!input || input.startsWith("/") || input.startsWith("\\") || /^[a-z][a-z0-9+.-]*:/i.test(input)) return "";
+  const raw = input.replace(/^\.?[\\/]/, "");
+  if (raw.startsWith("/") || raw.startsWith("\\") || raw.includes("\0")) return "";
+  const parts = raw.split(/[\\/]+/).filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => part === "." || part === "..")) return "";
+  return parts.join("/");
+}
+
+function appendIconCache(url, cacheKey) {
+  const raw = cleanText(url);
+  const key = cleanText(cacheKey);
+  if (!raw || !key || /^data:/i.test(raw)) return raw;
+  if (/[?&]codex_icon_cache=/.test(raw)) return raw;
+  return `${raw}${raw.includes("?") ? "&" : "?"}codex_icon_cache=${encodeURIComponent(key)}`;
+}
+
+function normalizeIconVariants(input) {
+  if (!Array.isArray(input)) return [];
+  return input.map((item) => {
+    const data = item && typeof item === "object" ? item : {};
+    return {
+      scale: Number(data.scale || 0),
+      size: Number(data.size || 0),
+      iconPath: cleanText(data.iconPath || ""),
+      iconUrl: cleanText(data.iconUrl || ""),
+    };
+  }).filter((item) => item.iconPath || item.iconUrl);
+}
+
+function normalizeSkillIconMap(input) {
+  const out = {};
+  if (!input || typeof input !== "object") return out;
+  for (const [key, value] of Object.entries(input)) {
+    if (!key || !value || typeof value !== "object") continue;
+    const normalized = {
+      name: cleanText(value.name || key),
+      displayName: cleanText(value.displayName || value.name || key),
+      iconPath: cleanText(value.iconPath || ""),
+      iconUrl: cleanText(value.iconUrl || ""),
+      inheritedFromPlugin: value.inheritedFromPlugin !== false,
+      source: cleanText(value.source || ""),
+      iconShape: cleanText(value.iconShape || ""),
+      iconSource: cleanText(value.iconSource || ""),
+      iconCacheKey: cleanText(value.iconCacheKey || ""),
+      iconVariants: normalizeIconVariants(value.iconVariants),
+    };
+    out[directoryKey(key)] = normalized;
+    if (normalized.name) out[directoryKey(normalized.name)] = normalized;
+    if (normalized.displayName) out[directoryKey(normalized.displayName)] = normalized;
+  }
+  return out;
+}
+
+function readPluginMetadataSidecar(fs, path, dir) {
+  for (const file of [
+    path.join(dir, ".codex-plugin", "metadata.json"),
+    path.join(dir, "metadata.json"),
+  ]) {
+    const json = safeReadJson(fs, file);
+    if (json) return json;
+  }
+  return null;
+}
+
+function readPluginCliMetadata(fs, path, dir) {
+  return safeReadJson(fs, path.join(dir, ".cli.json"));
+}
+
+function normalizeNativePluginClis(input) {
+  const commands = Array.isArray(input && input.commands) ? input.commands : [];
+  return commands.map(normalizeNativePluginCli).filter(Boolean);
+}
+
+function normalizeNativePluginCli(item) {
+  const value = item && typeof item === "object" ? item : {};
+  const name = clipText(value.name, 120);
+  const command = clipText(value.command, 500);
+  const mode = clipText(value.mode, 40);
+  if (!name || !command || !["read-only", "writes-files"].includes(mode)) return null;
+  return {
+    name,
+    command,
+    mode,
+    description: clipText(value.description, 300),
+    cwd: clipText(value.cwd, 160),
+    examples: Array.isArray(value.examples) ? value.examples.map((example) => clipText(example, 500)).filter(Boolean).slice(0, 5) : [],
+  };
+}
+
+function clipText(value, max) {
+  const text = cleanText(value || "");
+  return text.length > max ? text.slice(0, max) : text;
+}
+
+function githubUrlFromManifest(manifest) {
+  const repo = manifest && manifest.repository;
+  if (!repo) return "";
+  if (typeof repo === "string") return githubUrlFromRepoString(repo);
+  if (typeof repo === "object" && repo.url) return githubUrlFromRepoString(repo.url);
+  return "";
+}
+
+function githubRepoFromManifest(manifest) {
+  const url = githubUrlFromManifest(manifest);
+  const match = /^https:\/\/github\.com\/([^/]+\/[^/#?]+?)(?:\.git)?$/i.exec(url);
+  return match ? match[1].replace(/\.git$/i, "") : "";
+}
+
+function githubUrlFromRepoString(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const ssh = /^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/i.exec(raw);
+  if (ssh) return `https://github.com/${ssh[1].replace(/\.git$/i, "")}`;
+  const https = /^https:\/\/github\.com\/([^/]+\/[^/#?]+?)(?:\.git)?(?:[#?].*)?$/i.exec(raw);
+  if (https) return `https://github.com/${https[1].replace(/\.git$/i, "")}`;
+  if (/^[^/\s]+\/[^/\s]+$/.test(raw)) return `https://github.com/${raw.replace(/\.git$/i, "")}`;
+  return raw;
 }
 
 function safeReadText(fs, file) {
@@ -857,6 +1314,32 @@ function startRenderer(api) {
       key: "",
       section: null,
     },
+    nativePluginMetadata: {
+      key: "",
+      section: null,
+    },
+    nativePluginClis: {
+      key: "",
+      section: null,
+    },
+    nativeAppActions: {
+      key: "",
+      section: null,
+      result: null,
+      loading: false,
+      error: "",
+      requestId: 0,
+    },
+    nativePluginContents: {
+      key: "",
+      section: null,
+      result: null,
+      loading: false,
+      error: "",
+      requestId: 0,
+      tab: "apps",
+      hiddenNativeSections: [],
+    },
     preferences: readPreferences(api),
     directoryState,
     pluginUsage: readPluginUsage(api),
@@ -873,6 +1356,7 @@ function startRenderer(api) {
     nativeObserverSignature: "",
     nativeObserverDataLoadAt: 0,
     nativeObserverDataLoadQueued: false,
+    nativeObserverRoot: null,
     loadToken: 0,
     settingsPageHandle: null,
   };
@@ -883,19 +1367,28 @@ function startRenderer(api) {
   installNativePluginUsageTracking(state);
   scanForMount(state);
   syncNativePluginIncludesIcons(state);
+  syncNativePluginMetadataDetails(state);
+  syncNativePluginClisSection(state);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
   void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => {
     syncNativeDirectoryControls(state);
     syncConfiguredPluginActionButtons(state);
+    syncNativePluginMetadataDetails(state);
+    syncNativePluginClisSection(state);
+    syncNativePluginContentsSection(state, true);
   });
   state.observer = new MutationObserver((mutations) => {
     if (mutations && mutations.length > 0 && mutations.every((mutation) => isOwnedPanelMutation(state, mutation))) return;
-    scheduleObserverWork(state);
+    const root = nativeObserverMutationRoot(state, mutations);
+    if (!root) return;
+    scheduleObserverWork(state, root);
   });
   state.observer.observe(document.documentElement, { childList: true, subtree: true });
   installMountRescans(state);
   installRouteChangeListeners(state);
   syncNativePluginFilesSection(state, false);
+  syncNativeAppActionsSection(state, false);
+  syncNativePluginContentsSection(state, false);
 
   return () => {
     state.observer && state.observer.disconnect();
@@ -904,6 +1397,10 @@ function startRenderer(api) {
     for (const cleanup of state.mountListeners) cleanup();
     deactivate(state);
     removeNativePluginFilesSection(state);
+    removeNativeAppActionsSection(state);
+    removeNativePluginContentsSection(state);
+    removeNativePluginMetadataDetails(state);
+    removeNativePluginClisSection(state);
     removeNativePluginStatusBadges();
     removeNativePluginInheritedIcons();
     removeNativeDirectoryControls();
@@ -935,6 +1432,8 @@ function installRouteChangeListeners(state) {
     syncDetailFromLocation(state, true);
     render(state);
   syncNativePluginFilesSection(state, false);
+  syncNativeAppActionsSection(state, false);
+  syncNativePluginContentsSection(state, false);
   };
   for (const eventName of ["popstate", "hashchange", "codexpp-pushState", "codexpp-replaceState"]) {
     win.addEventListener(eventName, onNav);
@@ -1399,14 +1898,11 @@ function readDirectoryState(api) {
 
 function normalizeDirectoryState(value) {
   const state = value && typeof value === "object" ? value : {};
-  const normalized = {
+  return {
     tweaks: normalizeDirectoryControls(state.tweaks, DEFAULT_DIRECTORY_STATE.tweaks),
+    plugins: normalizeDirectoryControls(state.plugins, DEFAULT_DIRECTORY_STATE.plugins),
+    skills: normalizeDirectoryControls(state.skills, DEFAULT_DIRECTORY_STATE.skills),
   };
-  if (NATIVE_DIRECTORY_CONTROLS_ENABLED) {
-    normalized.plugins = normalizeDirectoryControls(state.plugins, DEFAULT_DIRECTORY_STATE.plugins);
-    normalized.skills = normalizeDirectoryControls(state.skills, DEFAULT_DIRECTORY_STATE.skills);
-  }
-  return normalized;
 }
 
 function normalizeDirectoryControls(value, fallback) {
@@ -1431,10 +1927,8 @@ function persistDirectoryState(state) {
       installedEnabledOnly: state.installedEnabledOnly,
     },
   };
-  if (NATIVE_DIRECTORY_CONTROLS_ENABLED) {
-    value.plugins = state.nativeDirectoryControls && state.nativeDirectoryControls.plugins;
-    value.skills = state.nativeDirectoryControls && state.nativeDirectoryControls.skills;
-  }
+  value.plugins = state.nativeDirectoryControls && state.nativeDirectoryControls.plugins;
+  value.skills = state.nativeDirectoryControls && state.nativeDirectoryControls.skills;
   const next = normalizeDirectoryState(value);
   state.directoryState = next;
   writeStoredObject(state.api, PREF_KEYS.directoryState, next, state, "directory filters");
@@ -1499,6 +1993,10 @@ function nativePatchesSafeMode(state) {
 function applyNativePatchPreferences(state) {
   if (nativePatchesSafeMode(state)) {
     removeNativePluginFilesSection(state);
+    removeNativeAppActionsSection(state);
+    removeNativePluginContentsSection(state);
+    removeNativePluginMetadataDetails(state);
+    removeNativePluginClisSection(state);
     removeNativePluginStatusBadges();
     removeNativePluginInheritedIcons();
     removeNativeDirectoryControls();
@@ -1506,11 +2004,18 @@ function applyNativePatchPreferences(state) {
     return;
   }
   syncNativePluginFilesSection(state, true);
+  syncNativeAppActionsSection(state, true);
   syncNativePluginIncludesIcons(state);
+  syncNativePluginMetadataDetails(state);
+  syncNativePluginClisSection(state);
+  syncNativePluginContentsSection(state, true);
   void loadPluginStatuses(state).then(() => syncNativePluginStatusBadges(state));
   void loadNativeDirectoryMeta(state, 0, { force: true }).then(() => {
     syncNativeDirectoryControls(state);
     syncConfiguredPluginActionButtons(state);
+    syncNativePluginMetadataDetails(state);
+    syncNativePluginClisSection(state);
+    syncNativePluginContentsSection(state, true);
   });
 }
 
@@ -1518,19 +2023,46 @@ function shouldAutoDeactivate(state) {
   if (!state.active) return false;
   if (!state.root || !state.root.isConnected) return true;
   if (state.tab && !state.tab.isConnected) return true;
+  if (nativeDirectoryTabSelectedWhileTweaksActive(state)) return true;
   if (!isPluginsDirectorySurface(state.root)) return true;
   return false;
 }
 
-function scheduleObserverWork(state) {
+function nativeDirectoryTabSelectedWhileTweaksActive(state) {
+  const rows = [];
+  if (state.tab && state.tab.parentElement) rows.push(state.tab.parentElement);
+  const pair = findPluginsSkillsTabPair();
+  if (pair && pair.tabRow && !rows.includes(pair.tabRow)) rows.push(pair.tabRow);
+  for (const row of rows) {
+    const plugins = findTabInRow(row, "Plugins");
+    const skills = findTabInRow(row, "Skills");
+    if (isNativeTabExplicitlySelected(plugins) || isNativeTabExplicitlySelected(skills)) return true;
+  }
+  return false;
+}
+
+function isNativeTabExplicitlySelected(tab) {
+  if (!tab) return false;
+  if (tab.dataset && tab.dataset.state === "active") return true;
+  return Boolean(tab.getAttribute && (tab.getAttribute("aria-selected") === "true" || tab.getAttribute("aria-pressed") === "true"));
+}
+
+function scheduleObserverWork(state, root = null) {
+  state.nativeObserverRoot = mergeNativeObserverRoot(state.nativeObserverRoot, root);
   if (state.observerTimer) return;
   const timerHost = getTimerHost();
   const run = () => {
     state.observerTimer = null;
+    const patchRoot = state.nativeObserverRoot && state.nativeObserverRoot.isConnected ? state.nativeObserverRoot : document;
+    state.nativeObserverRoot = null;
     mountWhenReady(state);
-    syncNativePluginFilesSection(state, false);
-    syncNativePluginIncludesIcons(state);
-    syncConfiguredPluginActionButtons(state);
+    syncNativePluginFilesSection(state, false, patchRoot);
+    syncNativeAppActionsSection(state, false, patchRoot);
+    syncNativePluginIncludesIcons(state, patchRoot);
+    syncNativePluginMetadataDetails(state, patchRoot);
+    syncNativePluginClisSection(state, patchRoot);
+    syncNativePluginContentsSection(state, false, patchRoot);
+    syncConfiguredPluginActionButtons(state, patchRoot);
     refreshNativeObserverData(state);
     // If the directory subtree was torn down (user navigated away via
     // sidebar / hotkey / pushState), our captured `state.root` becomes
@@ -1553,6 +2085,57 @@ function clearObserverTimer(state) {
   const timerHost = getTimerHost();
   if (timerHost) timerHost.clearTimeout(state.observerTimer);
   state.observerTimer = null;
+}
+
+function mergeNativeObserverRoot(current, next) {
+  if (!current) return next || null;
+  if (!next) return current;
+  if (current === next) return current;
+  if (current.contains && current.contains(next)) return current;
+  if (next.contains && next.contains(current)) return next;
+  return document;
+}
+
+function nativeObserverMutationRoot(state, mutations) {
+  const list = Array.isArray(mutations) ? mutations : Array.from(mutations || []);
+  if (list.length === 0) return null;
+  for (const mutation of list) {
+    for (const node of nativeObserverMutationNodes(mutation)) {
+      const root = nativePatchRootForNode(state, node);
+      if (root) return root;
+    }
+  }
+  return null;
+}
+
+function nativeObserverMutationNodes(mutation) {
+  const nodes = [];
+  if (mutation && mutation.target) nodes.push(mutation.target);
+  if (mutation && mutation.addedNodes) nodes.push(...Array.from(mutation.addedNodes));
+  if (mutation && mutation.removedNodes) nodes.push(...Array.from(mutation.removedNodes));
+  return nodes.filter(Boolean);
+}
+
+function nativePatchRootForNode(state, node) {
+  if (!node || nodeBelongsToPanel(state && state.panel, node)) return null;
+  const root = state && state.root;
+  if (root && (node === root || root.contains && root.contains(node) || node.contains && node.contains(root))) return root;
+  for (let current = elementForNativePatchNode(node); current && current !== document.body; current = current.parentElement) {
+    if (isNativePatchSurface(current)) return current;
+  }
+  return null;
+}
+
+function elementForNativePatchNode(node) {
+  if (!node) return null;
+  if (node.nodeType === 1 || node.querySelectorAll) return node;
+  return node.parentElement || null;
+}
+
+function isNativePatchSurface(node) {
+  if (!node || typeof node.querySelectorAll !== "function") return false;
+  if (isPluginsDirectorySurface(node) || hasNativeDirectorySearch(node)) return true;
+  return Boolean(node.querySelector && node.querySelector("button") && nativePluginDetailTitle(node));
 }
 
 function nativeObserverWorkSignature(state) {
@@ -1684,6 +2267,17 @@ function normalizeNativeMetaItem(item) {
     pluginName: cleanText(value.pluginName || ""),
     pluginLabel: cleanText(value.pluginLabel || value.pluginName || ""),
     slash: cleanText(value.slash || ""),
+    iconShape: cleanText(value.iconShape || ""),
+    iconSource: cleanText(value.iconSource || ""),
+    iconCacheKey: cleanText(value.iconCacheKey || ""),
+    iconVariants: normalizeIconVariants(value.iconVariants),
+    marketplaceIconUrl: cleanText(value.marketplaceIconUrl || ""),
+    marketplaceIconPath: cleanText(value.marketplaceIconPath || ""),
+    marketplaceIconShape: cleanText(value.marketplaceIconShape || ""),
+    marketplaceIconSource: cleanText(value.marketplaceIconSource || ""),
+    marketplaceIconCacheKey: cleanText(value.marketplaceIconCacheKey || ""),
+    marketplaceIconVariants: normalizeIconVariants(value.marketplaceIconVariants),
+    cliCommands: normalizeNativePluginClis({ commands: value.cliCommands }),
     installed: value.installed !== false,
     enabled: value.enabled !== false,
     createdAtMs: Number(value.createdAtMs || 0),
@@ -1753,6 +2347,14 @@ function nativeDirectoryMetaForPluginUsage(state, detail) {
     const labels = directoryUsageKeys(plugin);
     return labels.some((label) => candidates.some((key) => key === label || key.includes(label) || label.includes(key)));
   }) || null;
+}
+
+function nativeDirectoryMetaForDetail(state, detail) {
+  const meta = state && state.nativeDirectoryMeta || {};
+  const title = detail && (detail.title || detail.candidate);
+  const skill = nativeSkillRowMeta(meta, title, title);
+  if (skill) return skill;
+  return nativeDirectoryMetaForPluginUsage(state, detail);
 }
 
 function applyPluginUsageToNativeMeta(state, meta) {
@@ -2243,8 +2845,52 @@ function removeNativeDirectoryControls() {
   for (const button of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-installed-action]"))) {
     restoreNativeInstalledActionButton(button);
   }
+  restoreNativeInstalledLibraryActions(document);
+  removeNativeDirectoryIconFrames(document);
   restoreNativeDirectorySearchRowLayout();
   restoreNativeDirectoryGroupLabels(document);
+}
+
+function syncNativeDirectoryIconFrames(records) {
+  for (const record of records || []) {
+    const row = record && record.row;
+    const image = row && typeof row.querySelector === "function" ? row.querySelector("img") : null;
+    if (!image || !image.dataset) continue;
+    const circle = nativePluginIconIsCircle(record.meta);
+    if (circle) image.dataset.codexppNativePluginGithubIcon = "true";
+    else delete image.dataset.codexppNativePluginGithubIcon;
+    for (const frame of nativeDirectoryIconFrames(row, image)) {
+      if (!frame || !frame.dataset) continue;
+      if (circle) frame.dataset.codexppNativePluginGithubIconFrame = "true";
+      else delete frame.dataset.codexppNativePluginGithubIconFrame;
+    }
+  }
+}
+
+function removeNativeDirectoryIconFrames(root) {
+  const scope = root || document;
+  for (const image of Array.from(scope.querySelectorAll("[data-codexpp-native-plugin-github-icon]"))) {
+    if (image.dataset) delete image.dataset.codexppNativePluginGithubIcon;
+  }
+  for (const frame of Array.from(scope.querySelectorAll("[data-codexpp-native-plugin-github-icon-frame]"))) {
+    if (frame.dataset) delete frame.dataset.codexppNativePluginGithubIconFrame;
+  }
+}
+
+function nativeDirectoryIconFrames(row, image) {
+  const frames = [];
+  let frame = image && image.parentElement;
+  let depth = 0;
+  while (frame && frame !== row && depth < 3) {
+    if (nativeDirectoryIconFrameLooksSafe(frame)) frames.push(frame);
+    frame = frame.parentElement;
+    depth += 1;
+  }
+  return frames;
+}
+
+function nativeDirectoryIconFrameLooksSafe(frame) {
+  return compactText(frame && frame.textContent || "").length <= 24;
 }
 
 function applyNativeDirectoryControls(state, pair, mode) {
@@ -2255,6 +2901,7 @@ function applyNativeDirectoryControls(state, pair, mode) {
   const rows = nativeDirectoryRows(root, pair.tabRow);
   const rowRecords = rows.map((row, index) => nativeDirectoryRowRecord(state, row, mode, index));
   if (mode === "plugins") syncNativeDirectoryInstalledActions(rowRecords);
+  syncNativeDirectoryIconFrames(rowRecords);
   const visible = rowRecords.filter((record) => nativeDirectoryRecordVisible(record, controls));
   const visibleSet = new Set(visible.map((record) => record.row));
   for (const record of rowRecords) setNativeDirectoryRowHidden(record.row, !visibleSet.has(record.row));
@@ -2351,15 +2998,19 @@ function syncNativeDirectoryInstalledAction(record) {
   const row = record && record.row;
   if (!row || typeof row.querySelectorAll !== "function") return false;
   const installedEnabled = record.installed && record.enabled;
+  const hiddenLibraryActions = installedEnabled
+    ? syncNativeInstalledLibraryRowActions(row)
+    : restoreNativeInstalledLibraryActions(row);
   const action = nativeInstalledActionCandidate(row);
   if (!action) {
-    return restoreNativeInstalledActionButtons(row);
+    const restored = restoreNativeInstalledActionButtons(row);
+    return hiddenLibraryActions || restored;
   }
   if (installedEnabled) {
     markNativeInstalledActionButton(action);
     return true;
   }
-  return restoreNativeInstalledActionButtons(row);
+  return restoreNativeInstalledActionButtons(row) || hiddenLibraryActions;
 }
 
 function isNativeAddPluginAction(node) {
@@ -2401,9 +3052,66 @@ function isNativePluginEnabledControl(node) {
   const role = cleanText(typeof node.getAttribute === "function" ? node.getAttribute("role") || "" : "").toLowerCase();
   const ariaChecked = cleanText(typeof node.getAttribute === "function" ? node.getAttribute("aria-checked") || "" : "").toLowerCase();
   const dataState = cleanText(typeof node.getAttribute === "function" ? node.getAttribute("data-state") || "" : node.dataset && node.dataset.state || "").toLowerCase();
+  if (isNativeInstalledLibraryHiddenAction(node)) return false;
   if (/^(Try in chat|Add|Add plugin|\+)$/.test(text) || /^(Try in chat|Add|Add plugin)$/.test(aria)) return false;
   if (role === "switch" || role === "checkbox") return ariaChecked !== "false" && dataState !== "unchecked";
   return ariaChecked === "true" || dataState === "checked";
+}
+
+function syncNativeInstalledLibraryRowActions(row) {
+  if (!row || typeof row.querySelectorAll !== "function") return false;
+  let changed = false;
+  for (const button of Array.from(row.querySelectorAll("button,[role='button']"))) {
+    if (isNativeInstalledLibraryHiddenAction(button)) {
+      hideNativeInstalledLibraryAction(button);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function isNativeInstalledLibraryHiddenAction(node) {
+  if (!node) return false;
+  const text = compactText(node.textContent || "");
+  const aria = compactText(typeof node.getAttribute === "function" ? node.getAttribute("aria-label") || "" : "");
+  const title = compactText(typeof node.getAttribute === "function" ? node.getAttribute("title") || "" : "");
+  if (text === "Try in chat" || aria === "Try in chat" || title === "Try in chat") return true;
+  return isNativeOverflowAction(text) || isNativeOverflowAction(aria) || isNativeOverflowAction(title);
+}
+
+function isNativeOverflowAction(text) {
+  return text === "..." || text === "…" || text === "•••" || text === "⋯" || /\bmore\b/i.test(text) || /\bactions?\b/i.test(text);
+}
+
+function hideNativeInstalledLibraryAction(button) {
+  if (!button || !button.dataset || !button.style) return;
+  if (button.dataset.codexppNativePluginInstalledLibraryHidden !== "true") {
+    button.dataset.codexppNativePluginInstalledLibraryDisplay = button.style.display || "";
+    button.dataset.codexppNativePluginInstalledLibraryAriaHidden = typeof button.getAttribute === "function" ? button.getAttribute("aria-hidden") || "" : "";
+  }
+  button.dataset.codexppNativePluginInstalledLibraryHidden = "true";
+  button.style.display = "none";
+  if (typeof button.setAttribute === "function") button.setAttribute("aria-hidden", "true");
+}
+
+function restoreNativeInstalledLibraryActions(root) {
+  const scope = root || document;
+  if (!scope || typeof scope.querySelectorAll !== "function") return false;
+  let restored = false;
+  for (const button of Array.from(scope.querySelectorAll("[data-codexpp-native-plugin-installed-library-hidden]"))) {
+    if (!button || !button.dataset || !button.style) continue;
+    button.style.display = button.dataset.codexppNativePluginInstalledLibraryDisplay || "";
+    if (typeof button.setAttribute === "function") {
+      const ariaHidden = button.dataset.codexppNativePluginInstalledLibraryAriaHidden || "";
+      if (ariaHidden) button.setAttribute("aria-hidden", ariaHidden);
+      else button.removeAttribute && button.removeAttribute("aria-hidden");
+    }
+    delete button.dataset.codexppNativePluginInstalledLibraryHidden;
+    delete button.dataset.codexppNativePluginInstalledLibraryDisplay;
+    delete button.dataset.codexppNativePluginInstalledLibraryAriaHidden;
+    restored = true;
+  }
+  return restored;
 }
 
 function restoreNativeInstalledActionButtons(root) {
@@ -2823,6 +3531,20 @@ function normalizePluginStatuses(result) {
       source: String(item.source || ""),
       name: String(item.name || item.displayName || item.id || ""),
       displayName: String(item.displayName || item.name || item.id || ""),
+      description: String(item.description || ""),
+      website: String(item.website || ""),
+      github: String(item.github || ""),
+      githubRepoUrl: String(item.githubRepoUrl || ""),
+      githubRepo: String(item.githubRepo || ""),
+      githubStars: Number(item.githubStars || 0),
+      documentation: String(item.documentation || ""),
+      upstreamVersion: String(item.upstreamVersion || ""),
+      currentVersion: String(item.currentVersion || ""),
+      githubLastUpdated: String(item.githubLastUpdated || ""),
+      tags: Array.isArray(item.tags) ? item.tags.map(String).filter(Boolean) : [],
+      iconPath: String(item.iconPath || ""),
+      iconUrl: String(item.iconUrl || ""),
+      metadataFetchedAt: String(item.metadataFetchedAt || ""),
       enabled: item.enabled !== false,
       configured: item.configured !== false,
     };
@@ -2862,40 +3584,50 @@ function nodeBelongsToPanel(panel, node) {
   return Boolean(node.contains && node.contains(panel));
 }
 
-function syncNativePluginFilesSection(state, force) {
-  if (nativePatchesSafeMode(state)) {
-    removeNativePluginFilesSection(state);
-    logNativePluginShape(state, "files-skip-safe-mode", null);
-    return;
-  }
-  if (state.active) {
-    removeNativePluginFilesSection(state);
-    return;
-  }
-  const detail = findNativePluginDetailSurface();
-  if (!detail) {
-    removeNativePluginFilesSection(state);
-    return;
-  }
-  if (!force && state.nativePluginFiles.section && state.nativePluginFiles.section.isConnected && state.nativePluginFiles.key === detail.key) {
-    return;
-  }
+function syncNativePluginFilesSection(state, force, root = document) {
   removeNativePluginFilesSection(state);
-  const section = renderNativePluginFilesSection(state, detail);
-  if (!section) return;
-  detail.anchor.insertAdjacentElement("afterend", section);
-  state.nativePluginFiles.key = detail.key;
-  state.nativePluginFiles.section = section;
-  logNativePluginShape(state, "files-mounted", detail);
+  void force;
+  void root;
 }
 
-function syncNativePluginIncludesIcons(state) {
+function syncNativeAppActionsSection(state, force, root = document) {
+  if (nativePatchesSafeMode(state) || state.active) {
+    removeNativeAppActionsSection(state);
+    return;
+  }
+  const detail = findNativeAppPopupSurface(root);
+  if (!detail || detail.hasNativeActions) {
+    removeNativeAppActionsSection(state);
+    return;
+  }
+  if (state.nativeAppActions.key !== detail.key) {
+    state.nativeAppActions.key = detail.key;
+    state.nativeAppActions.result = null;
+    state.nativeAppActions.error = "";
+    state.nativeAppActions.loading = false;
+    state.nativeAppActions.requestId += 1;
+  }
+  if (!state.nativeAppActions.loading && !state.nativeAppActions.result && !state.nativeAppActions.error) {
+    void loadNativeAppActions(state, detail.candidate, detail.key);
+  }
+  if (!force && state.nativeAppActions.section && state.nativeAppActions.section.isConnected && state.nativeAppActions.key === detail.key) {
+    return;
+  }
+  removeNativeAppActionsSection(state, false);
+  const section = renderNativeAppActionsSection(state, detail);
+  if (!section) return;
+  detail.anchor.insertAdjacentElement("afterend", section);
+  state.nativeAppActions.key = detail.key;
+  state.nativeAppActions.section = section;
+}
+
+function syncNativePluginIncludesIcons(state, root = document) {
   if (nativePatchesSafeMode(state)) {
     removeNativePluginInheritedIcons();
     return;
   }
   if (state.active) return;
-  const detail = findNativePluginDetailSurface();
+  const detail = findNativePluginDetailSurface(root);
   if (!detail) return;
   const pluginIcon = findNativePluginHeroImage(detail.container);
   if (!pluginIcon) return;
@@ -2914,6 +3646,742 @@ function syncNativePluginIncludesIcons(state) {
     row.dataset.codexppPluginInheritedIcon = "true";
     row.dataset.codexppPluginInheritedIconRow = "true";
   }
+}
+
+function syncNativePluginMetadataDetails(state, root = document) {
+  if (nativePatchesSafeMode(state)) {
+    removeNativePluginMetadataDetails(state);
+    return;
+  }
+  if (state.active) {
+    removeNativePluginMetadataDetails(state);
+    return;
+  }
+  const detail = findNativePluginDetailSurface(root);
+  if (!detail) {
+    removeNativePluginMetadataDetails(state);
+    return;
+  }
+  const meta = nativeDirectoryMetaForDetail(state, detail);
+  if (!nativePluginHasRepositoryMetadata(meta)) {
+    removeNativePluginMetadataDetails(state);
+    return;
+  }
+  applyNativePluginHeroIcon(detail, meta);
+  updateNativePluginWebsiteRow(detail, meta);
+  if (
+    state.nativePluginMetadata &&
+    state.nativePluginMetadata.section &&
+    state.nativePluginMetadata.section.isConnected &&
+    state.nativePluginMetadata.key === detail.key
+  ) {
+    updateNativePluginMetadataSection(state.nativePluginMetadata.section, meta);
+    return;
+  }
+  removeNativePluginMetadataDetails(state);
+  const section = renderNativePluginMetadataSection(meta);
+  if (!section) return;
+  detail.anchor.insertAdjacentElement("afterend", section);
+  state.nativePluginMetadata.key = detail.key;
+  state.nativePluginMetadata.section = section;
+  logNativePluginShape(state, "metadata-mounted", detail);
+}
+
+function syncNativePluginClisSection(state, root = document) {
+  if (nativePatchesSafeMode(state) || state.active) {
+    removeNativePluginClisSection(state);
+    return;
+  }
+  const detail = findNativePluginDetailSurface(root);
+  if (!detail) {
+    removeNativePluginClisSection(state);
+    return;
+  }
+  const meta = nativeDirectoryMetaForDetail(state, detail);
+  const clis = Array.isArray(meta && meta.cliCommands) ? meta.cliCommands : [];
+  if (clis.length === 0) {
+    removeNativePluginClisSection(state);
+    return;
+  }
+  if (
+    state.nativePluginClis &&
+    state.nativePluginClis.section &&
+    state.nativePluginClis.section.isConnected &&
+    state.nativePluginClis.key === detail.key
+  ) return;
+  removeNativePluginClisSection(state);
+  const section = renderNativePluginClisSection(clis);
+  if (!section) return;
+  const anchor = state.nativePluginMetadata && state.nativePluginMetadata.key === detail.key && state.nativePluginMetadata.section
+    ? state.nativePluginMetadata.section
+    : detail.anchor;
+  anchor.insertAdjacentElement("afterend", section);
+  state.nativePluginClis.key = detail.key;
+  state.nativePluginClis.section = section;
+  logNativePluginShape(state, "clis-mounted", detail);
+}
+
+function syncNativePluginContentsSection(state, force, root = document) {
+  if (nativePatchesSafeMode(state) || state.active) {
+    removeNativePluginContentsSection(state);
+    return;
+  }
+  const detail = findNativePluginDetailSurface(root);
+  if (!detail) {
+    removeNativePluginContentsSection(state);
+    return;
+  }
+  if (state.nativePluginContents.key !== detail.key) {
+    state.nativePluginContents.key = detail.key;
+    state.nativePluginContents.result = null;
+    state.nativePluginContents.error = "";
+    state.nativePluginContents.loading = false;
+    state.nativePluginContents.requestId += 1;
+    state.nativePluginContents.tab = "apps";
+  }
+  if (!state.nativePluginContents.loading && !state.nativePluginContents.result && !state.nativePluginContents.error) {
+    void loadNativePluginContents(state, detail.candidate, detail.key);
+  }
+  if (
+    !force &&
+    state.nativePluginContents.section &&
+    state.nativePluginContents.section.isConnected &&
+    state.nativePluginContents.key === detail.key
+  ) return;
+  removeNativePluginContentsSection(state, false);
+  const section = renderNativePluginContentsSection(state, detail);
+  if (!section) return;
+  detail.anchor.insertAdjacentElement("afterend", section);
+  state.nativePluginContents.key = detail.key;
+  state.nativePluginContents.section = section;
+  hideNativePluginLegacySections(state, detail);
+}
+
+function nativePluginHasRepositoryMetadata(meta) {
+  return Boolean(meta && (
+    meta.website ||
+    meta.github ||
+    meta.githubRepo ||
+    meta.githubRepoUrl ||
+    meta.documentation ||
+    meta.githubStars ||
+    meta.upstreamVersion ||
+    meta.currentVersion ||
+    meta.githubLastUpdated ||
+    Array.isArray(meta.tags) && meta.tags.length > 0 ||
+    meta.iconPath ||
+    meta.iconUrl
+  ));
+}
+
+function removeNativePluginMetadataDetails(state) {
+  if (state && state.nativePluginMetadata && state.nativePluginMetadata.section) {
+    state.nativePluginMetadata.section.remove();
+  }
+  if (state && state.nativePluginMetadata) {
+    state.nativePluginMetadata.key = "";
+    state.nativePluginMetadata.section = null;
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-metadata]"))) node.remove();
+}
+
+function removeNativePluginClisSection(state) {
+  if (state && state.nativePluginClis && state.nativePluginClis.section) {
+    state.nativePluginClis.section.remove();
+  }
+  if (state && state.nativePluginClis) {
+    state.nativePluginClis.key = "";
+    state.nativePluginClis.section = null;
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-clis]"))) node.remove();
+}
+
+function removeNativePluginContentsSection(state, reset = true) {
+  restoreNativePluginLegacySections(state);
+  if (state && state.nativePluginContents && state.nativePluginContents.section) {
+    state.nativePluginContents.section.remove();
+  }
+  if (state && state.nativePluginContents && reset) {
+    state.nativePluginContents.key = "";
+    state.nativePluginContents.section = null;
+    state.nativePluginContents.result = null;
+    state.nativePluginContents.loading = false;
+    state.nativePluginContents.error = "";
+    state.nativePluginContents.tab = "apps";
+    state.nativePluginContents.hiddenNativeSections = [];
+  } else if (state && state.nativePluginContents) {
+    state.nativePluginContents.section = null;
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-contents]"))) node.remove();
+}
+
+function hideNativePluginLegacySections(state, detail) {
+  restoreNativePluginLegacySections(state);
+  const container = detail && detail.container;
+  if (!container || typeof container.querySelectorAll !== "function") return;
+  const hidden = [];
+  for (const heading of Array.from(container.querySelectorAll("h1,h2,h3"))) {
+    const label = nativePluginLegacySectionLabel(heading);
+    if (!label) continue;
+    const target = nativePluginLegacySectionTarget(heading, container);
+    if (!target || target === container || target.dataset && target.dataset.codexppNativePluginContents) continue;
+    if (target.contains && state.nativePluginContents.section && target.contains(state.nativePluginContents.section)) continue;
+    const previousDisplay = target.style && typeof target.style.display === "string" ? target.style.display : "";
+    if (target.dataset) {
+      target.dataset.codexppNativePluginLegacyHidden = "true";
+      target.dataset.codexppNativePluginLegacyDisplay = previousDisplay;
+    }
+    if (target.style) target.style.display = "none";
+    hidden.push(target);
+  }
+  if (state.nativePluginContents) state.nativePluginContents.hiddenNativeSections = hidden;
+}
+
+function restoreNativePluginLegacySections(state) {
+  const sections = state && state.nativePluginContents && Array.isArray(state.nativePluginContents.hiddenNativeSections)
+    ? state.nativePluginContents.hiddenNativeSections
+    : [];
+  for (const section of sections) {
+    if (!section || !section.style) continue;
+    const previousDisplay = section.dataset && section.dataset.codexppNativePluginLegacyDisplay || "";
+    section.style.display = previousDisplay;
+    if (section.dataset) {
+      delete section.dataset.codexppNativePluginLegacyHidden;
+      delete section.dataset.codexppNativePluginLegacyDisplay;
+    }
+  }
+  if (state && state.nativePluginContents) state.nativePluginContents.hiddenNativeSections = [];
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-plugin-legacy-hidden]"))) {
+    const previousDisplay = node.dataset && node.dataset.codexppNativePluginLegacyDisplay || "";
+    if (node.style) node.style.display = previousDisplay;
+    if (node.dataset) {
+      delete node.dataset.codexppNativePluginLegacyHidden;
+      delete node.dataset.codexppNativePluginLegacyDisplay;
+    }
+  }
+}
+
+function nativePluginLegacySectionLabel(heading) {
+  const text = compactText(heading && heading.textContent || "");
+  if (/^Apps(?:\s+\d+)?$/i.test(text)) return "Apps";
+  if (/^MCP servers(?:\s+\d+)?$/i.test(text)) return "MCP servers";
+  if (/^Skills(?:\s+\d+)?$/i.test(text)) return "Skills";
+  if (/^Agents(?:\s+\d+)?$/i.test(text)) return "Agents";
+  return "";
+}
+
+function nativePluginLegacySectionTarget(heading, container) {
+  let node = heading;
+  while (node && node.parentElement && node.parentElement !== container) {
+    const parent = node.parentElement;
+    if (parent.dataset && (
+      parent.dataset.codexppNativePluginContents ||
+      parent.dataset.codexppNativeAppActions ||
+      parent.dataset.codexppNativePluginMetadata ||
+      parent.dataset.codexppNativePluginClis
+    )) return null;
+    node = parent;
+  }
+  return node && node !== container ? node : heading;
+}
+
+function renderNativePluginMetadataSection(meta) {
+  const rows = nativePluginMetadataRows(meta);
+  if (rows.length === 0) return null;
+  const section = document.createElement("section");
+  section.className = "codexpp-td-detail-section codexpp-td-native-plugin-metadata";
+  section.dataset.codexppNativePluginMetadata = "true";
+  section.dataset.slot = "card";
+  section.appendChild(detailSectionTitle("Repository"));
+  const card = document.createElement("div");
+  card.className = "codexpp-td-detail-card codexpp-td-native-plugin-metadata-card";
+  card.dataset.slot = "card-content";
+  section.appendChild(card);
+  updateNativePluginMetadataSection(section, meta);
+  return section;
+}
+
+function renderNativePluginClisSection(clis) {
+  const commands = Array.isArray(clis) ? clis : [];
+  if (commands.length === 0) return null;
+  const section = document.createElement("section");
+  section.className = "codexpp-td-detail-section codexpp-td-native-plugin-clis";
+  section.dataset.codexppNativePluginClis = "true";
+  section.dataset.slot = "card";
+  section.appendChild(detailSectionTitle("CLIs"));
+  const card = document.createElement("div");
+  card.className = "codexpp-td-detail-card codexpp-td-native-plugin-clis-card";
+  card.dataset.slot = "card-content";
+  for (const command of commands) {
+    const group = document.createElement("div");
+    group.className = "codexpp-td-native-plugin-cli";
+    const title = document.createElement("div");
+    title.className = "codexpp-td-native-plugin-cli-title";
+    title.textContent = command.name;
+    group.appendChild(title);
+    if (command.description) group.appendChild(nativePluginMetadataRow("Description", command.description));
+    group.appendChild(nativePluginMetadataRow("Command", command.command));
+    group.appendChild(nativePluginMetadataRow("Mode", command.mode === "read-only" ? "Read-only" : "Writes files"));
+    if (command.cwd) group.appendChild(nativePluginMetadataRow("Cwd", command.cwd));
+    if (command.examples && command.examples.length) group.appendChild(nativePluginMetadataRow("Examples", command.examples.join("\n")));
+    card.appendChild(group);
+  }
+  section.appendChild(card);
+  return section;
+}
+
+function renderNativePluginContentsSection(state, detail) {
+  const entry = state.nativePluginContents;
+  const result = entry && entry.result;
+  const activeTab = nativePluginContentsTab(entry && entry.tab);
+  const section = document.createElement("section");
+  section.className = "codexpp-td-detail-section codexpp-td-native-plugin-contents";
+  section.dataset.codexppNativePluginContents = "true";
+  section.dataset.slot = "card";
+  section.appendChild(detailSectionTitle("Plugin Contents"));
+
+  const tabs = document.createElement("div");
+  tabs.className = "codexpp-td-plugin-contents-tabs";
+  tabs.setAttribute("role", "tablist");
+  for (const tab of NATIVE_PLUGIN_CONTENT_TABS) {
+    const buttonNode = document.createElement("button");
+    buttonNode.type = "button";
+    buttonNode.className = "codexpp-td-plugin-contents-tab";
+    if (tab.key === activeTab) buttonNode.classList.add("active");
+    buttonNode.setAttribute("role", "tab");
+    buttonNode.setAttribute("aria-selected", tab.key === activeTab ? "true" : "false");
+    buttonNode.textContent = tab.label;
+    buttonNode.addEventListener("click", () => {
+      state.nativePluginContents.tab = tab.key;
+      syncNativePluginContentsSection(state, true);
+    });
+    tabs.appendChild(buttonNode);
+  }
+  section.appendChild(tabs);
+
+  const card = document.createElement("div");
+  card.className = "codexpp-td-detail-card codexpp-td-plugin-contents-card";
+  card.dataset.slot = "card-content";
+  if (entry && entry.loading && !result) {
+    card.appendChild(fileTreeMessage("Loading plugin contents", "Reading plugin app and MCP metadata."));
+  } else if (entry && entry.error) {
+    card.appendChild(fileTreeMessage("Could not load plugin contents", entry.error));
+  } else if (!result || result.status !== "resolved") {
+    card.appendChild(fileTreeMessage("No plugin contents found", result && result.message || "This plugin did not return contents metadata."));
+  } else {
+    card.appendChild(renderNativePluginContentsPanel(state, detail, result, activeTab));
+  }
+  section.appendChild(card);
+  return section;
+}
+
+const NATIVE_PLUGIN_CONTENT_TABS = [
+  { key: "apps", label: "Apps" },
+  { key: "mcp", label: "MCP" },
+  { key: "skills", label: "Skills" },
+  { key: "agents", label: "Agents" },
+  { key: "references", label: "References" },
+  { key: "files", label: "Files" },
+  { key: "overview", label: "Overview" },
+];
+
+function nativePluginContentsTab(value) {
+  const key = String(value || "apps");
+  if (key === "connectors") return "apps";
+  return NATIVE_PLUGIN_CONTENT_TABS.some((tab) => tab.key === key) ? key : "apps";
+}
+
+function renderNativePluginContentsPanel(state, detail, result, tab) {
+  if (tab === "apps") return renderPluginContentsApps(result);
+  if (tab === "mcp") return renderPluginContentsMcpServers(result);
+  if (tab === "files") return renderPluginContentsFiles(result);
+  if (tab === "repository") return renderPluginContentsRepository(state, detail);
+  if (tab === "skills") return renderPluginContentsSkills(state, detail);
+  if (tab === "agents") return renderPluginContentsAgents(result);
+  if (tab === "references") return renderPluginContentsReferences(result);
+  return renderPluginContentsOverview(result);
+}
+
+function renderPluginContentsOverview(result) {
+  const overview = result.overview || {};
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  wrap.appendChild(nativePluginMetadataRow("Apps", String(overview.appCount || 0)));
+  wrap.appendChild(nativePluginMetadataRow("MCP servers", String(overview.mcpServerCount || 0)));
+  wrap.appendChild(nativePluginMetadataRow("Skills", String(overview.skillCount || 0)));
+  wrap.appendChild(nativePluginMetadataRow("Agents", String(overview.agentCount || 0)));
+  wrap.appendChild(nativePluginMetadataRow("References", String(overview.referenceCount || 0)));
+  wrap.appendChild(nativePluginMetadataRow("Cached actions", String(overview.cachedActionTotal || 0)));
+  wrap.appendChild(nativePluginMetadataRow("Write actions", String(overview.writeActions || 0)));
+  wrap.appendChild(nativePluginMetadataRow("Read actions", String(overview.readActions || 0)));
+  wrap.appendChild(nativePluginMetadataRow("No cached action metadata", String(overview.unavailableActionMetadataCount || 0)));
+  return wrap;
+}
+
+function renderPluginContentsApps(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  const apps = Array.isArray(result.apps) ? result.apps : [];
+  wrap.appendChild(pluginContentsSubheading("Apps"));
+  if (apps.length === 0) {
+    wrap.appendChild(nativePluginMetadataRow("Apps", "No Apps declared."));
+  } else {
+    for (const app of apps) wrap.appendChild(pluginContentsConnectorRow(app.name || app.key, app.description, pluginContentsAppActionsLabel(app)));
+  }
+  return wrap;
+}
+
+function renderPluginContentsMcpServers(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  const servers = Array.isArray(result.mcpServers) ? result.mcpServers : [];
+  wrap.appendChild(pluginContentsSubheading("MCP servers"));
+  if (servers.length === 0) {
+    wrap.appendChild(nativePluginMetadataRow("MCP servers", "No MCP servers declared."));
+  } else {
+    for (const server of servers) {
+      const launch = pluginContentsServerLaunch(server);
+      wrap.appendChild(pluginContentsConnectorRow(server.title || server.key, server.description, launch));
+    }
+  }
+  return wrap;
+}
+
+function renderPluginContentsFiles(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  wrap.appendChild(nativePluginMetadataRow("Root", result.rootPath || "Unknown"));
+  wrap.appendChild(nativePluginMetadataRow("Source", compactText(String(result.sourceKind || "plugin").replace(/[-_]+/g, " ")) || "plugin"));
+  wrap.appendChild(nativePluginMetadataRow("App manifest", ".app.json"));
+  wrap.appendChild(nativePluginMetadataRow("MCP servers", ".mcp.json"));
+  wrap.appendChild(nativePluginMetadataRow("Plugin manifest", ".codex-plugin/plugin.json"));
+  return wrap;
+}
+
+function renderPluginContentsRepository(state, detail) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  const meta = nativeDirectoryMetaForDetail(state, detail);
+  const rows = nativePluginMetadataRows(meta);
+  if (rows.length === 0) {
+    wrap.appendChild(nativePluginMetadataRow("Repository", "No repository metadata cached."));
+    return wrap;
+  }
+  for (const row of rows) wrap.appendChild(nativePluginMetadataRow(row.label, row.value, row.href));
+  return wrap;
+}
+
+function renderPluginContentsSkills(state, detail) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  const result = state.nativePluginContents && state.nativePluginContents.result || {};
+  const skills = Array.isArray(result.skills) ? result.skills : nativePluginContentSkills(state, detail);
+  if (skills.length === 0) {
+    wrap.appendChild(nativePluginMetadataRow("Skills", "No skills cached for this plugin."));
+    return wrap;
+  }
+  for (const skill of skills) {
+    const label = skill.displayName || skill.name || skill.slash || "Skill";
+    wrap.appendChild(pluginContentsConnectorRow(label, skill.description, skill.path || (skill.enabled === false ? "Disabled" : "Enabled")));
+  }
+  return wrap;
+}
+
+function renderPluginContentsAgents(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  const agents = Array.isArray(result.agents) ? result.agents : [];
+  wrap.appendChild(pluginContentsSubheading("Agents"));
+  if (agents.length === 0) {
+    wrap.appendChild(nativePluginMetadataRow("Agents", "No agents declared."));
+    return wrap;
+  }
+  for (const agent of agents) {
+    wrap.appendChild(pluginContentsConnectorRow(agent.name || agent.title || agent.key, agent.description, agent.path || "Agent"));
+  }
+  return wrap;
+}
+
+function renderPluginContentsReferences(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "codexpp-td-plugin-contents-panel";
+  const references = Array.isArray(result.references) ? result.references : [];
+  wrap.appendChild(pluginContentsSubheading("References"));
+  if (references.length === 0) {
+    wrap.appendChild(nativePluginMetadataRow("References", "No references declared."));
+    return wrap;
+  }
+  for (const reference of references) {
+    wrap.appendChild(pluginContentsConnectorRow(reference.title || reference.name || reference.key, reference.description, reference.path || "Reference"));
+  }
+  return wrap;
+}
+
+function nativePluginContentSkills(state, detail) {
+  const meta = state && state.nativeDirectoryMeta || {};
+  const skills = Array.isArray(meta.skills) ? meta.skills : [];
+  const pluginKeys = nativePluginUsageKeys(state, detail).map(directoryKey).filter(Boolean);
+  return skills.filter((skill) => {
+    const keys = [skill.pluginName, skill.pluginLabel].map(directoryKey).filter(Boolean);
+    return keys.some((key) => pluginKeys.includes(key));
+  });
+}
+
+function pluginContentsSubheading(label) {
+  const heading = document.createElement("div");
+  heading.className = "codexpp-td-plugin-contents-subheading";
+  heading.textContent = label;
+  return heading;
+}
+
+function pluginContentsConnectorRow(title, description, meta) {
+  const row = document.createElement("div");
+  row.className = "codexpp-td-plugin-contents-row";
+  const body = document.createElement("div");
+  body.className = "codexpp-td-plugin-contents-row-body";
+  const strong = document.createElement("strong");
+  strong.textContent = title || "Untitled";
+  body.appendChild(strong);
+  if (description) {
+    const desc = document.createElement("p");
+    desc.textContent = description;
+    body.appendChild(desc);
+  }
+  const badge = document.createElement("span");
+  badge.className = "codexpp-td-plugin-contents-row-meta";
+  badge.textContent = meta || "";
+  row.append(body, badge);
+  return row;
+}
+
+function pluginContentsAppActionsLabel(app) {
+  if (!app || app.actionsStatus !== "resolved") return "No cached actions";
+  const total = Number(app.totalActions || 0);
+  const write = Number(app.writeActions || 0);
+  const read = Number(app.readActions || 0);
+  return `${total} action${total === 1 ? "" : "s"} (${write} write, ${read} read)`;
+}
+
+function pluginContentsServerLaunch(server) {
+  if (!server) return "unknown";
+  if (server.url) return `${server.launchType || "http"} · ${server.url}`;
+  const command = [server.command, ...(Array.isArray(server.args) ? server.args : [])].filter(Boolean).join(" ");
+  return command ? `${server.launchType || "stdio"} · ${command}` : server.launchType || "unknown";
+}
+
+function updateNativePluginMetadataSection(section, meta) {
+  const card = section && section.querySelector(".codexpp-td-native-plugin-metadata-card");
+  if (!card) return;
+  card.replaceChildren();
+  for (const row of nativePluginMetadataRows(meta)) card.appendChild(nativePluginMetadataRow(row.label, row.value, row.href));
+}
+
+function nativePluginMetadataRows(meta) {
+  if (!meta) return [];
+  const rows = [];
+  if (meta.kind === "skill") {
+    if (meta.pluginLabel || meta.pluginName) rows.push({ label: "Plugin", value: meta.pluginLabel || meta.pluginName });
+    if (meta.iconPath || meta.iconUrl) {
+      rows.push({ label: "Skill Icon", value: meta.iconInheritedFromPlugin ? `Inherited from ${meta.pluginLabel || meta.pluginName || "plugin"}` : "Custom skill icon" });
+      rows.push({ label: "Icon Source", value: meta.iconUrl || meta.iconPath, href: sanitizeNativeMetadataHref(meta.iconUrl || meta.iconPath) });
+    }
+  }
+  if (meta.kind !== "skill" && (meta.iconPath || meta.iconUrl)) {
+    rows.push({ label: "Plugin Icon Source", value: iconSourceLabel(meta.iconSource, meta.iconShape, meta.iconCacheKey) });
+  }
+  if (meta.marketplaceIconUrl || meta.marketplaceIconPath || meta.marketplaceIconSource || meta.marketplaceIconShape) {
+    const marketplaceIcon = meta.marketplaceIconUrl || meta.marketplaceIconPath || "";
+    rows.push({
+      label: "Marketplace Icon",
+      value: marketplaceIcon || iconSourceLabel(meta.marketplaceIconSource, meta.marketplaceIconShape, meta.marketplaceIconCacheKey),
+      href: sanitizeNativeMetadataHref(marketplaceIcon),
+    });
+    rows.push({
+      label: "Marketplace Icon Source",
+      value: iconSourceLabel(meta.marketplaceIconSource, meta.marketplaceIconShape, meta.marketplaceIconCacheKey),
+    });
+  }
+  if (meta.website) rows.push({ label: "Website", value: meta.website, href: sanitizeNativeMetadataHref(meta.website) });
+  const github = meta.githubRepoUrl || meta.github || (meta.githubRepo ? `https://github.com/${meta.githubRepo}` : "");
+  const githubHref = sanitizeNativeMetadataHref(github);
+  if (github) rows.push({ label: "GitHub Repo URL", value: github, href: githubHref });
+  if (meta.githubRepo) rows.push({ label: "GitHub Repo", value: meta.githubRepo, href: githubHref });
+  if (meta.githubLastUpdated || meta.upstreamVersion) {
+    const updated = meta.githubLastUpdated ? formatMetadataDate(meta.githubLastUpdated) : "";
+    rows.push({ label: "GitHub Last Update", value: [updated, meta.upstreamVersion].filter(Boolean).join(" - ") });
+  }
+  if (meta.currentVersion) rows.push({ label: "Current Version", value: meta.currentVersion });
+  if (Number(meta.githubStars) > 0) rows.push({ label: "GitHub Stars", value: formatInteger(meta.githubStars) });
+  if (meta.documentation) rows.push({ label: "Documentation", value: meta.documentation, href: sanitizeNativeMetadataHref(meta.documentation) });
+  if (Array.isArray(meta.tags) && meta.tags.length > 0) rows.push({ label: "Tags", value: formatTags(meta.tags) });
+  if (meta.metadataFetchedAt) rows.push({ label: "Metadata Updated", value: formatMetadataDate(meta.metadataFetchedAt) });
+  return rows;
+}
+
+function iconSourceLabel(source, shape, cacheKey) {
+  const parts = [];
+  const cleanSource = cleanText(source);
+  const cleanShape = cleanText(shape);
+  if (cleanSource) parts.push(cleanSource === "github" ? "GitHub avatar" : cleanSource);
+  if (cleanShape) parts.push(`${cleanShape} frame`);
+  if (cacheKey) parts.push("cache-busted");
+  return parts.join(", ") || "Custom icon";
+}
+
+function nativePluginMetadataRow(label, value, href) {
+  const row = detailRow(label, "");
+  row.dataset.codexppNativePluginMetadataRow = "true";
+  const valueNode = row.querySelector(".codexpp-td-detail-row-value");
+  if (valueNode) {
+    valueNode.textContent = "";
+    const safeHref = sanitizeNativeMetadataHref(href);
+    if (safeHref) {
+      const link = document.createElement("a");
+      link.href = safeHref;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = value;
+      valueNode.appendChild(link);
+    } else {
+      valueNode.textContent = value || "Unknown";
+    }
+  }
+  return row;
+}
+
+function updateNativePluginWebsiteRow(detail, meta) {
+  if (!detail || !detail.container || !meta || !meta.website) return;
+  const href = sanitizeNativeMetadataHref(meta.website);
+  if (!href) return;
+  const row = nativePluginDetailExistingRow(detail.container, "Website");
+  if (!row || row.dataset.codexppNativePluginWebsiteEnriched === "true") return;
+  const parts = nativePluginDetailRowParts(row, "Website");
+  if (!parts || !parts.value) return;
+  row.dataset.codexppNativePluginWebsiteEnriched = "true";
+  row.dataset.codexppNativePluginWebsiteOriginal = parts.value.textContent || "";
+  parts.value.textContent = "";
+  const link = document.createElement("a");
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  link.textContent = meta.website;
+  parts.value.appendChild(link);
+}
+
+function nativePluginDetailExistingRow(container, label) {
+  const target = compactText(label);
+  const candidates = Array.from(container.querySelectorAll("div,li,tr")).filter((node) => {
+    if (node.dataset && node.dataset.codexppNativePluginMetadata) return false;
+    const text = compactText(node.textContent || "");
+    return text && text.includes(target) && text.length <= 260;
+  });
+  return candidates.find((node) => nativePluginDetailRowParts(node, target)) || null;
+}
+
+function nativePluginDetailRowParts(row, label) {
+  const children = Array.from(row.children || []);
+  if (children.length >= 2 && compactText(children[0].textContent || "") === label) {
+    return { label: children[0], value: children[1] };
+  }
+  const labels = Array.from(row.querySelectorAll("div,span,dt,td,th")).filter((node) => compactText(node.textContent || "") === label);
+  for (const labelNode of labels) {
+    const parent = labelNode.parentElement;
+    if (!parent) continue;
+    const siblings = Array.from(parent.children || []);
+    const index = siblings.indexOf(labelNode);
+    if (index >= 0 && siblings[index + 1]) return { label: labelNode, value: siblings[index + 1] };
+  }
+  return null;
+}
+
+function applyNativePluginHeroIcon(detail, meta) {
+  const icon = nativePluginIconSources(meta);
+  if (!icon.src || !detail || !detail.container) return;
+  const image = findNativePluginHeroImage(detail.container);
+  if (!image || image.dataset.codexppNativePluginMetadataIcon === "true") return;
+  image.dataset.codexppNativePluginMetadataIcon = "true";
+  image.dataset.codexppNativePluginMetadataOriginalSrc = image.getAttribute("src") || "";
+  if (nativePluginIconIsCircle(meta)) image.dataset.codexppNativePluginGithubIcon = "true";
+  if (icon.srcset) image.setAttribute("srcset", icon.srcset);
+  image.src = icon.src;
+}
+
+function nativePluginIconSrc(meta) {
+  return nativePluginIconSources(meta).src;
+}
+
+function nativePluginIconSources(meta) {
+  if (!meta) return { src: "", srcset: "" };
+  const variants = normalizeIconVariants(meta.iconVariants);
+  const srcset = iconVariantSrcSet(meta.dir, variants, meta.iconCacheKey);
+  const best = bestIconVariantSrc(meta.dir, variants, meta.iconCacheKey);
+  if (best) return { src: best, srcset };
+  const safeIconUrl = sanitizeNativeIconUrl(meta.iconUrl);
+  if (safeIconUrl) {
+    return { src: appendIconCache(safeIconUrl, meta.iconCacheKey), srcset };
+  }
+  if (meta.dir && meta.iconPath) return { src: pluginFileIconUrl(meta.dir, meta.iconPath, meta.iconCacheKey), srcset };
+  return { src: "", srcset: "" };
+}
+
+function bestIconVariantSrc(root, variants, cacheKey) {
+  const cleanVariants = normalizeIconVariants(variants);
+  if (!cleanVariants.length) return "";
+  const best = [...cleanVariants].sort((a, b) => Number(b.size || b.scale || 0) - Number(a.size || a.scale || 0))[0];
+  return iconVariantSrc(root, best, cacheKey);
+}
+
+function iconVariantSrcSet(root, variants, cacheKey) {
+  return normalizeIconVariants(variants)
+    .map((variant) => {
+      const src = iconVariantSrc(root, variant, cacheKey);
+      if (!src) return "";
+      const descriptor = Number(variant.scale) > 0 ? `${Number(variant.scale)}x` : Number(variant.size) > 0 ? `${Number(variant.size)}w` : "";
+      return descriptor ? `${src} ${descriptor}` : src;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+function iconVariantSrc(root, variant, cacheKey) {
+  if (!variant) return "";
+  const safeIconUrl = sanitizeNativeIconUrl(variant.iconUrl);
+  if (safeIconUrl) return appendIconCache(safeIconUrl, cacheKey);
+  if (root && variant.iconPath) return pluginFileIconUrl(root, variant.iconPath, cacheKey);
+  return "";
+}
+
+function pluginFileIconUrl(root, relPath, cacheKey) {
+  const rel = isSafeRelativeAssetPath(relPath);
+  if (!rel) return "";
+  return appendIconCache(`file://${String(root).replace(/\/+$/, "")}/${rel}`, cacheKey);
+}
+
+function nativePluginIconIsCircle(meta) {
+  return Boolean(meta && (
+    cleanText(meta.iconShape).toLowerCase() === "circle" ||
+    cleanText(meta.iconSource).toLowerCase() === "github" ||
+    isGithubAvatarSrc(meta.iconUrl)
+  ));
+}
+
+function formatInteger(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "";
+  return new Intl.NumberFormat().format(number);
+}
+
+function formatMetadataDate(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value || "");
+  return date.toLocaleString();
+}
+
+function formatTags(tags) {
+  return (Array.isArray(tags) ? tags : [])
+    .map((tag) => cleanText(String(tag || "")))
+    .filter(Boolean)
+    .join(", ");
 }
 
 function syncNativePluginStatusBadges(state) {
@@ -3011,12 +4479,33 @@ function removeNativePluginFilesSection(state) {
   }
 }
 
-function findNativePluginDetailSurface() {
-  const tryInChat = Array.from(document.querySelectorAll("button")).find((button) => compactText(button.textContent) === "Try in chat");
-  if (!tryInChat || !isVisibleTabCandidate(tryInChat)) return null;
+function removeNativeAppActionsSection(state, reset = true) {
+  if (state && state.nativeAppActions && state.nativeAppActions.section) {
+    state.nativeAppActions.section.remove();
+  }
+  if (state && state.nativeAppActions && reset) {
+    state.nativeAppActions.key = "";
+    state.nativeAppActions.section = null;
+    state.nativeAppActions.result = null;
+    state.nativeAppActions.loading = false;
+    state.nativeAppActions.error = "";
+  } else if (state && state.nativeAppActions) {
+    state.nativeAppActions.section = null;
+  }
+  for (const node of Array.from(document.querySelectorAll("[data-codexpp-native-app-actions]"))) node.remove();
+}
+
+function findNativePluginDetailSurface(root = document) {
+  const scope = root && typeof root.querySelectorAll === "function" ? root : document;
+  const tryInChat = Array.from(scope.querySelectorAll("button")).find((button) => {
+    return compactText(button.textContent) === "Try in chat" && isVisibleTabCandidate(button);
+  });
+  if (!tryInChat) return null;
+  if (nativeDialogSurfaceForNode(tryInChat)) return null;
   let container = tryInChat.parentElement;
   let selected = null;
   while (container && container !== document.body) {
+    if (nativeDialogSurfaceForNode(container)) return null;
     const title = nativePluginDetailTitle(container);
     if (title) {
       selected = { container, title };
@@ -3026,7 +4515,8 @@ function findNativePluginDetailSurface() {
   }
   if (!selected) return null;
   const candidate = compactText(selected.title.textContent || "");
-  if (!candidate || candidate === "Make Codex work your way" || candidate === "Plugins" || candidate === "Skills") return null;
+  if (!isNativePluginDetailTitleText(candidate)) return null;
+  if (nativePluginDetailContainerLooksLikeLibrary(selected.container)) return null;
   const anchor = nativePluginFilesAnchor(selected.container, tryInChat);
   if (!anchor || typeof anchor.insertAdjacentElement !== "function") return null;
   return {
@@ -3038,13 +4528,84 @@ function findNativePluginDetailSurface() {
   };
 }
 
+function findNativeAppPopupSurface(root = document) {
+  const scope = root && typeof root.querySelectorAll === "function" ? root : document;
+  const dialogs = [];
+  if (isNativeDialogSurface(scope)) dialogs.push(scope);
+  dialogs.push(...Array.from(scope.querySelectorAll("[role='dialog'],[aria-modal='true']")));
+  for (const dialog of uniqueNodes(dialogs)) {
+    const tryInChat = Array.from(dialog.querySelectorAll("button")).find((button) => {
+      return compactText(button.textContent || "") === "Try in chat" && isVisibleTabCandidate(button);
+    });
+    if (!tryInChat) continue;
+    const title = nativePluginDetailTitle(dialog);
+    const candidate = compactText(title && title.textContent || "");
+    if (!isNativePluginDetailTitleText(candidate)) continue;
+    const anchor = nativePluginFilesAnchor(dialog, tryInChat);
+    if (!anchor || typeof anchor.insertAdjacentElement !== "function") continue;
+    return {
+      container: dialog,
+      anchor,
+      candidate,
+      title: candidate,
+      key: `native-app:${candidate}`,
+      hasNativeActions: nativeAppPopupHasNativeActionsView(dialog),
+    };
+  }
+  return null;
+}
+
+function uniqueNodes(nodes) {
+  const out = [];
+  for (const node of nodes) {
+    if (node && !out.includes(node)) out.push(node);
+  }
+  return out;
+}
+
+function isNativeDialogSurface(node) {
+  if (!node || typeof node.getAttribute !== "function") return false;
+  return node.getAttribute("role") === "dialog" || node.getAttribute("aria-modal") === "true";
+}
+
+function nativeDialogSurfaceForNode(node) {
+  let current = node;
+  while (current && current !== document.body) {
+    if (isNativeDialogSurface(current)) return current;
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function nativeAppPopupHasNativeActionsView(container) {
+  const text = compactText(container && container.textContent || "");
+  return /\bcontains\s+\d+\s+actions?\b/i.test(text) || (/\b\d+\s+read\b/i.test(text) && /\b\d+\s+write\b/i.test(text));
+}
+
 function nativePluginDetailTitle(container) {
   if (!container || typeof container.querySelectorAll !== "function") return null;
   const titles = Array.from(container.querySelectorAll("h1,h2,h3"));
   return titles.find((title) => {
     const text = compactText(title.textContent || "");
-    return text && text !== "Make Codex work your way" && text !== "Plugins" && text !== "Skills";
+    const tag = String(title.tagName || "").toUpperCase();
+    return (tag === "H1" || tag === "H2") && isNativePluginDetailTitleText(text);
   }) || null;
+}
+
+function isNativePluginDetailTitleText(text) {
+  const value = compactText(text || "");
+  return Boolean(value) && !NATIVE_PLUGIN_DETAIL_TITLE_REJECT.has(value);
+}
+
+function nativePluginDetailContainerLooksLikeLibrary(container) {
+  if (!container || typeof container.querySelectorAll !== "function") return false;
+  if (container.querySelector("input[placeholder='Search plugins'],input[placeholder='Search skills']")) return true;
+  const tryActions = Array.from(container.querySelectorAll("button")).filter((button) => {
+    return compactText(button.textContent || "") === "Try in chat" && isVisibleTabCandidate(button);
+  });
+  if (tryActions.length > 1) return true;
+  const text = compactText(container.textContent || "");
+  return text.includes("Search plugins") || text.includes("Search skills");
 }
 
 function nativePluginFilesAnchor(container, tryInChat) {
@@ -3147,6 +4708,8 @@ function createTweaksTab(sourceTab) {
   const tab = document.createElement("button");
   tab.type = "button";
   if (typeof sourceTab.className === "string") tab.className = sourceTab.className;
+  copyTabAttribute(sourceTab, tab, "role");
+  copyTabAttribute(sourceTab, tab, "data-slot");
   tab.dataset.codexppTweaksDirectoryTab = "true";
   tab.textContent = "Tweaks";
   tab.setAttribute("aria-label", "Tweaks");
@@ -3156,8 +4719,13 @@ function createTweaksTab(sourceTab) {
 function applyTweaksTabShell(tab) {
   if (!tab) return;
   tab.dataset.codexppTweaksDirectoryTabTrigger = "true";
-  tab.dataset.slot = "tabs-trigger";
   if (!tab.getAttribute("aria-label")) tab.setAttribute("aria-label", "Tweaks");
+}
+
+function copyTabAttribute(source, target, name) {
+  if (!source || !target || typeof source.getAttribute !== "function" || typeof target.setAttribute !== "function") return;
+  const value = source.getAttribute(name);
+  if (value !== null && value !== undefined) target.setAttribute(name, value);
 }
 
 function findPluginsSkillsTabs() {
@@ -3263,6 +4831,7 @@ function commonTabParent(left, right) {
 function activate(state, pair, tab) {
   state.active = true;
   removeNativePluginFilesSection(state);
+  removeNativePluginClisSection(state);
   state.tab = tab;
   const livePair = resolveLivePair(pair, tab);
   state.nativeButtons = [livePair.plugins, livePair.skills];
@@ -3558,6 +5127,10 @@ function findDirectoryRoot(tabRow) {
   let firstSurface = null;
   while (node && node !== document.body) {
     if (isPluginsDirectorySurface(node) && !hasShellNavigationSibling(node, tabRow)) {
+      if (isNativeDirectoryStandaloneLabelSurface(node) || isNativeDirectoryToolbarOnlySurface(node)) {
+        node = node.parentElement;
+        continue;
+      }
       if (!firstSurface) firstSurface = node;
       if (
         !isViewportSized(node) &&
@@ -3577,6 +5150,16 @@ function findDirectoryRoot(tabRow) {
   // is itself viewport-sized (i.e., we're really stuck), still return it but
   // the activation log will surface the bad rect for diagnosis.
   return tabRow.parentElement || document.body;
+}
+
+function isNativeDirectoryToolbarOnlySurface(node) {
+  if (!node) return false;
+  if (!hasNativeDirectorySearch(node)) return false;
+  return !hasNativeDirectoryListingSignal(compactText(node.textContent || ""));
+}
+
+function isNativeDirectoryStandaloneLabelSurface(node) {
+  return NATIVE_PLUGIN_DETAIL_TITLE_REJECT.has(compactText(node && node.textContent || ""));
 }
 
 function findDirectoryLayoutRoot(tabRow) {
@@ -3660,6 +5243,7 @@ function hasUsefulDirectoryContentBox(node) {
 
 function directoryContentRootScore(node) {
   const text = compactText(node.textContent || "");
+  if (NATIVE_PLUGIN_DETAIL_TITLE_REJECT.has(text)) return 0;
   const hasSearch = hasNativeDirectorySearch(node);
   const hasListing = hasNativeDirectoryListingSignal(text);
   const hasTitle = text.includes("Make Codex work your way");
@@ -3700,12 +5284,16 @@ function hasNativeDirectorySearch(root) {
     }
   }
   // Generic fallback: any input or [placeholder] node with a known search signal
-  return Array.from(root.querySelectorAll("input,[placeholder]")).some((node) => {
-    const placeholder = typeof node.getAttribute === "function"
-      ? compactText(node.getAttribute("placeholder") || "")
-      : "";
-    return placeholder === "Search plugins" || placeholder === "Search skills";
-  });
+  try {
+    return Array.from(root.querySelectorAll("input,[placeholder]")).some((node) => {
+      const placeholder = typeof node.getAttribute === "function"
+        ? compactText(node.getAttribute("placeholder") || "")
+        : "";
+      return placeholder === "Search plugins" || placeholder === "Search skills";
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -4141,6 +5729,8 @@ function isNativePluginsRegistryNode(node) {
   if (text.includes("Read and manage Slack")) return true;
   if (text.includes("Read and manage Gmail")) return true;
   if (text.includes("Draft replies for every email")) return true;
+  if (text.includes("BioRender") && text.includes("HeyGen")) return true;
+  if (text.includes("Documents") && text.includes("Stripe")) return true;
   return false;
 }
 
@@ -4187,6 +5777,8 @@ function isBoundedRegistryContainer(node) {
   if (text.includes("Search plugins") || text.includes("Search skills")) return true;
   if (text.includes("Featured") && (text.includes("Computer Use") || text.includes("Chrome"))) return true;
   if (text.includes("Make Codex work your way") && (text.includes("Try in chat") || text.includes("Featured"))) return true;
+  if (text.includes("BioRender") && text.includes("HeyGen")) return true;
+  if (text.includes("Documents") && text.includes("Stripe")) return true;
   return false;
 }
 
@@ -5021,6 +6613,93 @@ function renderNativePluginFilesSection(state, detail) {
   return section;
 }
 
+function renderNativeAppActionsSection(state, detail) {
+  const entry = state.nativeAppActions;
+  const result = entry && entry.result;
+  const section = document.createElement("section");
+  section.className = "codexpp-td-detail-section codexpp-td-native-app-actions";
+  section.dataset.codexppNativeAppActions = "true";
+  section.dataset.slot = "card";
+
+  const header = document.createElement("div");
+  header.className = "codexpp-td-files-header";
+  header.appendChild(detailSectionTitle("Actions"));
+
+  const source = document.createElement("span");
+  source.className = "codexpp-td-files-source";
+  source.textContent = formatAppActionsSummary(result, detail.candidate);
+  header.appendChild(source);
+
+  section.appendChild(header);
+
+  const card = document.createElement("div");
+  card.className = "codexpp-td-detail-card codexpp-td-native-app-actions-card";
+  card.dataset.slot = "card-content";
+
+  if (entry && entry.loading && !result) {
+    card.appendChild(fileTreeMessage("Loading actions", "Reading the app action cache."));
+  } else if (entry && entry.error) {
+    card.appendChild(fileTreeMessage("Could not load actions", entry.error));
+  } else if (!result || !Array.isArray(result.actions) || result.actions.length === 0) {
+    card.appendChild(fileTreeMessage("No actions found", result && result.message || "This app did not return action metadata."));
+  } else {
+    if (entry && entry.loading) card.appendChild(fileTreeMessage("Refreshing actions", "Keeping the current action list visible while the runtime refreshes it."));
+    card.appendChild(renderNativeAppActionGroup("Write", result.actions.filter((action) => action.mode !== "read")));
+    card.appendChild(renderNativeAppActionGroup("Read", result.actions.filter((action) => action.mode === "read")));
+    const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics.filter(Boolean) : [];
+    if (diagnostics.length > 0) {
+      const note = document.createElement("p");
+      note.className = "codexpp-td-native-app-actions-note";
+      note.textContent = diagnostics.join(" ");
+      card.appendChild(note);
+    }
+  }
+
+  section.appendChild(card);
+  return section;
+}
+
+function renderNativeAppActionGroup(label, actions) {
+  const group = document.createElement("div");
+  group.className = "codexpp-td-native-app-action-group";
+  const heading = document.createElement("div");
+  heading.className = "codexpp-td-native-app-action-group-heading";
+  heading.textContent = `${label} ${actions.length}`;
+  group.appendChild(heading);
+  const list = document.createElement("div");
+  list.className = "codexpp-td-native-app-action-list";
+  if (actions.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "codexpp-td-native-app-actions-note";
+    empty.textContent = `No ${label.toLowerCase()} actions.`;
+    list.appendChild(empty);
+  } else {
+    for (const action of actions) list.appendChild(renderNativeAppActionRow(action));
+  }
+  group.appendChild(list);
+  return group;
+}
+
+function renderNativeAppActionRow(action) {
+  const row = document.createElement("div");
+  row.className = "codexpp-td-native-app-action-row";
+  const body = document.createElement("div");
+  body.className = "codexpp-td-native-app-action-body";
+  const title = document.createElement("strong");
+  title.textContent = action.title || action.name || "Untitled action";
+  body.appendChild(title);
+  if (action.description) {
+    const desc = document.createElement("p");
+    desc.textContent = action.description;
+    body.appendChild(desc);
+  }
+  const badge = document.createElement("span");
+  badge.className = `codexpp-td-native-app-action-mode ${action.mode === "read" ? "read" : "write"}`;
+  badge.textContent = action.mode === "read" ? "Read" : "Write";
+  row.append(body, badge);
+  return row;
+}
+
 function fileTreeStateFor(state, tweakId) {
   const id = String(tweakId || "");
   if (!state.fileTrees[id]) {
@@ -5034,6 +6713,62 @@ function fileTreeStateFor(state, tweakId) {
     };
   }
   return state.fileTrees[id];
+}
+
+async function loadNativeAppActions(state, appIdOrName, nativeKey, refresh = false) {
+  const id = String(appIdOrName || "");
+  if (!id || !state.nativeAppActions) return;
+  const requestId = state.nativeAppActions.requestId + 1;
+  state.nativeAppActions.requestId = requestId;
+  state.nativeAppActions.loading = true;
+  state.nativeAppActions.error = "";
+  if (refresh) syncNativeAppActionsSection(state, true);
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getAppActions, id);
+    if (state.nativeAppActions.requestId !== requestId) return;
+    state.nativeAppActions.result = normalizeAppActionsResult(result, id);
+    if (state.nativeAppActions.result && state.nativeAppActions.result.status && !isAppActionsReadyStatus(state.nativeAppActions.result.status)) {
+      state.nativeAppActions.error = state.nativeAppActions.result.message || "The runtime returned a non-ready app actions response.";
+    }
+  } catch (error) {
+    if (state.nativeAppActions.requestId !== requestId) return;
+    state.nativeAppActions.error = errorMessage(error);
+  } finally {
+    if (state.nativeAppActions.requestId === requestId) {
+      state.nativeAppActions.loading = false;
+      if (nativeKey && state.nativeAppActions.key === nativeKey) {
+        syncNativeAppActionsSection(state, true);
+      }
+    }
+  }
+}
+
+async function loadNativePluginContents(state, pluginIdOrName, nativeKey, refresh = false) {
+  const id = String(pluginIdOrName || "");
+  if (!id || !state.nativePluginContents) return;
+  const requestId = state.nativePluginContents.requestId + 1;
+  state.nativePluginContents.requestId = requestId;
+  state.nativePluginContents.loading = true;
+  state.nativePluginContents.error = "";
+  if (refresh) syncNativePluginContentsSection(state, true);
+  try {
+    const result = await state.api.ipc.invoke(CHANNELS.getPluginContents, id);
+    if (state.nativePluginContents.requestId !== requestId) return;
+    state.nativePluginContents.result = normalizePluginContentsResult(result, id);
+    if (state.nativePluginContents.result && state.nativePluginContents.result.status && !isPluginContentsReadyStatus(state.nativePluginContents.result.status)) {
+      state.nativePluginContents.error = state.nativePluginContents.result.message || "The runtime returned a non-ready plugin contents response.";
+    }
+  } catch (error) {
+    if (state.nativePluginContents.requestId !== requestId) return;
+    state.nativePluginContents.error = errorMessage(error);
+  } finally {
+    if (state.nativePluginContents.requestId === requestId) {
+      state.nativePluginContents.loading = false;
+      if (nativeKey && state.nativePluginContents.key === nativeKey) {
+        syncNativePluginContentsSection(state, true);
+      }
+    }
+  }
 }
 
 async function loadTweakFileTree(state, tweakId, refresh, renderStart) {
@@ -5083,7 +6818,7 @@ async function loadPluginFileTree(state, pluginIdOrName, refresh, renderStart, n
       force: Boolean(refresh),
     });
     if (entry.requestId !== requestId) return;
-    entry.result = normalizeFileTreeResult(result, id);
+    entry.result = normalizeFileTreeResult(result, id, "plugin");
     if (entry.result && entry.result.tree) entry.expanded.add(fileTreeNodeId(entry.result.tree));
     if (entry.result && entry.result.status && !isFileTreeReadyStatus(entry.result.status)) {
       entry.error = fileTreeStatusMessage(entry.result, "The runtime returned a non-ready plugin file tree response.");
@@ -5105,21 +6840,144 @@ function pluginFileTreeKey(pluginIdOrName) {
   return `plugin:${String(pluginIdOrName || "").trim().toLowerCase()}`;
 }
 
-function normalizeFileTreeResult(result, tweakId) {
+function normalizeFileTreeResult(result, tweakId, defaultSourceKind = "installed-tweak") {
   const value = result && typeof result === "object" ? result : {};
   return {
     status: typeof value.status === "string" ? value.status : "ok",
     rootLabel: typeof value.rootLabel === "string" && value.rootLabel ? value.rootLabel : typeof value.label === "string" && value.label ? value.label : tweakId,
     rootPath: typeof value.rootPath === "string" ? value.rootPath : typeof value.root === "string" ? value.root : "",
-    sourceKind: typeof value.sourceKind === "string" && value.sourceKind ? value.sourceKind : "installed-tweak",
+    sourceKind: typeof value.sourceKind === "string" && value.sourceKind ? value.sourceKind : defaultSourceKind,
     tree: value.tree && typeof value.tree === "object" ? value.tree : null,
     message: typeof value.message === "string" ? value.message : "",
     candidates: Array.isArray(value.candidates) ? value.candidates : [],
   };
 }
 
+function normalizeAppActionsResult(result, appName) {
+  const value = result && typeof result === "object" ? result : {};
+  const rawActions = Array.isArray(value.actions) ? value.actions : Array.isArray(value.tools) ? value.tools : [];
+  const actions = rawActions.map(normalizeAppAction).filter((action) => action.name || action.title);
+  const readActions = countNumber(value.readActions, actions.filter((action) => action.mode === "read").length);
+  const writeActions = countNumber(value.writeActions, actions.filter((action) => action.mode !== "read").length);
+  const totalActions = countNumber(value.totalActions ?? value.total, actions.length);
+  return {
+    status: typeof value.status === "string" ? value.status : "resolved",
+    appName: cleanText(value.appName || value.label || value.connectorName || appName),
+    totalActions,
+    readActions,
+    writeActions,
+    actions,
+    diagnostics: Array.isArray(value.diagnostics) ? value.diagnostics.map((item) => cleanText(item)).filter(Boolean) : [],
+    message: typeof value.message === "string" ? value.message : "",
+  };
+}
+
+function normalizePluginContentsResult(result, pluginName) {
+  const value = result && typeof result === "object" ? result : {};
+  const overview = value.overview && typeof value.overview === "object" ? value.overview : {};
+  return {
+    status: typeof value.status === "string" ? value.status : "resolved",
+    pluginName: cleanText(value.pluginName || pluginName),
+    rootPath: cleanText(value.rootPath || ""),
+    sourceKind: cleanText(value.sourceKind || "plugin"),
+    overview: {
+      appCount: countNumber(overview.appCount, 0),
+      mcpServerCount: countNumber(overview.mcpServerCount, 0),
+      skillCount: countNumber(overview.skillCount, 0),
+      agentCount: countNumber(overview.agentCount, 0),
+      referenceCount: countNumber(overview.referenceCount, 0),
+      cachedActionTotal: countNumber(overview.cachedActionTotal, 0),
+      readActions: countNumber(overview.readActions, 0),
+      writeActions: countNumber(overview.writeActions, 0),
+      unavailableActionMetadataCount: countNumber(overview.unavailableActionMetadataCount, 0),
+    },
+    apps: Array.isArray(value.apps) ? value.apps.map(normalizePluginContentsApp) : [],
+    mcpServers: Array.isArray(value.mcpServers) ? value.mcpServers.map(normalizePluginContentsServer) : [],
+    skills: Array.isArray(value.skills) ? value.skills.map(normalizePluginContentsItem) : [],
+    agents: Array.isArray(value.agents) ? value.agents.map(normalizePluginContentsItem) : [],
+    references: Array.isArray(value.references) ? value.references.map(normalizePluginContentsItem) : [],
+    message: typeof value.message === "string" ? value.message : "",
+  };
+}
+
+function normalizePluginContentsApp(app) {
+  const value = app && typeof app === "object" ? app : {};
+  return {
+    key: cleanText(value.key || value.id || value.name || ""),
+    id: cleanText(value.id || ""),
+    name: cleanText(value.name || value.key || value.id || "App"),
+    description: cleanText(value.description || ""),
+    icon: cleanText(value.icon || ""),
+    actionsStatus: cleanText(value.actionsStatus || "") === "resolved" ? "resolved" : "unavailable",
+    totalActions: countNumber(value.totalActions, 0),
+    readActions: countNumber(value.readActions, 0),
+    writeActions: countNumber(value.writeActions, 0),
+  };
+}
+
+function normalizePluginContentsServer(server) {
+  const value = server && typeof server === "object" ? server : {};
+  return {
+    key: cleanText(value.key || value.title || ""),
+    title: cleanText(value.title || value.key || "MCP server"),
+    description: cleanText(value.description || ""),
+    icon: cleanText(value.icon || ""),
+    launchType: cleanText(value.launchType || "unknown"),
+    command: cleanText(value.command || ""),
+    args: Array.isArray(value.args) ? value.args.map((arg) => cleanText(arg)).filter(Boolean) : [],
+    url: cleanText(value.url || ""),
+  };
+}
+
+function normalizePluginContentsItem(item) {
+  const value = item && typeof item === "object" ? item : {};
+  return {
+    key: cleanText(value.key || value.name || value.title || ""),
+    name: cleanText(value.name || value.title || value.key || ""),
+    title: cleanText(value.title || value.name || value.key || ""),
+    description: cleanText(value.description || ""),
+    icon: cleanText(value.icon || ""),
+    path: cleanText(value.path || ""),
+  };
+}
+
+function normalizeAppAction(action) {
+  const value = action && typeof action === "object" ? action : {};
+  const annotations = value.annotations && typeof value.annotations === "object" ? value.annotations : {};
+  const title = cleanText(value.title || value.displayName || value.name || value.toolName || value.tool_name || "");
+  const name = cleanText(value.name || value.toolName || value.tool_name || title);
+  const description = cleanText(value.description || "");
+  const explicitMode = cleanText(value.mode || value.actionMode || "");
+  const readOnly = value.readOnly === true || value.readOnlyHint === true || annotations.readOnlyHint === true;
+  const destructive = value.destructive === true || value.destructiveHint === true || annotations.destructiveHint === true;
+  const mode = explicitMode === "read" || (!destructive && readOnly) ? "read" : "write";
+  return { title, name, description, mode };
+}
+
 function isFileTreeReadyStatus(status) {
   return status === "ok" || status === "resolved";
+}
+
+function isAppActionsReadyStatus(status) {
+  return status === "ok" || status === "resolved";
+}
+
+function isPluginContentsReadyStatus(status) {
+  return status === "ok" || status === "resolved";
+}
+
+function formatAppActionsSummary(result, fallbackName) {
+  if (!result) return `App · ${fallbackName}`;
+  const total = Number(result.totalActions || 0);
+  const read = Number(result.readActions || 0);
+  const write = Number(result.writeActions || 0);
+  if (total > 0) return `${result.appName || fallbackName} app contains ${total} action${total === 1 ? "" : "s"} (${write} write, ${read} read)`;
+  return result.appName ? `App · ${result.appName}` : `App · ${fallbackName}`;
+}
+
+function countNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
 function fileTreeSourceLabel(result) {
@@ -5251,9 +7109,20 @@ function isFileTreeFolder(node) {
 function fileTreeNodeMeta(node) {
   if (!node || typeof node !== "object") return "";
   const parts = [];
+  const sidecarLabel = fileTreeSidecarLabel(node);
+  if (sidecarLabel) parts.push(sidecarLabel);
   if (Number.isFinite(node.size)) parts.push(formatFileSize(node.size));
   if (Number.isFinite(node.mtimeMs)) parts.push(formatFileMtime(node.mtimeMs));
   return parts.join(" · ");
+}
+
+function fileTreeSidecarLabel(node) {
+  const name = fileTreeNodeName(node);
+  if (name === ".app.json") return "App manifest";
+  if (name === ".mcp.json") return "MCP servers";
+  if (name === ".codex-plugin") return "Plugin metadata";
+  if (name === "plugin.json") return "Plugin manifest";
+  return "";
 }
 
 function formatFileSize(size) {
@@ -5642,6 +7511,7 @@ function avatar(state, row) {
   el.className = "codexpp-td-avatar";
   el.dataset.slot = "avatar";
   const manifest = row.manifest || {};
+  if (manifestIconIsCircle(manifest)) el.dataset.codexppTdAvatarShape = "circle";
   el.textContent = (manifest.name || manifest.id || "?").slice(0, 1).toUpperCase();
   const iconUrl = manifestIconUrl(row);
   if (!iconUrl) return el;
@@ -5666,6 +7536,18 @@ function avatar(state, row) {
   }
   el.appendChild(img);
   return el;
+}
+
+function manifestIconIsCircle(manifest) {
+  return Boolean(manifest && (
+    cleanText(manifest.iconShape).toLowerCase() === "circle" ||
+    cleanText(manifest.iconSource).toLowerCase() === "github" ||
+    isGithubAvatarSrc(manifest.iconUrl)
+  ));
+}
+
+function isGithubAvatarSrc(value) {
+  return cleanText(value).toLowerCase().startsWith("https://avatars.githubusercontent.com/");
 }
 
 function manifestIconUrl(row) {
@@ -5868,23 +7750,6 @@ function injectStyles() {
     document.head.appendChild(style);
   }
   style.textContent = `
-    [data-codexpp-tweaks-directory-tab-trigger="true"] {
-      position: relative;
-      overflow: visible;
-      isolation: isolate;
-    }
-        [data-codexpp-tweaks-directory-tab-trigger="true"]:focus,
-        [data-codexpp-tweaks-directory-tab-trigger="true"]:focus-visible {
-          outline: none !important;
-          box-shadow: inset 0 0 0 2px var(--text-primary, currentColor) !important;
-        }
-    [data-codexpp-tweaks-directory-tab-trigger="true"][data-state="active"],
-    [data-codexpp-tweaks-directory-tab-trigger="true"][aria-selected="true"],
-    [data-codexpp-tweaks-directory-tab-trigger="true"].codexpp-tweaks-directory-tab-active {
-      background: var(--codexpp-td-background, var(--bg-primary, rgba(0,0,0,.04)));
-      color: var(--codexpp-td-foreground, currentColor);
-      box-shadow: inset 0 0 0 1px var(--border-light, rgba(0,0,0,.12));
-    }
     [data-codexpp-tweaks-directory-detail-nav="true"] {
       display: inline-flex;
       align-items: center;
@@ -5942,14 +7807,37 @@ function injectStyles() {
       appearance: none !important;
       -webkit-appearance: none !important;
     }
-    .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files *, .codexpp-native-directory-controls, .codexpp-native-directory-controls * { box-sizing: border-box; }
-    .codexpp-tweaks-directory, .codexpp-td-native-plugin-files, .codexpp-native-directory-controls {
+    .codexpp-tweaks-directory, .codexpp-tweaks-directory *, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-files *, .codexpp-td-native-plugin-metadata, .codexpp-td-native-plugin-metadata *, .codexpp-td-native-plugin-contents, .codexpp-td-native-plugin-contents *, .codexpp-td-native-app-actions, .codexpp-td-native-app-actions *, .codexpp-native-directory-controls, .codexpp-native-directory-controls * { box-sizing: border-box; }
+    .codexpp-tweaks-directory, .codexpp-td-native-plugin-files, .codexpp-td-native-plugin-metadata, .codexpp-td-native-plugin-contents, .codexpp-td-native-app-actions, .codexpp-native-directory-controls {
       --codexpp-td-background: var(--background, var(--bg-primary, #fff));
       --codexpp-td-foreground: var(--foreground, var(--text-primary, #111));
       --codexpp-td-muted: var(--muted-foreground, var(--text-secondary, rgba(0,0,0,.54)));
       --codexpp-td-border: var(--border, var(--border-light, rgba(0,0,0,.12)));
       --codexpp-td-muted-bg: var(--muted, rgba(0,0,0,.035));
       --codexpp-td-ring: var(--ring, var(--codexpp-shadcn-ui-accent, #2563eb));
+    }
+    .codexpp-td-native-plugin-metadata {
+      width: min(720px, calc(100% - 32px));
+      margin: 28px auto 0;
+      color: var(--codexpp-td-foreground);
+    }
+    .codexpp-td-native-app-actions {
+      width: min(720px, calc(100% - 32px));
+      margin: 28px auto 0;
+      color: var(--codexpp-td-foreground);
+    }
+    .codexpp-td-native-plugin-contents {
+      width: min(720px, calc(100% - 32px));
+      margin: 28px auto 0;
+      color: var(--codexpp-td-foreground);
+    }
+    .codexpp-td-native-plugin-metadata-card a {
+      color: var(--link, var(--codexpp-td-ring));
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+    .codexpp-td-native-plugin-metadata-card a:hover {
+      text-decoration: underline;
     }
     .codexpp-tweaks-directory {
       width: 100%;
@@ -5991,7 +7879,7 @@ function injectStyles() {
     .codexpp-td-filter-select { flex: 0 0 auto; height: 36px; min-width: 96px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 0 8px 0 10px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-foreground); }
     .codexpp-td-sort-select { min-width: 154px; }
     .codexpp-td-select-label { color: var(--codexpp-td-muted); font-size: 13px; white-space: nowrap; }
-    .codexpp-td-filter-select select { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-size: 14px; outline: none; cursor: pointer; }
+    .codexpp-td-filter-select select { appearance: none; -webkit-appearance: none; border: 0; border-radius: 0; padding: 0; background: transparent !important; box-shadow: none; color: inherit; font: inherit; font-size: 14px; line-height: 1; outline: none; cursor: pointer; }
     .codexpp-td-filter-select span { font-size: 14px; line-height: 1; color: var(--codexpp-td-muted); pointer-events: none; }
     .codexpp-native-directory-group-heading { grid-column: 1 / -1; margin: 24px 0 12px; border-bottom: 1px solid var(--codexpp-td-border); padding-bottom: 12px; color: var(--codexpp-td-foreground); font-size: 23px; line-height: 1.25; font-weight: 400; letter-spacing: 0; }
     .codexpp-native-directory-plugin-section-heading { width: 100%; }
@@ -6014,6 +7902,7 @@ function injectStyles() {
     .codexpp-td-item:hover { background: var(--codexpp-td-muted-bg); }
     .codexpp-td-item-left { min-width: 0; display: flex; align-items: center; gap: 12px; }
     .codexpp-td-avatar { flex: 0 0 auto; width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--codexpp-td-border) 70%, transparent); background: linear-gradient(135deg, #ffb04f 0%, #ff7d55 42%, #8b5cf6 43%, #8b5cf6 100%); color: #fff; font-weight: 700; font-size: 12px; }
+    .codexpp-td-avatar[data-codexpp-td-avatar-shape="circle"] { border-radius: 999px; }
     .codexpp-td-avatar img { width: 100%; height: 100%; object-fit: cover; }
     .codexpp-td-item-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
     .codexpp-td-item-title { min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 14px; line-height: 1.2; font-weight: 650; letter-spacing: 0; }
@@ -6050,11 +7939,13 @@ function injectStyles() {
     .codexpp-td-detail-main { width: min(836px, 100%); margin: 54px auto 0; }
     .codexpp-td-detail-hero { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 10px; }
     .codexpp-td-detail-hero .codexpp-td-avatar { width: 54px; height: 54px; border-radius: 12px; font-size: 17px; }
+    .codexpp-td-detail-hero .codexpp-td-avatar[data-codexpp-td-avatar-shape="circle"] { border-radius: 999px; }
     .codexpp-td-detail-hero h1 { margin: 18px 0 0; font-size: 26px; line-height: 1.2; font-weight: 650; letter-spacing: 0; overflow-wrap: anywhere; }
     .codexpp-td-detail-hero p { max-width: 760px; margin: 0; color: var(--codexpp-td-muted); font-size: 19px; line-height: 1.35; }
     .codexpp-td-detail-prompt { max-width: min(590px, 100%); display: flex; align-items: center; gap: 6px; margin: 92px auto 74px; border: 1px solid var(--codexpp-td-border); border-radius: 12px; padding: 11px 16px; background: var(--codexpp-td-background); color: inherit; font: inherit; font-size: 16px; line-height: 1.35; text-align: left; cursor: pointer; }
     .codexpp-td-detail-prompt-icon { flex: 0 0 auto; display: inline-grid; place-items: center; }
     .codexpp-td-detail-prompt-icon .codexpp-td-avatar { width: 16px; height: 16px; border-radius: 4px; font-size: 9px; }
+    .codexpp-td-detail-prompt-icon .codexpp-td-avatar[data-codexpp-td-avatar-shape="circle"] { border-radius: 999px; }
     .codexpp-td-detail-overview { max-width: 760px; margin: 0 0 58px; font-size: 17px; line-height: 1.45; color: var(--codexpp-td-foreground); }
     .codexpp-td-detail-section { margin-top: 36px; }
     .codexpp-td-detail-section-title { margin: 0 0 10px; font-size: 15px; line-height: 1.3; font-weight: 650; letter-spacing: 0; }
@@ -6064,6 +7955,31 @@ function injectStyles() {
     .codexpp-td-files-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codexpp-td-muted); font-size: 12px; }
     .codexpp-td-files-refresh { flex: 0 0 auto; }
     .codexpp-td-files-card { padding: 6px; }
+    .codexpp-td-native-app-actions-card { padding: 0; }
+    .codexpp-td-native-app-action-group + .codexpp-td-native-app-action-group { border-top: 1px solid var(--codexpp-td-border); }
+    .codexpp-td-native-app-action-group-heading { padding: 11px 14px 7px; color: var(--codexpp-td-muted); font-size: 12px; line-height: 1.2; font-weight: 650; text-transform: uppercase; letter-spacing: .03em; }
+    .codexpp-td-native-app-action-list { display: flex; flex-direction: column; }
+    .codexpp-td-native-app-action-row { min-width: 0; min-height: 58px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid color-mix(in srgb, var(--codexpp-td-border) 62%, transparent); }
+    .codexpp-td-native-app-action-row:first-child { border-top: 0; }
+    .codexpp-td-native-app-action-body { min-width: 0; }
+    .codexpp-td-native-app-action-body strong { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.25; }
+    .codexpp-td-native-app-action-body p { margin: 3px 0 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codexpp-td-muted); font-size: 13px; line-height: 1.3; }
+    .codexpp-td-native-app-action-mode { min-width: 52px; min-height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; padding: 2px 8px; border: 1px solid var(--codexpp-td-border); color: var(--codexpp-td-muted); background: var(--codexpp-td-muted-bg); font-size: 12px; line-height: 1.2; font-weight: 550; }
+    .codexpp-td-native-app-action-mode.write { color: rgb(185,28,28); border-color: color-mix(in srgb, rgb(185,28,28) 26%, var(--codexpp-td-border)); background: color-mix(in srgb, rgb(185,28,28) 8%, transparent); }
+    .codexpp-td-native-app-actions-note { margin: 0; border-top: 1px solid color-mix(in srgb, var(--codexpp-td-border) 62%, transparent); padding: 10px 14px; color: var(--codexpp-td-muted); font-size: 12px; line-height: 1.35; }
+    .codexpp-td-plugin-contents-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+    .codexpp-td-plugin-contents-tab { min-height: 30px; border: 1px solid var(--codexpp-td-border); border-radius: 8px; padding: 4px 9px; background: var(--codexpp-td-background); color: var(--codexpp-td-muted); font: inherit; font-size: 13px; cursor: pointer; }
+    .codexpp-td-plugin-contents-tab.active { background: var(--codexpp-td-foreground); border-color: var(--codexpp-td-foreground); color: var(--codexpp-td-background); }
+    .codexpp-td-plugin-contents-card { padding: 0; }
+    .codexpp-td-plugin-contents-panel { min-width: 0; }
+    .codexpp-td-plugin-contents-subheading { padding: 11px 16px 7px; border-top: 1px solid var(--codexpp-td-border); color: var(--codexpp-td-muted); font-size: 12px; line-height: 1.2; font-weight: 650; text-transform: uppercase; letter-spacing: .03em; }
+    .codexpp-td-plugin-contents-subheading:first-child { border-top: 0; }
+    .codexpp-td-plugin-contents-row { min-width: 0; min-height: 60px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; border-top: 1px solid color-mix(in srgb, var(--codexpp-td-border) 62%, transparent); padding: 11px 14px; }
+    .codexpp-td-plugin-contents-subheading + .codexpp-td-plugin-contents-row { border-top: 0; }
+    .codexpp-td-plugin-contents-row-body { min-width: 0; }
+    .codexpp-td-plugin-contents-row-body strong { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 1.25; }
+    .codexpp-td-plugin-contents-row-body p { margin: 3px 0 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codexpp-td-muted); font-size: 13px; line-height: 1.3; }
+    .codexpp-td-plugin-contents-row-meta { min-width: 0; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codexpp-td-muted); font-size: 12px; line-height: 1.25; text-align: right; }
     .codexpp-td-file-tree { width: 100%; display: flex; flex-direction: column; gap: 1px; }
     .codexpp-td-file-tree-item { min-width: 0; }
     .codexpp-td-file-tree-children { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -6081,6 +7997,10 @@ function injectStyles() {
     .codexpp-td-detail-include-item { min-height: 64px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 14px; padding: 10px 14px; }
     .codexpp-td-detail-include-item + .codexpp-td-detail-include-item { border-top: 1px solid color-mix(in srgb, var(--codexpp-td-border) 62%, transparent); }
     .codexpp-td-detail-include-item .codexpp-td-avatar { width: 34px; height: 34px; border-radius: 999px; background: var(--codexpp-td-background); color: var(--codexpp-td-muted); }
+    img[data-codexpp-native-plugin-github-icon="true"],
+    img[data-codexpp-plugin-inherited-icon][data-codexpp-native-plugin-github-icon="true"] { border-radius: 999px !important; object-fit: cover !important; }
+    [data-codexpp-native-plugin-github-icon-frame="true"] { border-radius: 999px !important; overflow: hidden !important; }
+    [data-codexpp-native-plugin-github-icon-frame="true"] img { border-radius: 999px !important; object-fit: cover !important; }
     .codexpp-td-detail-include-body { min-width: 0; }
     .codexpp-td-detail-include-title { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
     .codexpp-td-detail-include-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.25; }

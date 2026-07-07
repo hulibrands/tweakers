@@ -23,7 +23,7 @@ function isVisible(element) {
  */
 function findMenuItem(root, pattern) {
   return Array.from(
-    root.querySelectorAll('[role="menuitem"], button, [data-radix-collection-item]'),
+    root.querySelectorAll('button, a, [role="button"], [role="menuitem"], [data-radix-collection-item], div'),
   ).find((element) => {
     return element instanceof HTMLElement && isVisible(element) && pattern.test(compactText(element));
   });

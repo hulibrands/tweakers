@@ -1,17 +1,17 @@
 {
   "id": "co.thomashulihan.mode-switcher",
-  "name": "Mode Switcher",
-  "version": "0.1.0",
+  "name": "ShadGPT Mode Switcher",
+  "version": "0.1.1",
   "githubRepo": "hulibrands/tweakers",
   "forkOf": {
     "upstreamId": "co.thomas.mode-switcher",
-    "upstreamGithubRepo": "hulibrands/tweakers",
+    "upstreamGithubRepo": "therealityreport/codex-tweaks",
     "upstreamPath": "mode-switcher",
     "upstreamVersion": "0.1.0",
     "upstreamCommitSha": "5c9e0563f24f4ad4ddd4337921f759b83f20dea8",
     "forkedAt": "2026-05-17T22:00:00.000Z"
   },
-  "description": "Toggle between vanilla Codex and Codex++ from the Config page.",
+  "description": "ShadGPT-owned mode switcher for toggling vanilla Codex and ShadGPT.",
   "author": {
     "name": "Thomas Hulihan",
     "url": "https://github.com/hulibrands"
@@ -21,5 +21,10 @@
     "ui",
     "config"
   ],
-  "scope": "both"
+  "scope": "both",
+  "permissions": [
+    "ipc",
+    "settings",
+    "filesystem"
+  ]
 }

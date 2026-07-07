@@ -1,6 +1,6 @@
-# Codex++ Account Switcher
+# ShadGPT Account Switcher
 
-Local Codex++ tweak for saving, switching, and managing Codex desktop auth sessions.
+Local ShadGPT tweak for saving, switching, and managing Codex desktop auth sessions.
 
 ## Features
 
@@ -20,6 +20,8 @@ Local Codex++ tweak for saving, switching, and managing Codex desktop auth sessi
 - cached rate-limit usage: `~/.codex/auth_accounts_usage.json`
 
 New sign-in backups are written as `~/.codex/auth.account-switcher-backup-<timestamp>.json`.
+Pre-switch backups use `~/.codex/auth.account-switcher-prev-<timestamp>.json`.
+Saved auth snapshots and Account Switcher backups are written with private file permissions where the platform supports them. Account Switcher keeps the newest eight `auth.account-switcher-*` backup files and prunes older ones after switch or clear-active actions.
 
 ## Install
 
@@ -33,7 +35,7 @@ Drop this folder into:
 ~/Library/Application Support/codex-plusplus/tweaks/
 ```
 
-Then reload tweaks from Codex++ or restart Codex.
+Then reload tweaks from ShadGPT or restart Codex.
 
 ## Usage
 
@@ -50,6 +52,14 @@ node --test test/account-service.test.js
 node --check index.js
 node --check index.bundled.js
 ```
+
+Run the visual regression check before shipping popup or settings layout changes:
+
+```sh
+ACCOUNT_SWITCHER_SCREENSHOT=/absolute/path/to/account-menu.png node --test test/screenshot-regression.test.js
+```
+
+The screenshot should show the account menu with the Accounts section visible above Usage remaining.
 
 ## Manifest
 

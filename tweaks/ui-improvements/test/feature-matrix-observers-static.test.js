@@ -15,6 +15,7 @@ const CANONICAL_FEATURE_IDS = [
   "hide-upgrade-prompts",
   "show-usage-in-sidebar",
   "show-message-metrics-on-hover",
+  "hide-workspace-plugin-tab",
   "square-sidebar",
   "browser-annotation-transparent-card",
   "match-sidebar-width",
@@ -24,6 +25,7 @@ const CANONICAL_FEATURE_IDS = [
   "show-pinned-chat-project-names",
   "clarify-stale-chat-branch-label",
   "slash-menu-polish",
+  "slash-menu-inherited-skill-icons",
   "tweak-mention-menu",
 ];
 
@@ -102,6 +104,13 @@ test("message metrics only invokes session scanning after message DOM is visible
   assert.match(metricsFeature, /if \(disposed \|\| !hasMetricMessageSurface\(\)\) return false;/);
   assert.match(metricsFeature, /const timer = window\.setInterval\(scheduleRefresh, 15_000\);/);
   assert.doesNotMatch(metricsFeature, /window\.setInterval\(refreshMetrics, 5_000\)/);
+});
+
+test("workspace plugin tab hider targets only the native workspace filter label", () => {
+  const feature = extractFeatureSource("hide-workspace-plugin-tab");
+  assert.match(feature, /const LABEL = "by your workspace";/);
+  assert.match(feature, /text !== LABEL/);
+  assert.match(feature, /data-codexpp-hidden-workspace-plugin-tab/);
 });
 
 function assertCanonicalRegistry(name, ids, expectedIds) {

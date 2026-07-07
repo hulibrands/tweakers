@@ -1,0 +1,14 @@
+{
+  "id": "com.example.hello-world",
+  "name": "Hello World",
+  "version": "0.1.0",
+  "githubRepo": "hulibrands/ShadGPT",
+  "description": "Minimal example tweak. Adds a section to the Tweaks tab.",
+  "author": {
+    "name": "ShadGPT",
+    "url": "https://github.com/hulibrands/ShadGPT"
+  },
+  "homepage": "https://github.com/hulibrands/ShadGPT/tree/main/tweaks/examples/hello-world",
+  "tags": ["example", "demo"],
+  "scope": "renderer"
+}

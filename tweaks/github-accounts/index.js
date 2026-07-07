@@ -648,7 +648,7 @@ function startSidebarProjectScanner(api) {
     api.ipc.invoke("cacheSidebarProjects", projects).catch(() => {});
   };
   const observer = new MutationObserver(scan);
-  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
   scan();
   const timer = setInterval(scan, 2000);
   return () => {
@@ -658,7 +658,8 @@ function startSidebarProjectScanner(api) {
 }
 
 function scanSidebarProjectsFromDom() {
-  const headers = Array.from(document.querySelectorAll("div,span,p"))
+  const sidebar = document.querySelector("aside") || document.body;
+  const headers = Array.from(sidebar.querySelectorAll("div,span,p"))
     .filter((el) => compactText(el.textContent) === "Projects");
   for (const header of headers) {
     const projects = [];
@@ -677,13 +678,13 @@ function scanSidebarProjectsFromDom() {
 
 function sidebarProjectNodesForHeader(header) {
   const headerRect = header.getBoundingClientRect?.();
-  const boundary = Array.from(document.querySelectorAll("div,span,p"))
+  const sidebar = header.closest("aside") || document.body;
+  const boundary = Array.from(sidebar.querySelectorAll("div,span,p"))
     .filter((el) => ["Chats", "Settings"].includes(compactText(el.textContent)))
     .map((el) => ({ el, rect: el.getBoundingClientRect?.() }))
     .filter(({ rect }) => rect && rect.height > 0 && rect.top >= (headerRect?.bottom ?? 0))
     .sort((a, b) => a.rect.top - b.rect.top)[0];
   if (headerRect && boundary?.rect) {
-    const sidebar = header.closest("aside") || document.body;
     const nodes = Array.from(sidebar.querySelectorAll("[data-app-action-sidebar-project-id]"))
       .map((node) => node.closest?.("div[role='listitem']") || node)
       .filter((node, index, all) => node instanceof HTMLElement && all.indexOf(node) === index)

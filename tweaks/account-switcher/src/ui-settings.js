@@ -1,6 +1,7 @@
 const { errorMessage } = require("./utils");
 const { invoke } = require("./ipc");
 const { t } = require("./i18n");
+const { confirmAccountAction } = require("./ui-confirmation");
 const {
   settingsButton,
   settingsSection,
@@ -53,6 +54,27 @@ function renderAccountsPageState(state, root, accountState) {
   intro.appendChild(introCard);
   root.appendChild(intro);
 
+  // ── Detector health ────────────────────────────────────────────────────────
+  const detector = settingsSection("Account menu detector");
+  const detectorCard = settingsCard();
+  const detectorHealth = state.detectorHealth || {};
+  detectorCard.appendChild(
+    settingsInfoRow(
+      "Status",
+      detectorStatusLabel(detectorHealth),
+      detectorHealth.lastReason || "Waiting for the account pop-up to open.",
+    ),
+  );
+  detectorCard.appendChild(
+    settingsInfoRow(
+      "Last seen",
+      detectorTimeLabel(detectorHealth.lastFoundAt || detectorHealth.lastMissingAt || detectorHealth.lastCheckedAt),
+      detectorSnapshotLabel(detectorHealth),
+    ),
+  );
+  detector.appendChild(detectorCard);
+  root.appendChild(detector);
+
   // ── Actions ──────────────────────────────────────────────────────────────
   const actions = settingsSection(t("settings.accountSetup"));
   const actionCard = settingsCard();
@@ -61,7 +83,7 @@ function renderAccountsPageState(state, root, accountState) {
       t("settings.signInAnother"),
       t("settings.signInAnotherDescription"),
       t("settings.startSignIn"),
-      () => clearActiveFromSettings(state, root),
+      () => clearActiveFromSettings(state, root, accountState),
     ),
   );
   actionCard.appendChild(
@@ -100,6 +122,23 @@ function renderAccountsPageState(state, root, accountState) {
   }
 }
 
+function detectorStatusLabel(detectorHealth) {
+  const status = detectorHealth.status || "idle";
+  const misses = detectorHealth.misses || 0;
+  return misses ? `${status} (${misses} misses)` : status;
+}
+
+function detectorTimeLabel(timestamp) {
+  return timestamp ? new Date(timestamp).toLocaleTimeString() : "Not checked yet";
+}
+
+function detectorSnapshotLabel(detectorHealth) {
+  const snapshot = detectorHealth.lastSnapshot;
+  if (detectorHealth.lastMenuText) return detectorHealth.lastMenuText;
+  if (snapshot?.joinedText) return snapshot.joinedText.slice(0, 180);
+  return "No account menu text captured yet.";
+}
+
 // ─── Per-account row ──────────────────────────────────────────────────────────
 
 function settingsAccountRow(state, root, accountState, name) {
@@ -127,13 +166,13 @@ function settingsAccountRow(state, root, accountState, name) {
   const switchButton = settingsButton(t("settings.switch"));
   switchButton.disabled = accountState.current === name;
   bindButtonAction(switchButton, () =>
-    runSettingsAction(state, root, "switch", { name }, t("accounts.switching")),
+    runSettingsAction(state, root, accountState, "switch", { name }, t("accounts.switching")),
   );
   actionsEl.appendChild(switchButton);
 
   const removeButton = settingsButton(t("settings.delete"));
   bindButtonAction(removeButton, () => {
-    runSettingsAction(state, root, "delete", { name }, t("settings.removing"));
+    runSettingsAction(state, root, accountState, "delete", { name }, t("settings.removing"));
   });
   actionsEl.appendChild(removeButton);
   row.appendChild(actionsEl);
@@ -142,8 +181,8 @@ function settingsAccountRow(state, root, accountState, name) {
 
 // ─── User-initiated actions ───────────────────────────────────────────────────
 
-function clearActiveFromSettings(state, root) {
-  runSettingsAction(state, root, "clear-active", {}, t("accounts.preparingSignIn"));
+function clearActiveFromSettings(state, root, accountState) {
+  runSettingsAction(state, root, accountState, "clear-active", {}, t("accounts.preparingSignIn"));
 }
 
 function refreshUsageInBackground(state, root) {
@@ -163,7 +202,9 @@ function refreshUsageInBackground(state, root) {
     });
 }
 
-async function runSettingsAction(state, root, action, payload, loadingText) {
+async function runSettingsAction(state, root, accountState, action, payload, loadingText) {
+  const confirmed = await confirmAccountAction(state, accountState, action, payload);
+  if (!confirmed) return;
   root.textContent = "";
   root.appendChild(settingsStatus(loadingText));
   try {
@@ -171,7 +212,7 @@ async function runSettingsAction(state, root, action, payload, loadingText) {
     if (action === "switch" || action === "clear-active") {
       root.textContent = "";
       root.appendChild(settingsStatus(authReloadMessage(action, accountState)));
-      scheduleAppRelaunch(state, root);
+      scheduleAppRelaunch(state, root, accountState);
       return;
     }
     renderAccountsPageState(state, root, accountState);
@@ -193,7 +234,8 @@ function authReloadMessage(action, accountState) {
   return t("accounts.switchedRelaunching", { email });
 }
 
-function scheduleAppRelaunch(state, root) {
+function scheduleAppRelaunch(state, root, accountState) {
+  if (accountState?.relaunchScheduled) return;
   window.setTimeout(() => {
     invoke(state, "relaunch").catch((error) => {
       root.textContent = "";

@@ -148,9 +148,10 @@ test("file previews render typed file and status icons with list semantics", () 
               {
                 name: "src",
                 kind: "directory",
+                path: "../src",
                 children: [
-                  { path: "src/index.ts", status: "done" },
-                  { path: "README.md", status: "warning" },
+                  { path: "../src/index.ts", status: "done" },
+                  { path: "../README.md", status: "warning" },
                   { path: "/Users/thomashulihan/Projects/shadgpt/package.json", status: "ready" },
                 ],
               },
@@ -166,6 +167,7 @@ test("file previews render typed file and status icons with list semantics", () 
       showFallbacks: true,
       clickableActions: true,
       blockKinds: { file_preview: true },
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
     });
 
     const list = message.querySelector(".codexpp-chat-ui-file-tree");
@@ -213,11 +215,59 @@ test("file preview path validation rejects unsafe relative paths unless a truste
     false,
   );
   assert.equal(
-    tweak.validateLocalFilePath("file:///Users/thomashulihan/Projects/shadgpt/README.md").openPath,
+    tweak.validateLocalFilePath("file:///Users/thomashulihan/Projects/shadgpt/README.md", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).openPath,
     "/Users/thomashulihan/Projects/shadgpt/README.md",
+  );
+  assert.equal(tweak.validateLocalFilePath("/Users/thomashulihan/Projects/shadgpt/README.md").canOpen, false);
+  assert.equal(
+    tweak.validateLocalFilePath("/Users/thomashulihan/Projects/shadgpt/README.md", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).openPath,
+    "/Users/thomashulihan/Projects/shadgpt/README.md",
+  );
+  assert.equal(
+    tweak.validateLocalFilePath("/Users/thomashulihan/.ssh/config", {
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    }).canOpen,
+    false,
   );
   assert.equal(tweak.validateLocalFilePath("/Users/thomashulihan/../../etc/passwd").canOpen, false);
   assert.equal(tweak.validateLocalFilePath("file://example.com/Users/thomashulihan/README.md").canOpen, false);
+});
+
+test("file previews keep untrusted absolute paths display-only", () => {
+  const restore = installFakeDom();
+  try {
+    const message = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [
+        {
+          kind: "file_preview",
+          props: {
+            files: [{ path: "/Users/thomashulihan/.ssh/config" }],
+          },
+        },
+      ],
+    });
+    document.body.append(message);
+
+    tweak.scanMessages({
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: { file_preview: true },
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
+    });
+
+    assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-row-clickable").length, 0);
+    assert.equal(message.querySelectorAll(".codexpp-chat-ui-file-row-copy-only").length, 1);
+    assert.match(message.textContent, /outside trusted workspace roots/);
+  } finally {
+    restore();
+  }
 });
 
 test("file preview rows show visible failed-open state when the bridge rejects", async () => {
@@ -244,6 +294,7 @@ test("file preview rows show visible failed-open state when the bridge rejects",
       showFallbacks: true,
       clickableActions: true,
       blockKinds: { file_preview: true },
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
       api: { log: { warn: () => {} } },
     });
 
@@ -255,6 +306,102 @@ test("file preview rows show visible failed-open state when the bridge rejects",
     assert.match(row.textContent, /Open failed/);
   } finally {
     global.fetch = previousFetch;
+    restore();
+  }
+});
+
+test("non-last message payload cache invalidates when message text changes", () => {
+  const restore = installFakeDom();
+  try {
+    const first = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "First title" } }],
+    });
+    const second = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "Second title" } }],
+    });
+    document.body.append(first, second);
+
+    const state = {
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: { summary_card: true },
+    };
+    tweak.scanMessages(state);
+    assert.match(first.querySelector(`[${tweak.PANEL_ATTR}]`).textContent, /First title/);
+
+    first.querySelector("code").textContent = JSON.stringify({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "Updated title" } }],
+    });
+    tweak.scanMessages(state, [first]);
+
+    const panel = first.querySelector(`[${tweak.PANEL_ATTR}]`);
+    assert.match(panel.textContent, /Updated title/);
+    assert.doesNotMatch(panel.textContent, /First title/);
+  } finally {
+    restore();
+  }
+});
+
+test("scoped scans only inspect touched message roots", () => {
+  const restore = installFakeDom();
+  try {
+    const touched = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "Touched" } }],
+    });
+    const untouched = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "Untouched" } }],
+    });
+    document.body.append(touched, untouched);
+
+    tweak.scanMessages({
+      enabled: true,
+      showFallbacks: true,
+      clickableActions: true,
+      blockKinds: { summary_card: true },
+    }, [touched]);
+
+    assert.ok(touched.querySelector(`[${tweak.PANEL_ATTR}]`));
+    assert.equal(untouched.querySelector(`[${tweak.PANEL_ATTR}]`), null);
+  } finally {
+    restore();
+  }
+});
+
+test("mutation records resolve added wrappers to contained message roots", () => {
+  const restore = installFakeDom();
+  try {
+    const existing = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "Existing" } }],
+    });
+    document.body.appendChild(existing);
+
+    const wrapper = document.createElement("div");
+    const message = assistantMessage({
+      codex_ui: true,
+      version: 1,
+      blocks: [{ kind: "summary_card", props: { title: "Nested" } }],
+    });
+    wrapper.appendChild(message);
+
+    const roots = tweak.collectMessageRootsFromMutations([
+      { target: document.body, addedNodes: [wrapper] },
+    ]);
+    assert.equal(roots.length, 1);
+    assert.equal(roots[0], message);
+  } finally {
     restore();
   }
 });
@@ -288,6 +435,7 @@ test("scanMessages renders mentioned local file links as openable preview rows",
       showFallbacks: true,
       clickableActions: true,
       blockKinds: {},
+      trustedWorkspaceRoots: ["/Users/thomashulihan/Projects/shadgpt"],
     });
 
     const panel = message.querySelector("[data-codexpp-chat-ui-mentioned-files]");

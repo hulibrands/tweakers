@@ -57,6 +57,6 @@ This tweak does not install React shadcn components. It renders vanilla DOM/CSS 
 Run from the repository root:
 
 ```bash
-/Applications/Codex.app/Contents/Resources/node -c tweaks/base/thomashulihan-codex-chat-ui/index.js
-/Applications/Codex.app/Contents/Resources/node -e "JSON.parse(require('fs').readFileSync('tweaks/base/thomashulihan-codex-chat-ui/manifest.json','utf8')); console.log('manifest ok')"
+/Applications/Codex.app/Contents/Resources/node -c vendor/tweakers/tweaks/codex-chat-ui/index.js
+/Applications/Codex.app/Contents/Resources/node -e "JSON.parse(require('fs').readFileSync('vendor/tweakers/tweaks/codex-chat-ui/manifest.json','utf8')); console.log('manifest ok')"
 ```

@@ -1,9 +1,9 @@
 {
   "id": "co.thomashulihan.shadcn-codex-ui",
-  "name": "Shadcn Codex UI",
+  "name": "ShadGPT Shadcn UI",
   "version": "0.1.0",
   "githubRepo": "hulibrands/tweakers",
-  "description": "Scoped, reversible shadcn-style token and surface treatment for Codex++.",
+  "description": "ShadGPT-owned Shadcn Codex UI fork with local palette and surface styling.",
   "iconUrl": "./assets/icon.png",
   "forkOf": {
     "upstreamId": "co.Arconte112.shadcn-codex-ui",
@@ -26,6 +26,7 @@
   ],
   "scope": "both",
   "permissions": [
+    "ipc",
     "settings"
   ]
 }

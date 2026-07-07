@@ -1,6 +1,6 @@
 {
   "id": "co.thomashulihan.github-accounts",
-  "name": "GitHub Accounts",
+  "name": "ShadGPT GitHub Accounts",
   "version": "0.1.0",
   "githubRepo": "hulibrands/tweakers",
   "description": "ShadGPT-owned GitHub Accounts fork for project-local Git identity assignment.",

@@ -60,6 +60,11 @@ const FEATURE_DEFS = Object.freeze([
     description: "Show per-turn token usage beside assistant messages.",
   },
   {
+    id: "hide-workspace-plugin-tab",
+    title: "Hide workspace plugin tab",
+    description: 'Hide the "By your workspace" filter in the native Plugins page.',
+  },
+  {
     id: "square-sidebar",
     title: "Square sidebar corners",
     description:
@@ -99,6 +104,11 @@ const FEATURE_DEFS = Object.freeze([
     description: "Tighten slash menu rows with calmer section headers and clearer active state.",
   },
   {
+    id: "slash-menu-inherited-skill-icons",
+    title: "Use plugin icons for skill rows",
+    description: "Show a plugin's icon for slash-menu skill rows unless the skill has its own icon.",
+  },
+  {
     id: "tweak-mention-menu",
     title: "Tweak mention menu",
     description: "Type % in the composer to insert installed tweak mentions like %Projects.",
@@ -119,7 +129,8 @@ const FEATURE_DEFS = Object.freeze([
 const DEFAULT_FEATURE_FLAGS = Object.freeze({
   "hide-upgrade-prompts": true,
   "show-usage-in-sidebar": false,
-  "show-message-metrics-on-hover": true,
+  "show-message-metrics-on-hover": false,
+  "hide-workspace-plugin-tab": true,
   "square-sidebar": false,
   "match-sidebar-width": true,
   "sidebar-action-grid": true,
@@ -127,6 +138,7 @@ const DEFAULT_FEATURE_FLAGS = Object.freeze({
   "sidebar-chat-multi-select": true,
   "show-pinned-chat-project-names": true,
   "slash-menu-polish": false,
+  "slash-menu-inherited-skill-icons": true,
   "tweak-mention-menu": true,
   "browser-annotation-transparent-card": true,
   "clarify-stale-chat-branch-label": true,
@@ -143,6 +155,34 @@ const PROJECT_OVERLAY_OPTIONS = Object.freeze({
   strong: { id: "strong", label: "Strong", light: 15, dark: 24, hoverLight: 24, hoverDark: 34 },
 });
 const DEFAULT_PROJECT_OVERLAY_INTENSITY = "medium";
+const PROJECT_COLOR_PALETTE = Object.freeze([
+  { id: "neutral", label: "Neutral", value: "#404040", textValue: "#404040" },
+  { id: "stone", label: "Stone", value: "#44403c", textValue: "#44403c" },
+  { id: "zinc", label: "Zinc", value: "#3f3f46", textValue: "#3f3f46" },
+  { id: "slate", label: "Slate", value: "#334155", textValue: "#334155" },
+  { id: "gray", label: "Gray", value: "#374151", textValue: "#374151" },
+  { id: "mauve", label: "Mauve", value: "#524959", textValue: "#524959" },
+  { id: "olive", label: "Olive", value: "#435147", textValue: "#435147" },
+  { id: "mist", label: "Mist", value: "#3d5155", textValue: "#3d5155" },
+  { id: "taupe", label: "Taupe", value: "#554b3e", textValue: "#554b3e" },
+  { id: "red", label: "Red", value: "#b91c1c", textValue: "#b91c1c" },
+  { id: "orange", label: "Orange", value: "#c2410c", textValue: "#c2410c" },
+  { id: "amber", label: "Amber", value: "#b45309", textValue: "#b45309" },
+  { id: "yellow", label: "Yellow", value: "#a16207", textValue: "#a16207" },
+  { id: "lime", label: "Lime", value: "#4d7c0f", textValue: "#4d7c0f" },
+  { id: "green", label: "Green", value: "#15803d", textValue: "#15803d" },
+  { id: "emerald", label: "Emerald", value: "#047857", textValue: "#047857" },
+  { id: "teal", label: "Teal", value: "#0f766e", textValue: "#0f766e" },
+  { id: "cyan", label: "Cyan", value: "#0e7490", textValue: "#0e7490" },
+  { id: "sky", label: "Sky", value: "#0369a1", textValue: "#0369a1" },
+  { id: "blue", label: "Blue", value: "#1d4ed8", textValue: "#1d4ed8" },
+  { id: "indigo", label: "Indigo", value: "#4338ca", textValue: "#4338ca" },
+  { id: "violet", label: "Violet", value: "#6d28d9", textValue: "#6d28d9" },
+  { id: "purple", label: "Purple", value: "#7e22ce", textValue: "#7e22ce" },
+  { id: "fuchsia", label: "Fuchsia", value: "#a21caf", textValue: "#a21caf" },
+  { id: "pink", label: "Pink", value: "#be185d", textValue: "#be185d" },
+  { id: "rose", label: "Rose", value: "#be123c", textValue: "#be123c" },
+]);
 const MAIN_BROWSER_ANNOTATION_COMPOSER_MODE_PATCH_KEY =
   "__codexpp_ui_improvements_browser_annotation_composer_mode_patch__";
 const BROWSER_ANNOTATION_DEFAULT_MODE_TARGET = "defaultCreateSubmitMode:`direct`,session:";
@@ -174,7 +214,7 @@ const SESSION_SCAN_LIMITS = Object.freeze({
   messageMetricsTotalBytes: 24 * 1024 * 1024,
 });
 
-/** @type {import("@codex-plusplus/sdk").Tweak} */
+/** @type {import("@shadgpt/sdk").Tweak} */
 module.exports = {
   start(api) {
     if (api.process === "main") {
@@ -182,6 +222,7 @@ module.exports = {
         startMainLegacyBrandUiScrubber(api),
         startMainBrowserAnnotationComposerModePatch(api),
         startMainTweakMentionProvider(api),
+        startMainSlashMenuIconProvider(api),
         startMainMetricsProvider(api),
         startMainUsageProvider(api),
         startMainProjectLabelProvider(api),
@@ -533,6 +574,88 @@ function normalizeProjectColorKey(value) {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+const SHARED_DOCUMENT_MUTATION_ATTRIBUTE_FILTER = Object.freeze([
+  "aria-label",
+  "class",
+  "data-app-action-sidebar-project-collapsed",
+  "data-app-action-sidebar-project-id",
+  "data-app-action-sidebar-project-label",
+  "data-app-action-sidebar-project-row",
+  "data-codexpp-sidebar-project-backgrounds",
+  "data-codexpp-sidebar-project-expanded",
+  "data-state",
+  "placeholder",
+  "role",
+  "style",
+  "title",
+  "value",
+]);
+let sharedDocumentMutationHub = null;
+
+function subscribeDocumentMutations(callback, options = {}) {
+  if (typeof MutationObserver !== "function" || typeof document === "undefined") {
+    return () => {};
+  }
+  const hub = sharedDocumentMutationHub || createSharedDocumentMutationHub();
+  if (!hub) return () => {};
+
+  const subscriber = {
+    callback,
+    childList: options.childList !== false,
+    attributes: options.attributes === true,
+    attributeFilter: options.attributeFilter ? new Set(options.attributeFilter) : null,
+  };
+  hub.subscribers.add(subscriber);
+  return () => {
+    hub.subscribers.delete(subscriber);
+    if (hub.subscribers.size === 0) {
+      hub.observer.disconnect();
+      if (sharedDocumentMutationHub === hub) sharedDocumentMutationHub = null;
+    }
+  };
+}
+
+function createSharedDocumentMutationHub() {
+  const target = document.documentElement || document.body;
+  if (!target) return null;
+  const subscribers = new Set();
+  const observer = new MutationObserver((records) => {
+    // Cheap callback/O(1): one native observer fans records to feature-level
+    // schedulers; expensive DOM scans remain inside rAF/timeout callbacks.
+    for (const subscriber of Array.from(subscribers)) {
+      const relevant = mutationRecordsForSubscriber(records, subscriber);
+      if (relevant.length > 0) subscriber.callback(relevant);
+    }
+  });
+  observer.observe(target, {
+    attributes: true,
+    attributeFilter: SHARED_DOCUMENT_MUTATION_ATTRIBUTE_FILTER,
+    childList: true,
+    subtree: true,
+  });
+  sharedDocumentMutationHub = { observer, subscribers };
+  return sharedDocumentMutationHub;
+}
+
+function mutationRecordsForSubscriber(records, subscriber) {
+  const relevant = [];
+  for (const record of records) {
+    if (record.type === "childList") {
+      if (subscriber.childList) relevant.push(record);
+      continue;
+    }
+    if (record.type !== "attributes" || !subscriber.attributes) continue;
+    if (
+      subscriber.attributeFilter &&
+      !subscriber.attributeFilter.has(record.attributeName || "")
+    ) {
+      continue;
+    }
+    relevant.push(record);
+  }
+  return relevant;
+}
+
 // ─────────────────────────────────────────────────────────────── features ──
 
 const FEATURES = {
@@ -626,21 +749,19 @@ const FEATURES = {
       }
     };
 
-    const obs = new MutationObserver(onMutate);
     scanRoot(document.body || document.documentElement);
     // No characterData: the stale-branch label is static chrome reached via
     // childList/attribute changes, so per-streamed-token text mutations should
     // never trigger a full-document re-scan.
-    obs.observe(document.documentElement, {
+    const stopObserver = subscribeDocumentMutations(onMutate, {
       attributes: true,
       attributeFilter: ["aria-label", "title"],
       childList: true,
-      subtree: true,
     });
     api.log.info("stale chat branch label clarification active");
 
     return () => {
-      obs.disconnect();
+      stopObserver();
       for (const node of touched) {
         if (node.nodeType === Node.TEXT_NODE) {
           if (normalize(node.nodeValue) === REPLACEMENT) {
@@ -767,23 +888,96 @@ const FEATURES = {
     };
 
     scanRoot(document.body || document.documentElement);
-    const obs = new MutationObserver(onMutate);
     // No characterData: hidden-element targeting keys off structure/attributes,
     // so per-streamed-token text mutations should never trigger a re-scan.
-    obs.observe(document.documentElement, {
+    const stopObserver = subscribeDocumentMutations(onMutate, {
       attributes: true,
       attributeFilter: ["aria-label", "title"],
       childList: true,
-      subtree: true,
     });
 
     return () => {
-      obs.disconnect();
+      stopObserver();
       for (const el of hidden) {
         if ("codexppPrevDisplay" in el.dataset) {
           el.style.display = el.dataset.codexppPrevDisplay;
           delete el.dataset.codexppPrevDisplay;
         }
+      }
+      hidden.clear();
+    };
+  },
+
+  /**
+   * Hide Codex's native "By your workspace" Plugins filter. Workspace-shared
+   * plugins are account/admin state, not project-local config, so the tab is
+   * misleading for local project marketplace work.
+   */
+  "hide-workspace-plugin-tab"(api) {
+    const LABEL = "by your workspace";
+    const HIDDEN_ATTR = "data-codexpp-hidden-workspace-plugin-tab";
+    const PREV_DISPLAY_ATTR = "data-codexpp-hidden-workspace-plugin-tab-prev-display";
+    const hidden = new Set();
+    const processed = new WeakMap();
+
+    const normalize = (text) => String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    const hideCandidate = (node) => {
+      if (!(node instanceof HTMLElement) || hidden.has(node)) return;
+      const text = normalize(node.textContent);
+      if (processed.get(node) === text) return;
+      processed.set(node, text);
+      if (text !== LABEL) return;
+      node.setAttribute(HIDDEN_ATTR, "true");
+      node.setAttribute(PREV_DISPLAY_ATTR, node.style.display || "");
+      node.style.setProperty("display", "none", "important");
+      hidden.add(node);
+      api.log.info("hid workspace plugin tab");
+    };
+
+    const scanRoot = (root) => {
+      if (!(root instanceof Element)) return;
+      const selector = 'button, [role="tab"], [role="button"]';
+      if (root.matches?.(selector)) hideCandidate(root);
+      for (const node of root.querySelectorAll(selector)) hideCandidate(node);
+    };
+
+    const pendingRoots = new Set();
+    let scheduled = false;
+    const scheduleScan = (root) => {
+      if (root instanceof Element) pendingRoots.add(root);
+      else if (root?.parentElement) pendingRoots.add(root.parentElement);
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        const roots = Array.from(pendingRoots);
+        pendingRoots.clear();
+        for (const root of roots) scanRoot(root);
+      });
+    };
+
+    const stopObserver = subscribeDocumentMutations((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "attributes") scheduleScan(mutation.target);
+        else for (const node of mutation.addedNodes) scheduleScan(node);
+      }
+    }, {
+      attributes: true,
+      attributeFilter: ["aria-label", "role"],
+      childList: true,
+    });
+
+    scanRoot(document.body || document.documentElement);
+
+    return () => {
+      stopObserver();
+      for (const node of hidden) {
+        const previous = node.getAttribute(PREV_DISPLAY_ATTR);
+        if (previous) node.style.display = previous;
+        else node.style.removeProperty("display");
+        node.removeAttribute(HIDDEN_ATTR);
+        node.removeAttribute(PREV_DISPLAY_ATTR);
       }
       hidden.clear();
     };
@@ -813,16 +1007,15 @@ const FEATURES = {
      *
      * Data strategy (single usage-fetch path):
      * -----------------------------------------
-     * When the analytics tweak (co.thomashulihan.usage-analytics) is present,
-     * its main-process IPC handler owns the single "/wham/usage" reader. We
-     * source data through the same `api.ipc.invoke("usage-fetch")` IPC channel
-     * instead of maintaining a second independent polling loop with a separate
-     * renderer bridge. Once IPC succeeds (`ipcUsageConfirmed`), the renderer
+     * When ShadGPT's built-in usage IPC handler is available, it owns
+     * the single "/wham/usage" reader. We source data through the same
+     * `api.ipc.invoke("usage-fetch")` IPC channel instead of maintaining a
+     * second independent polling loop with a separate renderer bridge. Once IPC succeeds (`ipcUsageConfirmed`), the renderer
      * bridge injection and `window.message` listener are never activated —
      * eliminating the observer-storm risk of a second fetch path.
      *
      * Backward-compat fallback:
-     * When IPC fails (analytics absent, older runtime), behaviour is unchanged:
+     * When IPC fails (older runtime), behaviour is unchanged:
      * DOM scanning (breakdown grid + compact node) and the renderer bridge
      * fallback remain active. No regression, no thrown errors.
      *
@@ -838,7 +1031,7 @@ const FEATURES = {
     let directUsageSuccessLogged = false;
     // Set true the first time api.ipc.invoke("usage-fetch") succeeds.
     // When true the renderer bridge + message listener are not activated,
-    // keeping this tweak on the same single fetch path as usage-analytics.
+    // keeping this tweak on the same single usage-fetch path.
     let ipcUsageConfirmed = false;
     // Bridge state — only used when IPC is unavailable.
     let usageBridgeReady = false;
@@ -1192,10 +1385,9 @@ const FEATURES = {
      * Fetch /wham/usage and update the snapshot.
      *
      * Single-path strategy: try `api.ipc.invoke("usage-fetch")` first — this
-     * is the same channel the usage-analytics tweak uses, so when both tweaks
-     * are active there is exactly ONE /wham/usage reader (the IPC handler in
-     * main). Only when IPC is unavailable do we fall back to the renderer
-     * bridge (legacy runtime or analytics tweak absent). Once IPC has succeeded
+     * is ShadGPT's built-in usage channel, so there is exactly ONE
+     * /wham/usage reader (the IPC handler in main). Only when IPC is
+     * unavailable do we fall back to the renderer bridge (older runtime). Once IPC has succeeded
      * once, `ipcUsageConfirmed` is set and the bridge path is never entered.
      */
     const refreshUsageFromApi = async () => {
@@ -1208,7 +1400,7 @@ const FEATURES = {
       directUsageInFlight = true;
       try {
         let status;
-        // ── primary: shared IPC path (usage-analytics or built-in handler) ──
+        // ── primary: built-in shared IPC path ──
         try {
           status = await api.ipc.invoke("usage-fetch", "/wham/usage");
           // IPC succeeded — remember this so the bridge is never activated.
@@ -1452,13 +1644,12 @@ const FEATURES = {
     };
 
     onMutate();
-    const obs = new MutationObserver(onMutate);
-    obs.observe(document.documentElement, { childList: true, subtree: true });
+    const stopObserver = subscribeDocumentMutations(onMutate, { childList: true });
     const interval = window.setInterval(onMutate, 15_000);
     window.addEventListener("focus", onMutate);
     // The window "message" listener for usage events is part of the renderer
     // bridge fallback path. When ipcUsageConfirmed becomes true (IPC path is
-    // active — i.e. usage-analytics tweak is present), this listener is a
+    // active), this listener is a
     // no-op because the bridge is never injected and `onUsageMessage` only
     // processes data that arrives via that bridge. We still attach it so
     // the fallback works on the first load before IPC is confirmed.
@@ -1468,7 +1659,7 @@ const FEATURES = {
     log("active", { snapshot });
 
     return () => {
-      obs.disconnect();
+      stopObserver();
       window.clearInterval(interval);
       window.removeEventListener("focus", onMutate);
       window.removeEventListener("message", onUsageMessage);
@@ -1705,7 +1896,7 @@ const FEATURES = {
       });
     };
 
-    const observer = new MutationObserver((mutations) => {
+    const stopObserver = subscribeDocumentMutations((mutations) => {
       if (root?.isConnected) return;
       for (const mutation of mutations) {
         if (mutation.type === "childList" && mutation.addedNodes.length) {
@@ -1713,15 +1904,14 @@ const FEATURES = {
           return;
         }
       }
-    });
+    }, { childList: true });
 
     mount();
-    observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
     api.log.info("settings search active");
 
     return () => {
       disposed = true;
-      observer.disconnect();
+      stopObserver();
       restoreButtons();
       root?.remove();
       root = null;
@@ -1826,18 +2016,17 @@ const FEATURES = {
       });
     };
     track(document.querySelector(ASIDE_SELECTOR));
-    const mut = new MutationObserver((mutations) => {
+    const stopObserver = subscribeDocumentMutations((mutations) => {
       for (const mutation of mutations) {
         if (mutation.type === "childList" && mutation.addedNodes.length) {
           scheduleRebind();
           return;
         }
       }
-    });
-    mut.observe(document.body, { childList: true, subtree: true });
+    }, { childList: true });
 
     return () => {
-      mut.disconnect();
+      stopObserver();
       if (resizeObs) resizeObs.disconnect();
       style.remove();
     };
@@ -2287,20 +2476,18 @@ const FEATURES = {
 
     clearStaleNodes();
     apply();
-    const obs = new MutationObserver(scheduleApply);
     // No characterData: the action buttons' labels are static, so per-token
     // text mutations should never trigger a layout-reading re-apply.
-    obs.observe(document.body, {
+    const stopObserver = subscribeDocumentMutations(scheduleApply, {
       attributes: true,
       attributeFilter: ["aria-label", "title"],
       childList: true,
-      subtree: true,
     });
 
     api.log.info("sidebar action grid active");
 
     return () => {
-      obs.disconnect();
+      stopObserver();
       removeWrapper();
       cleanupMarks();
       style.remove();
@@ -2315,8 +2502,12 @@ const FEATURES = {
   "slash-menu-polish"(api) {
     const STYLE_ID = "codexpp-slash-menu-polish";
     const ATTR = "data-codexpp-slash-menu";
+    const INHERITED_ICON_ATTR = "data-codexpp-slash-menu-inherited-skill-icon";
+    const HIDDEN_ICON_ATTR = "data-codexpp-slash-menu-hidden-skill-icon";
     let disposed = false;
     const marked = new Set();
+    let iconMetadata = { plugins: [], skills: [] };
+    let iconMetadataPromise = null;
 
     document.getElementById(STYLE_ID)?.remove();
     const style = document.createElement("style");
@@ -2346,6 +2537,19 @@ const FEATURES = {
       [${ATTR}="true"] [data-highlighted],
       [${ATTR}="true"] [data-state="checked"] {
         background: var(--color-token-list-selected-background, var(--color-token-bg-fog, transparent)) !important;
+      }
+
+      [${ATTR}="true"] [${INHERITED_ICON_ATTR}="true"] {
+        width: 1.25rem !important;
+        height: 1.25rem !important;
+        min-width: 1.25rem !important;
+        border-radius: 0.25rem !important;
+        object-fit: cover !important;
+        flex: 0 0 auto !important;
+      }
+
+      [${ATTR}="true"] [${INHERITED_ICON_ATTR}="true"][data-codexpp-slash-menu-icon-shape="circle"] {
+        border-radius: 9999px !important;
       }
     `;
     document.head.appendChild(style);
@@ -2381,6 +2585,196 @@ const FEATURES = {
       return true;
     };
 
+    const inheritedIconsEnabled = () =>
+      readFlag(api, "slash-menu-inherited-skill-icons", DEFAULT_FEATURE_FLAGS["slash-menu-inherited-skill-icons"]);
+
+    const normalizePluginLabel = (value) => compactText(value).toLowerCase();
+
+    const slugText = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+    const pluginLabelMatches = (candidate, label) => {
+      const left = normalizePluginLabel(candidate);
+      const right = normalizePluginLabel(label);
+      if (!left || !right) return false;
+      return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+    };
+
+    const skillLabelMatches = (candidate, label) => {
+      const left = slugText(candidate);
+      const right = slugText(label);
+      return Boolean(left && right && left === right);
+    };
+
+    const isGithubAvatarSrc = (src) =>
+      String(src || "").toLowerCase().startsWith("https://avatars.githubusercontent.com/");
+
+    const normalizeIconMetadata = (data) => ({
+      plugins: Array.isArray(data?.plugins) ? data.plugins : [],
+      skills: Array.isArray(data?.skills) ? data.skills : [],
+    });
+
+    const loadIconMetadata = () => {
+      if (iconMetadataPromise || !api?.ipc?.invoke) return;
+      iconMetadataPromise = Promise.resolve(api.ipc.invoke("slash-menu-plugin-icons"))
+        .then((data) => {
+          iconMetadata = normalizeIconMetadata(data);
+          scheduleApply();
+        })
+        .catch((error) => {
+          api.log?.warn?.("[slash-menu-polish] plugin icon metadata unavailable", error);
+        })
+        .finally(() => {
+          iconMetadataPromise = null;
+        });
+    };
+
+    const visibleImagesOutsideSlashMenu = (root) =>
+      Array.from(root?.querySelectorAll?.("img") || []).filter((image) => {
+        if (!(image instanceof HTMLElement) || !isVisible(image)) return false;
+        if (image.closest(`[${ATTR}="true"]`)) return false;
+        if (image.getAttribute(INHERITED_ICON_ATTR) === "true") return false;
+        return Boolean(image.currentSrc || image.src || image.getAttribute("src"));
+      });
+
+    const firstImageNearHeading = (heading) => {
+      let node = heading?.parentElement;
+      for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+        const images = visibleImagesOutsideSlashMenu(node);
+        if (images.length > 0) return images[0];
+      }
+      return null;
+    };
+
+    const pluginIconForSlashSkillLabel = (label) => {
+      const headings = Array.from(document.querySelectorAll("h1, h2, h3, [role='heading']"));
+      for (const heading of headings) {
+        if (!(heading instanceof HTMLElement) || !pluginLabelMatches(heading.textContent, label)) continue;
+        const image = firstImageNearHeading(heading);
+        if (image) return image;
+      }
+      return null;
+    };
+
+    const skillRowParts = (row) => {
+      const match = compactText(row?.textContent || "").match(/^([^:\n]{1,120}):\s+(.+)$/);
+      if (!match) return { pluginLabel: "", skillLabel: "" };
+      return {
+        pluginLabel: match[1].trim(),
+        skillLabel: match[2].trim(),
+      };
+    };
+
+    const iconPayload = (src, source = {}) => {
+      if (!src) return null;
+      const shape = String(source.iconShape || "").trim()
+        || (isGithubAvatarSrc(src) ? "circle" : "");
+      const iconSource = String(source.iconSource || "").trim()
+        || (shape === "circle" ? "github" : "");
+      return { src, shape, iconSource };
+    };
+
+    const metadataIconForSlashSkill = (pluginLabel, skillLabel) => {
+      for (const skill of iconMetadata.skills || []) {
+        const pluginMatches = [
+          skill.pluginLabel,
+          skill.pluginName,
+          skill.pluginDisplayName,
+          skill.pluginId,
+        ].some((candidate) => pluginLabelMatches(candidate, pluginLabel));
+        if (!pluginMatches) continue;
+        const skillMatches = [
+          skill.displayName,
+          skill.name,
+          skill.slash,
+          skill.slash && String(skill.slash).replace(/^\$/, ""),
+        ].some((candidate) => skillLabelMatches(candidate, skillLabel));
+        if (skillMatches && skill.iconSrc) return iconPayload(skill.iconSrc, skill);
+      }
+      for (const plugin of iconMetadata.plugins || []) {
+        const pluginMatches = [
+          plugin.displayName,
+          plugin.name,
+          plugin.label,
+          plugin.id,
+          plugin.githubRepo,
+        ].some((candidate) => pluginLabelMatches(candidate, pluginLabel));
+        if (pluginMatches && plugin.iconSrc) return iconPayload(plugin.iconSrc, plugin);
+      }
+      return null;
+    };
+
+    const rowHasSpecificIcon = (row) =>
+      Array.from(row.querySelectorAll("img")).some(
+        (image) => image.getAttribute(INHERITED_ICON_ATTR) !== "true",
+      );
+
+    const hideGenericSkillIcon = (icon) => {
+      if (!icon || icon.getAttribute(HIDDEN_ICON_ATTR) === "true") return;
+      icon.dataset.codexppSlashMenuOriginalDisplay =
+        icon.style?.getPropertyValue?.("display") || icon.style?.display || "";
+      icon.setAttribute(HIDDEN_ICON_ATTR, "true");
+      icon.style.display = "none";
+    };
+
+    const inheritedSkillIconFor = (sourceIcon) => {
+      const src = typeof sourceIcon === "string"
+        ? sourceIcon
+        : sourceIcon?.src || sourceIcon?.currentSrc || sourceIcon?.getAttribute?.("src") || "";
+      if (!src) return null;
+      const shape = sourceIcon && typeof sourceIcon === "object" && typeof sourceIcon.getAttribute !== "function"
+        ? sourceIcon.shape || sourceIcon.iconShape || ""
+        : sourceIcon && typeof sourceIcon.getAttribute === "function" && sourceIcon.getAttribute("data-codexpp-native-plugin-github-icon") === "true"
+          ? "circle"
+        : "";
+      const icon = document.createElement("img");
+      icon.setAttribute("src", src);
+      icon.setAttribute("alt", "");
+      icon.setAttribute("aria-hidden", "true");
+      icon.setAttribute(INHERITED_ICON_ATTR, "true");
+      if (String(shape).toLowerCase() === "circle" || isGithubAvatarSrc(src)) {
+        icon.dataset.codexppSlashMenuIconShape = "circle";
+      }
+      return icon;
+    };
+
+    const restoreSlashMenuSkillIcons = (root) => {
+      for (const icon of Array.from(root.querySelectorAll(`[${INHERITED_ICON_ATTR}="true"]`))) {
+        icon.remove();
+      }
+      for (const icon of Array.from(root.querySelectorAll(`[${HIDDEN_ICON_ATTR}="true"]`))) {
+        const originalDisplay = icon.dataset?.codexppSlashMenuOriginalDisplay || "";
+        if (originalDisplay) icon.style.display = originalDisplay;
+        else icon.style.removeProperty?.("display");
+        icon.removeAttribute(HIDDEN_ICON_ATTR);
+        delete icon.dataset.codexppSlashMenuOriginalDisplay;
+      }
+    };
+
+    const applySlashMenuSkillIcons = (menu) => {
+      if (!inheritedIconsEnabled()) {
+        restoreSlashMenuSkillIcons(menu);
+        return;
+      }
+      loadIconMetadata();
+      const rows = Array.from(menu.querySelectorAll("[role='option'], [role='menuitem'], button"));
+      for (const row of rows) {
+        if (!(row instanceof HTMLElement) || rowHasSpecificIcon(row)) continue;
+        if (row.querySelector(`[${INHERITED_ICON_ATTR}="true"]`)) continue;
+        const { pluginLabel, skillLabel } = skillRowParts(row);
+        if (!pluginLabel || !skillLabel) continue;
+        const sourceIcon = pluginIconForSlashSkillLabel(pluginLabel) || metadataIconForSlashSkill(pluginLabel, skillLabel);
+        const inheritedIcon = inheritedSkillIconFor(sourceIcon);
+        if (!inheritedIcon) continue;
+        const genericIcon = row.querySelector("svg");
+        if (genericIcon?.parentElement) {
+          hideGenericSkillIcon(genericIcon);
+          genericIcon.before(inheritedIcon);
+        } else {
+          row.prepend(inheritedIcon);
+        }
+      }
+    };
+
     const apply = () => {
       if (disposed) return;
       const active = new Set();
@@ -2390,9 +2784,11 @@ const FEATURES = {
         active.add(node);
         marked.add(node);
         if (node.getAttribute(ATTR) !== "true") node.setAttribute(ATTR, "true");
+        applySlashMenuSkillIcons(node);
       }
       for (const node of Array.from(marked)) {
         if (!node.isConnected || !active.has(node)) {
+          restoreSlashMenuSkillIcons(node);
           node.removeAttribute?.(ATTR);
           marked.delete(node);
         }
@@ -2409,7 +2805,15 @@ const FEATURES = {
       });
     };
 
-    const observer = new MutationObserver((mutations) => {
+    const onSettingChanged = (event) => {
+      if (event?.detail?.id !== "slash-menu-inherited-skill-icons") return;
+      if (!event.detail.value) {
+        for (const node of marked) restoreSlashMenuSkillIcons(node);
+      }
+      scheduleApply();
+    };
+
+    const stopObserver = subscribeDocumentMutations((mutations) => {
       for (const mutation of mutations) {
         if (
           mutation.type === "childList" ||
@@ -2419,26 +2823,33 @@ const FEATURES = {
           return;
         }
       }
-    });
-
-    apply();
-    observer.observe(document.body || document.documentElement, {
+    }, {
       attributes: true,
       attributeFilter: ["data-state"],
       childList: true,
-      subtree: true,
     });
+
+    apply();
     document.addEventListener("focusin", scheduleApply, true);
+    window.addEventListener(BRIDGE_EVENT, onSettingChanged);
     api.log.info("slash menu polish active");
 
     return () => {
       disposed = true;
-      observer.disconnect();
+      stopObserver();
       document.removeEventListener("focusin", scheduleApply, true);
-      for (const node of marked) node.removeAttribute?.(ATTR);
+      window.removeEventListener(BRIDGE_EVENT, onSettingChanged);
+      for (const node of marked) {
+        restoreSlashMenuSkillIcons(node);
+        node.removeAttribute?.(ATTR);
+      }
       marked.clear();
       style.remove();
     };
+  },
+
+  "slash-menu-inherited-skill-icons"() {
+    return () => {};
   },
 
   /**
@@ -2670,6 +3081,9 @@ const FEATURES = {
       return matchesFor(activeTrigger.query)[selectedIndex] || null;
     };
 
+    let refreshFrame = 0;
+    let pendingRefreshTarget = null;
+
     const onInput = (event) => {
       if (ignoreNextInput) {
         ignoreNextInput = false;
@@ -2677,25 +3091,37 @@ const FEATURES = {
       }
       suppressSelectionRefresh = false;
       const target = resolveComposerInput(event.target);
-      if (target) void refresh(target);
+      if (!target) return;
+      const inputData = typeof event?.data === "string" ? event.data : "";
+      const inputType = typeof event?.inputType === "string" ? event.inputType : "";
+      if (!menu && !inputData.includes("%")) {
+        const shouldFallbackScan = !inputType || inputType === "insertFromPaste" || inputType === "insertFromDrop";
+        if (!shouldFallbackScan || !findTweakMentionTrigger(target)) return;
+      }
+      scheduleRefresh(target);
     };
 
     const scheduleRefresh = (target = activeComposerInput()) => {
       const resolved = resolveComposerInput(target);
       if (!resolved || disposed) return;
       lastComposerTarget = resolved;
-      requestAnimationFrame(() => {
-        if (!disposed) void refresh(resolved);
+      pendingRefreshTarget = resolved;
+      if (refreshFrame) return;
+      refreshFrame = requestAnimationFrame(() => {
+        refreshFrame = 0;
+        const nextTarget = pendingRefreshTarget;
+        pendingRefreshTarget = null;
+        if (!disposed && nextTarget) void refresh(nextTarget);
       });
     };
 
     const onBeforeInput = (event) => {
-      if (event?.data !== "%" && event?.inputType !== "insertText") return;
+      if (event?.data !== "%") return;
       scheduleRefresh(event.target);
     };
 
     const onKeyup = (event) => {
-      if (event.key === "%" || event.key === "Backspace" || event.key === "Delete" || event.key === " ") {
+      if (event.key === "%" || (menu && (event.key === "Backspace" || event.key === "Delete" || event.key === " "))) {
         scheduleRefresh(event.target);
       }
     };
@@ -2743,7 +3169,10 @@ const FEATURES = {
     };
     const onSelectionChange = () => {
       if (suppressSelectionRefresh) return;
-      void refresh(activeComposerInput() || lastComposerTarget);
+      if (!menu) return;
+      const target = activeComposerInput() || lastComposerTarget;
+      if (!target) return;
+      scheduleRefresh(target);
     };
     const onFocusIn = (event) => {
       const target = resolveComposerInput(event.target);
@@ -2770,6 +3199,9 @@ const FEATURES = {
       document.removeEventListener("selectionchange", onSelectionChange, true);
       document.removeEventListener("focusout", onFocusChange, true);
       window.removeEventListener("resize", onResize);
+      if (refreshFrame) cancelAnimationFrame(refreshFrame);
+      refreshFrame = 0;
+      pendingRefreshTarget = null;
       closeMenu();
       style.remove();
     };
@@ -3278,8 +3710,7 @@ const FEATURES = {
     };
 
     applySelection();
-    const observer = new MutationObserver(scheduleApply);
-    observer.observe(document.body, { childList: true, subtree: true });
+    const stopObserver = subscribeDocumentMutations(scheduleApply, { childList: true });
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("mousedown", onPointerDown, true);
     document.addEventListener("click", onClick, true);
@@ -3290,7 +3721,7 @@ const FEATURES = {
 
     return () => {
       disposed = true;
-      observer.disconnect();
+      stopObserver();
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("mousedown", onPointerDown, true);
       document.removeEventListener("click", onClick, true);
@@ -3908,8 +4339,7 @@ const FEATURES = {
     };
 
     refreshLabels(true);
-    const observer = new MutationObserver(scheduleApply);
-    observer.observe(document.body, { childList: true, subtree: true });
+    const stopObserver = subscribeDocumentMutations(scheduleApply, { childList: true });
     const interval = window.setInterval(() => refreshLabels(true), 60_000);
     window.addEventListener("focus", scheduleApply);
     window.addEventListener("storage", scheduleApply);
@@ -3920,7 +4350,7 @@ const FEATURES = {
 
     return () => {
       disposed = true;
-      observer.disconnect();
+      stopObserver();
       window.clearInterval(interval);
       window.removeEventListener("focus", scheduleApply);
       window.removeEventListener("storage", scheduleApply);
@@ -3985,34 +4415,7 @@ const FEATURES = {
       "upgrade",
       "upgrade plan",
     ]);
-    const PALETTE = [
-      { id: "neutral", label: "Neutral", value: "#404040", textValue: "#404040" },
-      { id: "stone", label: "Stone", value: "#44403c", textValue: "#44403c" },
-      { id: "zinc", label: "Zinc", value: "#3f3f46", textValue: "#3f3f46" },
-      { id: "slate", label: "Slate", value: "#334155", textValue: "#334155" },
-      { id: "gray", label: "Gray", value: "#374151", textValue: "#374151" },
-      { id: "mauve", label: "Mauve", value: "#524959", textValue: "#524959" },
-      { id: "olive", label: "Olive", value: "#435147", textValue: "#435147" },
-      { id: "mist", label: "Mist", value: "#3d5155", textValue: "#3d5155" },
-      { id: "taupe", label: "Taupe", value: "#554b3e", textValue: "#554b3e" },
-      { id: "red", label: "Red", value: "#b91c1c", textValue: "#b91c1c" },
-      { id: "orange", label: "Orange", value: "#c2410c", textValue: "#c2410c" },
-      { id: "amber", label: "Amber", value: "#b45309", textValue: "#b45309" },
-      { id: "yellow", label: "Yellow", value: "#a16207", textValue: "#a16207" },
-      { id: "lime", label: "Lime", value: "#4d7c0f", textValue: "#4d7c0f" },
-      { id: "green", label: "Green", value: "#15803d", textValue: "#15803d" },
-      { id: "emerald", label: "Emerald", value: "#047857", textValue: "#047857" },
-      { id: "teal", label: "Teal", value: "#0f766e", textValue: "#0f766e" },
-      { id: "cyan", label: "Cyan", value: "#0e7490", textValue: "#0e7490" },
-      { id: "sky", label: "Sky", value: "#0369a1", textValue: "#0369a1" },
-      { id: "blue", label: "Blue", value: "#1d4ed8", textValue: "#1d4ed8" },
-      { id: "indigo", label: "Indigo", value: "#4338ca", textValue: "#4338ca" },
-      { id: "violet", label: "Violet", value: "#6d28d9", textValue: "#6d28d9" },
-      { id: "purple", label: "Purple", value: "#7e22ce", textValue: "#7e22ce" },
-      { id: "fuchsia", label: "Fuchsia", value: "#a21caf", textValue: "#a21caf" },
-      { id: "pink", label: "Pink", value: "#be185d", textValue: "#be185d" },
-      { id: "rose", label: "Rose", value: "#be123c", textValue: "#be123c" },
-    ];
+    const PALETTE = PROJECT_COLOR_PALETTE;
     const colorPrefsCacheKey = "__codexppSidebarProjectColorPrefs";
     let colorPrefs = readColorPrefs();
     window[colorPrefsCacheKey] = colorPrefs;
@@ -4022,6 +4425,7 @@ const FEATURES = {
     let pendingContextMenu = null;
     let menu = null;
     let disposed = false;
+    const menuTimers = new Set();
 
     document.getElementById(STYLE_ID)?.remove();
     const style = document.createElement("style");
@@ -4698,6 +5102,7 @@ const FEATURES = {
       typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
     const seedProjectMenu = (label, event, anchor, row) => {
+      if (disposed) return;
       const anchorRect = anchor?.getBoundingClientRect?.();
       pendingContextMenu = {
         label,
@@ -4707,8 +5112,23 @@ const FEATURES = {
         at: Date.now(),
       };
       [0, 50, 150, 350].forEach((delay) =>
-        window.setTimeout(injectColorMenuIntoNativeMenu, delay),
+        setMenuTimer(injectColorMenuIntoNativeMenu, delay),
       );
+    };
+
+    const setMenuTimer = (callback, delay) => {
+      if (disposed) return null;
+      const timer = window.setTimeout(() => {
+        menuTimers.delete(timer);
+        if (!disposed) callback();
+      }, delay);
+      menuTimers.add(timer);
+      return timer;
+    };
+
+    const clearMenuTimers = () => {
+      for (const timer of menuTimers) window.clearTimeout(timer);
+      menuTimers.clear();
     };
 
     const findProjectOverflowButton = (row, label) =>
@@ -4906,15 +5326,22 @@ const FEATURES = {
       return rect.width >= 120 && rect.height >= 48 && rect.width <= maxWidth && rect.height <= maxHeight;
     };
 
+    const isNativeProjectMenuRoot = (node) => (
+      node instanceof HTMLElement &&
+      visible(node) &&
+      !node.hasAttribute(MENU_ATTR) &&
+      !mainSidebar()?.contains?.(node)
+    );
+
     const closestNativeMenu = (target) => {
       if (!(target instanceof HTMLElement)) return null;
       const semantic = target.closest('[role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]');
-      if (semantic instanceof HTMLElement) return semantic;
+      if (isNativeProjectMenuRoot(semantic)) return semantic;
       let node = target.parentElement;
       let best = null;
       while (node instanceof HTMLElement && node !== document.body && node !== document.documentElement) {
         const text = menuText(node);
-        if (isBoundedMenuPopover(node) && isKnownNativeMenuText(text)) best = node;
+        if (isNativeProjectMenuRoot(node) && isBoundedMenuPopover(node) && isKnownNativeMenuText(text)) best = node;
         node = node.parentElement;
       }
       return best;
@@ -5002,7 +5429,7 @@ const FEATURES = {
     };
 
     const injectColorMenuIntoNativeMenu = () => {
-      if (!pendingContextMenu || Date.now() - pendingContextMenu.at > 1500) return;
+      if (disposed || !pendingContextMenu || Date.now() - pendingContextMenu.at > 1500) return;
       const nativeMenu = findNativeContextMenu(pendingContextMenu.x, pendingContextMenu.y);
       if (!nativeMenu || nativeMenu.querySelector(`[${MENU_ATTR}="trigger"]`)) return;
 
@@ -5218,7 +5645,7 @@ const FEATURES = {
 
     const findNativeContextMenu = (x, y) => {
       const menus = openMenuRoots()
-        .filter((node) => node instanceof HTMLElement && !node.hasAttribute(MENU_ATTR))
+        .filter(isNativeProjectMenuRoot)
         .filter((node) => findRemoveMenuItem(node) || isKnownNativeMenuText(menuText(node)));
       return menus
         .map((node) => ({ node, rect: node.getBoundingClientRect() }))
@@ -5256,6 +5683,7 @@ const FEATURES = {
         return;
       }
 
+      clearLeakedMenuItems(sidebar);
       preserveSidebarScroll(sidebar, () => {
         sidebar.querySelectorAll("div[role='listitem'][aria-label]").forEach((row) => {
           if (isExcludedProjectRow(row)) clearRowMarks(row);
@@ -5284,6 +5712,12 @@ const FEATURES = {
           });
         }
       });
+    };
+
+    const clearLeakedMenuItems = (sidebar) => {
+      sidebar.querySelectorAll(
+        `[${MENU_ATTR}="copy-path"], [${MENU_ATTR}="project-settings"], [${MENU_ATTR}="trigger"]`,
+      ).forEach((node) => node.remove());
     };
 
     const preserveSidebarScroll = (sidebar, mutate) => {
@@ -5401,8 +5835,7 @@ const FEATURES = {
     const retryTimers = [250, 1000, 2500].map((delay) =>
       window.setTimeout(scheduleApply, delay),
     );
-    const observer = new MutationObserver(scheduleApplySoon);
-    observer.observe(document.body, {
+    const stopObserver = subscribeDocumentMutations(scheduleApplySoon, {
       attributes: true,
       attributeFilter: [
         "aria-label",
@@ -5417,7 +5850,6 @@ const FEATURES = {
         "style",
       ],
       childList: true,
-      subtree: true,
     });
     document.addEventListener("contextmenu", onProjectContextMenu, true);
     document.addEventListener("pointerdown", onProjectOverflowTrigger, true);
@@ -5430,9 +5862,11 @@ const FEATURES = {
 
     return () => {
       disposed = true;
-      observer.disconnect();
+      stopObserver();
       if (childListTimer) window.clearTimeout(childListTimer);
       retryTimers.forEach((timer) => window.clearTimeout(timer));
+      clearMenuTimers();
+      pendingContextMenu = null;
       document.removeEventListener("contextmenu", onProjectContextMenu, true);
       document.removeEventListener("pointerdown", onProjectOverflowTrigger, true);
       document.removeEventListener("click", onProjectOverflowTrigger, true);
@@ -5533,15 +5967,14 @@ const FEATURES = {
       scheduleScan();
       scheduleRefresh();
     };
-    const observer = new MutationObserver(onMutate);
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    const stopObserver = subscribeDocumentMutations(onMutate, { childList: true });
 
     scheduleRefresh();
     const timer = window.setInterval(scheduleRefresh, 15_000);
 
     return () => {
       disposed = true;
-      observer.disconnect();
+      stopObserver();
       window.clearInterval(timer);
       for (const [, line] of mounted) line.remove();
       mounted.clear();
@@ -5609,10 +6042,8 @@ function startLegacyBrandUiScrubber(api) {
     window.requestAnimationFrame(flush);
   };
 
-  const observer = new MutationObserver(schedule);
-  observer.observe(document.documentElement, {
+  const stopObserver = subscribeDocumentMutations(schedule, {
     childList: true,
-    subtree: true,
     attributes: true,
     attributeFilter: ["aria-label", "title", "placeholder", "value"],
   });
@@ -5621,7 +6052,7 @@ function startLegacyBrandUiScrubber(api) {
 
   return () => {
     disposed = true;
-    observer.disconnect();
+    stopObserver();
     pending.clear();
   };
 }
@@ -5699,6 +6130,8 @@ const SIDEBAR_BATCH_MENU_GLOBAL_KEY = "__shadgptUiImprovementsSidebarBatchMenu";
 const SIDEBAR_BATCH_MENU_HANDLER_KEY =
   "__shadgptUiImprovementsSidebarBatchMenuHandler";
 const TWEAK_MENTION_HANDLER_KEY = "__shadgptUiImprovementsTweakMentionHandler";
+const SLASH_MENU_ICON_GLOBAL_KEY = "__shadgptUiImprovementsSlashMenuPluginIcons";
+const SLASH_MENU_ICON_HANDLER_KEY = "__shadgptUiImprovementsSlashMenuPluginIconsHandler";
 
 function startMainLegacyBrandUiScrubber(api) {
   let electron;
@@ -5711,6 +6144,14 @@ function startMainLegacyBrandUiScrubber(api) {
 
   const { app, webContents } = electron;
   const script = legacyBrandMainInjectionScript();
+  const disposalScript = legacyBrandMainDisposalScript();
+
+  const previous = globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY];
+  try {
+    previous?.dispose?.();
+  } catch (e) {
+    api.log.warn("[legacy-branding] previous renderer scrubber dispose failed", String(e?.message || e));
+  }
 
   const inject = (wc) => {
     try {
@@ -5722,6 +6163,19 @@ function startMainLegacyBrandUiScrubber(api) {
       });
     } catch (e) {
       api.log.warn("[legacy-branding] renderer scrub injection failed", String(e?.message || e));
+    }
+  };
+
+  const disconnectInjectedObserver = (wc) => {
+    try {
+      if (!wc || wc.isDestroyed?.()) return;
+      const url = typeof wc.getURL === "function" ? wc.getURL() : "";
+      if (url && !url.startsWith("app://")) return;
+      wc.executeJavaScript(disposalScript, true).catch((e) => {
+        api.log.warn("[legacy-branding] renderer scrub disposal failed", String(e?.message || e));
+      });
+    } catch (e) {
+      api.log.warn("[legacy-branding] renderer scrub disposal failed", String(e?.message || e));
     }
   };
 
@@ -5737,13 +6191,19 @@ function startMainLegacyBrandUiScrubber(api) {
   app?.on?.("web-contents-created", onCreated);
   scan();
 
-  const previous = globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY];
-  previous?.dispose?.();
   const dispose = () => {
     try {
       app?.off?.("web-contents-created", onCreated);
     } catch {
       // Ignore cleanup errors during hot reload.
+    }
+    try {
+      for (const wc of webContents.getAllWebContents()) disconnectInjectedObserver(wc);
+    } catch {
+      // Ignore cleanup errors during hot reload.
+    }
+    if (globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY]?.dispose === dispose) {
+      delete globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY];
     }
   };
   globalThis[MAIN_LEGACY_BRAND_SCRUBBER_KEY] = { dispose };
@@ -5874,6 +6334,252 @@ function startMainTweakMentionProvider(api) {
   };
 }
 
+function startMainSlashMenuIconProvider(api) {
+  if (typeof api.ipc?.handle !== "function") {
+    api.log.warn("[slash-menu-polish] ipc API unavailable for plugin icons");
+    return null;
+  }
+  const service = createSlashMenuIconService(api);
+  globalThis[SLASH_MENU_ICON_GLOBAL_KEY] = service;
+
+  if (!globalThis[SLASH_MENU_ICON_HANDLER_KEY]) {
+    api.ipc.handle("slash-menu-plugin-icons", () => {
+      const active = globalThis[SLASH_MENU_ICON_GLOBAL_KEY];
+      return active?.getIcons?.() || { status: "disabled", plugins: [], skills: [] };
+    });
+    globalThis[SLASH_MENU_ICON_HANDLER_KEY] = true;
+  }
+
+  api.log.info("[slash-menu-polish] plugin icon metadata provider active");
+  return () => disposeMainService(SLASH_MENU_ICON_GLOBAL_KEY, service);
+}
+
+function createSlashMenuIconService() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const os = require("node:os");
+  const { pathToFileURL } = require("node:url");
+  const home = os.homedir();
+  const roots = [
+    path.join(home, ".codex", "plugins", "cache"),
+    path.join(home, ".codex", "github-marketplaces"),
+  ];
+  let disposed = false;
+  let cache = null;
+  let cacheAt = 0;
+
+  const readJson = (file) => {
+    try {
+      return JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      return null;
+    }
+  };
+
+  const iconSrc = (dir, data = {}) => {
+    const variantSrc = bestIconVariantSrc(dir, data);
+    if (variantSrc) return variantSrc;
+    const url = String(data.iconUrl || "").trim();
+    if (/^(https?:|data:|file:)/i.test(url)) return appendIconCache(url, data.iconCacheKey);
+    const rawPath = String(data.iconPath || data.logo || data.composerIcon || "").trim();
+    if (/^(https?:|data:|file:)/i.test(rawPath)) return appendIconCache(rawPath, data.iconCacheKey);
+    if (!rawPath) return "";
+    const abs = path.isAbsolute(rawPath) ? rawPath : path.join(dir, rawPath.replace(/^\.?\//, ""));
+    return appendIconCache(pathToFileURL(abs).href, data.iconCacheKey);
+  };
+
+  const bestIconVariantSrc = (dir, data = {}) => {
+    const variants = Array.isArray(data.iconVariants) ? data.iconVariants : [];
+    const best = variants
+      .filter((variant) => variant && (variant.iconUrl || variant.iconPath))
+      .sort((a, b) => Number(b.size || b.scale || 0) - Number(a.size || a.scale || 0))[0];
+    if (!best) return "";
+    if (best.iconUrl) return appendIconCache(best.iconUrl, data.iconCacheKey);
+    const rawPath = String(best.iconPath || "").trim();
+    if (!rawPath) return "";
+    const abs = path.isAbsolute(rawPath) ? rawPath : path.join(dir, rawPath.replace(/^\.?\//, ""));
+    return appendIconCache(pathToFileURL(abs).href, data.iconCacheKey);
+  };
+
+  const appendIconCache = (url, cacheKey) => {
+    const raw = String(url || "").trim();
+    const key = String(cacheKey || "").trim();
+    if (!raw || !key || /^data:/i.test(raw)) return raw;
+    if (/[?&]codex_icon_cache=/.test(raw)) return raw;
+    return `${raw}${raw.includes("?") ? "&" : "?"}codex_icon_cache=${encodeURIComponent(key)}`;
+  };
+
+  const marketplaceDefaultIconShape = (data = {}, iconSource = "") => {
+    const shape = String(data.iconShape || data.defaultIconShape || "").trim();
+    if (shape) return shape;
+    const source = String(iconSource || data.iconSource || "").trim();
+    if (source === "github") return "circle";
+    if (source === "favicon") return "rounded";
+    return "";
+  };
+
+  const marketplaceIconMeta = (pluginDir) => {
+    let dir = pluginDir;
+    for (let depth = 0; dir && depth < 8; depth += 1) {
+      const sidecar = readJson(path.join(dir, ".codex-marketplace", "metadata.json"));
+      if (sidecar) {
+        const data = {
+          iconUrl: sidecar.iconUrl || "",
+          iconPath: sidecar.iconPath || "",
+          iconSource: sidecar.iconSource || "",
+          iconShape: marketplaceDefaultIconShape(sidecar, sidecar.iconSource || ""),
+          iconCacheKey: sidecar.iconCacheKey || "",
+          iconVariants: Array.isArray(sidecar.iconVariants) ? sidecar.iconVariants : [],
+        };
+        const fromSidecar = iconSrc(dir, data);
+        if (fromSidecar) return { ...data, iconSrc: fromSidecar };
+      }
+      const marketplace = readJson(path.join(dir, ".agents", "plugins", "marketplace.json"));
+      const iface = marketplace && marketplace.interface && typeof marketplace.interface === "object" ? marketplace.interface : null;
+      if (iface) {
+        const data = {
+          iconUrl: "",
+          iconPath: iface.logo || iface.composerIcon || "",
+          iconSource: iface.iconSource || "",
+          iconShape: marketplaceDefaultIconShape(iface, iface.iconSource || ""),
+          iconCacheKey: iface.iconCacheKey || "",
+          iconVariants: Array.isArray(iface.iconVariants) ? iface.iconVariants : [],
+        };
+        const fromMarketplace = iconSrc(dir, data);
+        if (fromMarketplace) return { ...data, iconSrc: fromMarketplace };
+      }
+      const parent = path.dirname(dir);
+      if (!parent || parent === dir) break;
+      dir = parent;
+    }
+    return { iconSrc: "", iconShape: "", iconSource: "", iconCacheKey: "", iconVariants: [] };
+  };
+
+  const iconShapeFor = (src, data = {}) => {
+    const shape = String(data.iconShape || "").trim();
+    if (shape) return shape;
+    const source = String(data.iconSource || "").trim();
+    if (source === "github") return "circle";
+    return String(src || "").toLowerCase().startsWith("https://avatars.githubusercontent.com/") ? "circle" : "";
+  };
+
+  const pluginDirs = () => {
+    const out = [];
+    const seen = new Set();
+    const walk = (dir, depth) => {
+      if (depth < 0 || seen.has(dir)) return;
+      seen.add(dir);
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      const hasManifest =
+        fs.existsSync(path.join(dir, ".claude-plugin", "plugin.json")) ||
+        fs.existsSync(path.join(dir, ".codex-plugin", "plugin.json")) ||
+        fs.existsSync(path.join(dir, "plugin.json")) ||
+        fs.existsSync(path.join(dir, ".codex-plugin", "metadata.json"));
+      if (hasManifest) out.push(dir);
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name === ".git" || entry.name === "node_modules") continue;
+        walk(path.join(dir, entry.name), depth - 1);
+      }
+    };
+    for (const root of roots) walk(root, 5);
+    return out;
+  };
+
+  const readPlugin = (dir) => {
+    const manifest =
+      readJson(path.join(dir, ".claude-plugin", "plugin.json")) ||
+      readJson(path.join(dir, ".codex-plugin", "plugin.json")) ||
+      readJson(path.join(dir, "plugin.json")) ||
+      {};
+    const sidecar = readJson(path.join(dir, ".codex-plugin", "metadata.json")) || {};
+    const pluginSidecar = sidecar.plugin && typeof sidecar.plugin === "object" ? sidecar.plugin : {};
+    const iface = manifest.interface && typeof manifest.interface === "object" ? manifest.interface : {};
+    const pluginIcon = {
+      iconUrl: pluginSidecar.iconUrl || "",
+      iconPath: pluginSidecar.iconPath || iface.composerIcon || iface.logo || "",
+      iconShape: pluginSidecar.iconShape || manifest.iconShape || iface.iconShape || "",
+      iconSource: pluginSidecar.iconSource || manifest.iconSource || "",
+      iconCacheKey: pluginSidecar.iconCacheKey || manifest.iconCacheKey || iface.iconCacheKey || "",
+      iconVariants: pluginSidecar.iconVariants || manifest.iconVariants || iface.iconVariants || [],
+    };
+    const fallbackMarketplaceIcon = marketplaceIconMeta(dir);
+    const pluginIconSrc = iconSrc(dir, pluginIcon) || fallbackMarketplaceIcon.iconSrc;
+    const pluginShape = iconShapeFor(pluginIconSrc, pluginIcon) || fallbackMarketplaceIcon.iconShape || "";
+    const plugin = {
+      id: String(manifest.name || pluginSidecar.name || path.basename(dir)),
+      name: String(manifest.name || pluginSidecar.name || path.basename(dir)),
+      displayName: String(manifest.title || manifest.displayName || iface.displayName || pluginSidecar.displayName || manifest.name || path.basename(dir)),
+      label: String(manifest.title || manifest.displayName || iface.displayName || pluginSidecar.displayName || manifest.name || path.basename(dir)),
+      githubRepo: String(pluginSidecar.githubRepo || manifest.githubRepo || ""),
+      dir,
+      iconSrc: pluginIconSrc,
+      iconShape: pluginShape,
+      iconSource: String(pluginIcon.iconSource || fallbackMarketplaceIcon.iconSource || (pluginShape === "circle" ? "github" : "")),
+    };
+    const skillIcons = {
+      ...(manifest.skillIcons && typeof manifest.skillIcons === "object" ? manifest.skillIcons : {}),
+      ...(sidecar.skills && typeof sidecar.skills === "object" ? sidecar.skills : {}),
+    };
+    const skills = [];
+    for (const [key, value] of Object.entries(skillIcons)) {
+      if (!value || typeof value !== "object") continue;
+      const data = {
+        iconUrl: value.iconUrl || "",
+        iconPath: value.iconPath || "",
+        iconShape: value.iconShape || "",
+        iconSource: value.iconSource || "",
+        iconCacheKey: value.iconCacheKey || pluginIcon.iconCacheKey || "",
+        iconVariants: value.iconVariants || pluginIcon.iconVariants || [],
+      };
+      const skillIconSrc = iconSrc(dir, data) || plugin.iconSrc;
+      const skillIconShape = iconShapeFor(skillIconSrc, data) || plugin.iconShape;
+      skills.push({
+        name: String(value.name || key),
+        displayName: String(value.displayName || value.name || key),
+        slash: String(value.slash || `$${value.name || key}`),
+        pluginId: plugin.id,
+        pluginName: plugin.name,
+        pluginDisplayName: plugin.displayName,
+        pluginLabel: plugin.label,
+        inheritedFromPlugin: value.inheritedFromPlugin !== false,
+        iconSrc: skillIconSrc,
+        iconShape: skillIconShape,
+        iconSource: String(data.iconSource || (skillIconShape === "circle" ? "github" : plugin.iconSource || "")),
+      });
+    }
+    return plugin.iconSrc || skills.length > 0 ? { plugin, skills } : null;
+  };
+
+  return {
+    disposed,
+    getIcons() {
+      if (disposed) return { status: "disabled", plugins: [], skills: [] };
+      const now = Date.now();
+      if (cache && now - cacheAt < 5000) return cache;
+      const plugins = [];
+      const skills = [];
+      for (const dir of pluginDirs()) {
+        const item = readPlugin(dir);
+        if (!item) continue;
+        plugins.push(item.plugin);
+        skills.push(...item.skills);
+      }
+      cache = { status: "ok", plugins, skills, updatedAt: new Date(now).toISOString() };
+      cacheAt = now;
+      return cache;
+    },
+    dispose() {
+      disposed = true;
+      cache = null;
+    },
+  };
+}
+
 function browserAnnotationDefaultModePatch(source) {
   if (typeof source !== "string" || source.length === 0) {
     return { changed: false, source, reason: "invalid-source" };
@@ -5980,6 +6686,17 @@ function legacyBrandMainInjectionScript() {
       window[KEY] = { observer };
     }
     scrubNode(document.documentElement);
+  })();`;
+}
+
+function legacyBrandMainDisposalScript() {
+  return `(() => {
+    const KEY = "__shadgptLegacyVisibleBrandScrubber";
+    try {
+      const scrubber = window[KEY];
+      scrubber?.observer?.disconnect?.();
+      delete window[KEY];
+    } catch (e) {}
   })();`;
 }
 
@@ -6352,16 +7069,19 @@ function readRecentMessageMetrics() {
   const fs = require("node:fs");
   const path = require("node:path");
   const home = process.env.HOME || require("node:os").homedir();
-  const files = collectBoundedSessionFiles(fs, [
+  const roots = [
     {
       dir: path.join(home, ".codex", "sessions"),
       maxFiles: SESSION_SCAN_LIMITS.messageMetricsActiveFiles,
     },
-    {
+  ];
+  if (process.env.SHADGPT_UI_MESSAGE_METRICS_INCLUDE_ARCHIVED === "1") {
+    roots.push({
       dir: path.join(home, ".codex", "archived_sessions"),
       maxFiles: SESSION_SCAN_LIMITS.messageMetricsArchivedFiles,
-    },
-  ], SESSION_SCAN_LIMITS.messageMetricsTotalFiles);
+    });
+  }
+  const files = collectBoundedSessionFiles(fs, roots, SESSION_SCAN_LIMITS.messageMetricsTotalFiles);
 
   const byKey = new Map();
   let bytesRead = 0;

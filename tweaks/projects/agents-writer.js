@@ -6,6 +6,7 @@ const MODAL_WORKSPACE_ASSIGNMENTS_KEY = "modalWorkspaceAssignments";
 const DECODO_ASSIGNMENTS_KEY = "decodoAssignments";
 const AGENTS_WRITE_DISABLED_PROJECTS_KEY = "agentsInstructionWriteDisabledProjects";
 const AGENTS_PLUGIN_WRITE_DISABLED_KEY = "agentsInstructionPluginWriteDisabled";
+const AGENTS_PLUGIN_RAW_OUTPUT_ENABLED_KEY = "agentsInstructionPluginRawOutputEnabled";
 const AGENTS_BLOCK_START = "<!-- codex-plugin-profiles:start -->";
 const AGENTS_BLOCK_END = "<!-- codex-plugin-profiles:end -->";
 const AGENTS_BLOCK_PATTERN = /<!-- codex-plugin-profiles:start -->[\s\S]*?<!-- codex-plugin-profiles:end -->/;
@@ -49,6 +50,7 @@ function projectConnectionInstructionSummary(input, options = {}) {
     decodoAssignment: projectStorage[DECODO_ASSIGNMENTS_KEY]?.[projectPath] || null,
     supabaseBinding: readSupabaseBinding(projectPath, options),
     pluginWriteDisabled: projectAgentsInstructionPluginWriteDisabled(projectPath, options),
+    pluginRawOutputEnabled: projectAgentsInstructionPluginRawOutputEnabled(projectPath, options),
   };
 }
 
@@ -68,6 +70,7 @@ function previewProjectConnectionInstructions(input, options = {}) {
     hasManagedBlock: AGENTS_BLOCK_PATTERN.test(existing),
     writesDisabled: isProjectAgentsInstructionWriteDisabled(projectPath, options),
     pluginWriteDisabled: projectAgentsInstructionPluginWriteDisabled(projectPath, options),
+    pluginRawOutputEnabled: projectAgentsInstructionPluginRawOutputEnabled(projectPath, options),
   };
 }
 
@@ -120,43 +123,66 @@ function buildProjectConnectionInstructionBlock(summary, options = {}) {
   const lines = [];
   const disabled = new Set(normalizePluginIds(summary.pluginWriteDisabled));
   const enabled = (pluginId) => !disabled.has(pluginId);
+  const rawEnabled = new Set(normalizePluginIds(summary.pluginRawOutputEnabled));
+  const raw = (pluginId) => rawEnabled.has(pluginId);
   const chromeProfiles = normalizePreferredProfiles(summary.chromeAssignment);
   if (enabled("chrome") && chromeProfiles.length) {
-    const profileList = chromeProfiles
-      .map((profile) => `"${profile.profileName}" (${profile.profileDirectory})`)
-      .join(", ");
-    const primary = chromeProfiles[0];
-    lines.push(`- [@Chrome](plugin://chrome@openai-bundled): prefer ${chromeProfiles.length === 1 ? "this saved Chrome profile" : "one of these saved Chrome profiles"} for this project: ${profileList}.`);
-    if (primary.preferencesPath) {
-      lines.push(`- Set CODEX_CHROME_PREFERENCES_PATH="${primary.preferencesPath}" before launching Chrome-backed tools unless the user asks for a different Chrome profile.`);
+    if (raw("chrome")) {
+      const profileList = chromeProfiles
+        .map((profile) => `"${profile.profileName}" (${profile.profileDirectory})`)
+        .join(", ");
+      const primary = chromeProfiles[0];
+      lines.push(`- [@Chrome](plugin://chrome@openai-bundled): prefer ${chromeProfiles.length === 1 ? "this saved Chrome profile" : "one of these saved Chrome profiles"} for this project: ${profileList}.`);
+      if (primary.preferencesPath) {
+        lines.push(`- Set CODEX_CHROME_PREFERENCES_PATH="${primary.preferencesPath}" before launching Chrome-backed tools unless the user asks for a different Chrome profile.`);
+      }
+      lines.push("- This project-level profile preference chooses the default browser identity for new tool launches; it does not block other Chrome profiles from reaching local servers or pages.");
+    } else {
+      lines.push("- [@Chrome](plugin://chrome@openai-bundled): use the saved Chrome profile assignment from Project Settings for this project.");
+      lines.push("- Resolve raw Chrome profile paths through Project Settings only after explicit raw-output approval.");
     }
-    lines.push("- This project-level profile preference chooses the default browser identity for new tool launches; it does not block other Chrome profiles from reaching local servers or pages.");
   }
 
   const google = summary.googleWorkspaceAssignments || {};
   if (enabled("gmail") && google.gmail?.email) {
-    lines.push(`- [@gmail](plugin://gmail@openai-curated): use ${google.gmail.email} for Gmail work in this project.`);
+    lines.push(raw("gmail")
+      ? `- [@gmail](plugin://gmail@openai-curated): use ${google.gmail.email} for Gmail work in this project.`
+      : "- [@gmail](plugin://gmail@openai-curated): use the saved Gmail account assignment from Project Settings for this project.");
   }
   if (enabled("google-drive") && google["google-drive"]?.email) {
-    lines.push(`- [@google-drive](plugin://google-drive@openai-curated): use ${google["google-drive"].email} for Drive, Docs, Sheets, and Slides work in this project.`);
+    lines.push(raw("google-drive")
+      ? `- [@google-drive](plugin://google-drive@openai-curated): use ${google["google-drive"].email} for Drive, Docs, Sheets, and Slides work in this project.`
+      : "- [@google-drive](plugin://google-drive@openai-curated): use the saved Google Drive account assignment from Project Settings for this project.");
   }
 
   const modal = summary.modalWorkspaceAssignment || null;
   if (enabled("modal-platform") && (modal?.workspace || modal?.profile)) {
-    const label = [modal.profile, modal.workspace].filter(Boolean).join(" / ");
-    lines.push(`- [@modal-platform](plugin://modal-platform@local-plugins): use ${label} for Modal work in this project.`);
+    if (raw("modal-platform")) {
+      const label = [modal.profile, modal.workspace].filter(Boolean).join(" / ");
+      lines.push(`- [@modal-platform](plugin://modal-platform@local-plugins): use ${label} for Modal work in this project.`);
+    } else {
+      lines.push("- [@modal-platform](plugin://modal-platform@local-plugins): use the saved Modal workspace assignment from Project Settings for this project.");
+    }
   }
 
   const supabase = summary.supabaseBinding || null;
   if (enabled("supabase") && supabase?.projectRef) {
-    const tokenText = supabase.bearerTokenEnvVar ? ` with ${supabase.bearerTokenEnvVar}` : "";
-    lines.push(`- [@supabase](plugin://supabase@openai-curated): use project ${supabase.projectRef}${tokenText} for Supabase work in this project.`);
+    if (raw("supabase")) {
+      const tokenText = supabase.bearerTokenEnvVar ? ` with ${supabase.bearerTokenEnvVar}` : "";
+      lines.push(`- [@supabase](plugin://supabase@openai-curated): use project ${supabase.projectRef}${tokenText} for Supabase work in this project.`);
+    } else {
+      lines.push("- [@supabase](plugin://supabase@openai-curated): use the saved Supabase project binding from Project Settings for this project.");
+    }
   }
 
   const decodo = summary.decodoAssignment || null;
   if (enabled("decodo") && (decodo?.accountName || decodo?.username)) {
-    const label = [decodo.accountName, decodo.username].filter(Boolean).join(" / ");
-    lines.push(`- [@decodo](plugin://decodo@local-plugins): use ${label} for Decodo scraping and proxy work in this project.`);
+    if (raw("decodo")) {
+      const label = [decodo.accountName, decodo.username].filter(Boolean).join(" / ");
+      lines.push(`- [@decodo](plugin://decodo@local-plugins): use ${label} for Decodo scraping and proxy work in this project.`);
+    } else {
+      lines.push("- [@decodo](plugin://decodo@local-plugins): use the saved Decodo account assignment from Project Settings for this project.");
+    }
   }
 
   if (!lines.length) return { text: "", connectionCount: 0 };
@@ -206,6 +232,24 @@ function setProjectAgentsInstructionPluginWriteDisabled(input, options = {}) {
   return { projectPath, pluginId, disabled, pluginWriteDisabled: current[projectPath] || [] };
 }
 
+function setProjectAgentsInstructionPluginRawOutputEnabled(input, options = {}) {
+  const projectPath = normalizeProjectPath(input?.projectPath || input, options);
+  assertKnownProjectPath(projectPath, options);
+  const pluginId = normalizePluginId(input?.pluginId);
+  const enabled = Boolean(input?.enabled);
+  const storage = readStorageFile(PROJECTS_TWEAK_ID, options);
+  const current = normalizePluginIdMap(storage[AGENTS_PLUGIN_RAW_OUTPUT_ENABLED_KEY]);
+  const nextPlugins = new Set(current[projectPath] || []);
+  if (enabled) nextPlugins.add(pluginId);
+  else nextPlugins.delete(pluginId);
+  if (nextPlugins.size) current[projectPath] = [...nextPlugins].sort();
+  else delete current[projectPath];
+  storage[AGENTS_PLUGIN_RAW_OUTPUT_ENABLED_KEY] = current;
+  storage.updatedAt = new Date().toISOString();
+  writeStorageFile(PROJECTS_TWEAK_ID, storage, options);
+  return { projectPath, pluginId, enabled, pluginRawOutputEnabled: current[projectPath] || [] };
+}
+
 function isProjectAgentsInstructionWriteDisabled(projectPathInput, options = {}) {
   const projectPath = normalizeProjectPath(projectPathInput, options);
   assertKnownProjectPath(projectPath, options);
@@ -220,12 +264,23 @@ function projectAgentsInstructionPluginWriteDisabled(projectPathInput, options =
   return normalizePluginDisabledMap(storage[AGENTS_PLUGIN_WRITE_DISABLED_KEY])[projectPath] || [];
 }
 
+function projectAgentsInstructionPluginRawOutputEnabled(projectPathInput, options = {}) {
+  const projectPath = normalizeProjectPath(projectPathInput, options);
+  assertKnownProjectPath(projectPath, options);
+  const storage = readStorageFile(PROJECTS_TWEAK_ID, options);
+  return normalizePluginIdMap(storage[AGENTS_PLUGIN_RAW_OUTPUT_ENABLED_KEY])[projectPath] || [];
+}
+
 function normalizeDisabledProjects(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))].sort();
 }
 
 function normalizePluginDisabledMap(value) {
+  return normalizePluginIdMap(value);
+}
+
+function normalizePluginIdMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const normalized = {};
   for (const [projectPath, pluginIds] of Object.entries(value)) {
@@ -289,7 +344,8 @@ function readSupabaseBinding(projectPathInput, options = {}) {
   const configPath = path.join(projectPath, ".codex", "config.toml");
   if (!fs.existsSync(configPath)) return null;
   const text = fs.readFileSync(configPath, "utf8");
-  const block = findTomlTableBlock(text, "mcp_servers.supabase") || text;
+  const block = findTomlTableBlock(text, "mcp_servers.supabase");
+  if (!block) return null;
   const projectRef =
     firstTomlString(block, "project_id") ||
     firstTomlString(block, "projectRef") ||
@@ -315,12 +371,12 @@ function projectRefFromSupabaseMcpUrl(url) {
 
 function findTomlTableBlock(content, tableName) {
   const text = String(content || "");
-  const header = new RegExp(`^\\s*\\[${escapeRegExp(tableName)}\\]\\s*$`, "m");
+  const header = new RegExp(`^\\s*\\[${escapeRegExp(tableName)}\\]\\s*(?:#.*)?$`, "m");
   const match = header.exec(text);
   if (!match) return "";
   const bodyStart = match.index + match[0].length;
   const rest = text.slice(bodyStart);
-  const next = /^\s*\[[^\]]+\]\s*$/m.exec(rest);
+  const next = /^\s*\[[^\]\r\n]+\]\s*(?:#.*)?$/m.exec(rest);
   return next ? rest.slice(0, next.index) : rest;
 }
 
@@ -444,13 +500,16 @@ module.exports = {
   AGENTS_BLOCK_START,
   AGENTS_BLOCK_END,
   AGENTS_PLUGIN_IDS,
+  AGENTS_PLUGIN_RAW_OUTPUT_ENABLED_KEY,
   AGENTS_PLUGIN_WRITE_DISABLED_KEY,
   AGENTS_WRITE_DISABLED_PROJECTS_KEY,
   buildProjectConnectionInstructionBlock,
   isProjectAgentsInstructionWriteDisabled,
   previewProjectConnectionInstructions,
+  projectAgentsInstructionPluginRawOutputEnabled,
   projectAgentsInstructionPluginWriteDisabled,
   projectConnectionInstructionSummary,
+  setProjectAgentsInstructionPluginRawOutputEnabled,
   setProjectAgentsInstructionWriteDisabled,
   setProjectAgentsInstructionPluginWriteDisabled,
   syncProjectConnectionInstructions,

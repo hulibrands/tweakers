@@ -12,6 +12,9 @@ const MAX_BLOCKS = 3;
 const MAX_ITEMS = 8;
 const MAX_ACTIONS = 3;
 const MAX_TEXT = 1_200;
+const MESSAGE_SELECTOR = "div.group.flex.min-w-0.flex-col";
+const MARKDOWN_SELECTOR = "._markdownContent_1rhk1_42, [class*='_markdownContent_']";
+const FALLBACK_SCAN_INTERVAL_MS = 30_000;
 
 const SUPPORTED_BLOCK_KINDS = Object.freeze([
   "summary_card",
@@ -23,7 +26,7 @@ const SUPPORTED_BLOCK_KINDS = Object.freeze([
 
 const chatUiPayloadCache = new WeakMap();
 
-/** @type {import("@codex-plusplus/sdk").Tweak} */
+/** @type {import("@shadgpt/sdk").Tweak} */
 module.exports = {
   start(api) {
     if (api.process === "main") {
@@ -68,6 +71,7 @@ module.exports = {
     renderChatUiPanel,
     sanitizeDataObject,
     validateLocalFilePath,
+    collectMessageRootsFromMutations,
     cleanText,
     PANEL_ATTR,
     HIDDEN_ATTR,
@@ -113,6 +117,8 @@ function startRenderer(api) {
     statusEl: null,
     probeEl: null,
     trustedWorkspaceRoots: trustedWorkspaceRootsFromApi(api),
+    pendingMessageRoots: new Set(),
+    fullScanRequested: false,
   };
 
   if (typeof api.settings?.registerPage === "function") {
@@ -129,20 +135,37 @@ function startRenderer(api) {
     });
   }
 
-  const scheduleScan = () => {
-    if (state.disposed || state.scheduled) return;
+  const scheduleScan = (messageRoots = null) => {
+    if (state.disposed) return;
+    if (Array.isArray(messageRoots)) {
+      for (const root of messageRoots) {
+        if (root instanceof HTMLElement) state.pendingMessageRoots.add(root);
+      }
+      if (state.pendingMessageRoots.size === 0 && !state.fullScanRequested) return;
+    } else {
+      state.fullScanRequested = true;
+    }
+    if (state.scheduled) return;
     state.scheduled = true;
     requestAnimationFrame(() => {
       state.scheduled = false;
-      if (!state.disposed) scanMessages(state);
+      const roots = state.fullScanRequested ? null : Array.from(state.pendingMessageRoots);
+      state.pendingMessageRoots.clear();
+      state.fullScanRequested = false;
+      if (!state.disposed) scanMessages(state, roots);
     });
   };
+  const scheduleFullScan = () => scheduleScan();
+  const scheduleMutationScan = (records) => {
+    const roots = collectMessageRootsFromMutations(records);
+    if (roots.length > 0) scheduleScan(roots);
+  };
 
-  state.scheduleScan = scheduleScan;
+  state.scheduleScan = scheduleFullScan;
   injectStyles();
-  scheduleScan();
+  scheduleFullScan();
 
-  state.observer = new MutationObserver(scheduleScan);
+  state.observer = new MutationObserver(scheduleMutationScan);
   // Avoid characterData: Codex streams assistant text through text-node updates,
   // and parsing candidate JSON on every token makes message rendering lag.
   // Structural changes plus the periodic scan are enough to discover finished
@@ -151,37 +174,41 @@ function startRenderer(api) {
     childList: true,
     subtree: true,
   });
-  state.interval = window.setInterval(scheduleScan, 3_000);
-  window.addEventListener("focus", scheduleScan);
-  document.addEventListener("visibilitychange", scheduleScan);
+  state.interval = window.setInterval(scheduleFullScan, FALLBACK_SCAN_INTERVAL_MS);
+  window.addEventListener("focus", scheduleFullScan);
+  document.addEventListener("visibilitychange", scheduleFullScan);
 
   this._state = state;
   api.log.info(`${TWEAK_ID} renderer active`);
 }
 
-function scanMessages(state) {
+function scanMessages(state, messageRoots = null) {
   if (!state.enabled) {
     clearPanels();
     return;
   }
 
-  const messageNodes = document.querySelectorAll("div.group.flex.min-w-0.flex-col");
-  const lastNode = messageNodes.length ? messageNodes[messageNodes.length - 1] : null;
+  const scopedNodes = Array.isArray(messageRoots) ? uniqueMessageRoots(messageRoots) : null;
+  if (Array.isArray(messageRoots) && scopedNodes.length === 0) return;
+
+  const allMessageNodes = Array.from(document.querySelectorAll(MESSAGE_SELECTOR));
+  const messageNodes = scopedNodes || allMessageNodes;
+  const lastNode = allMessageNodes.length ? allMessageNodes[allMessageNodes.length - 1] : null;
 
   for (const node of messageNodes) {
     if (!(node instanceof HTMLElement)) continue;
-    const markdown = node.querySelector(
-      "._markdownContent_1rhk1_42, [class*='_markdownContent_']",
-    );
+    const markdown = node.querySelector(MARKDOWN_SELECTOR);
     if (!(markdown instanceof HTMLElement)) continue;
     syncMentionedFilesPanel(node, markdown, state);
 
     let record;
-    if (node !== lastNode && chatUiPayloadCache.has(node)) {
-      record = chatUiPayloadCache.get(node);
+    const payloadSignature = messagePayloadSignature(markdown);
+    const cached = node !== lastNode ? chatUiPayloadCache.get(node) : null;
+    if (cached && cached.signature === payloadSignature) {
+      record = cached.record;
     } else {
       record = findChatUiPayload(markdown);
-      if (node !== lastNode) chatUiPayloadCache.set(node, record);
+      if (node !== lastNode) chatUiPayloadCache.set(node, { signature: payloadSignature, record });
     }
 
     const existing = node.querySelector(`[${PANEL_ATTR}]`);
@@ -216,6 +243,58 @@ function scanMessages(state) {
     else node.appendChild(panel);
     hideSourceBlocks(record.sourceBlocks);
   }
+}
+
+function collectMessageRootsFromMutations(records) {
+  const roots = [];
+  for (const record of records || []) {
+    collectMessageRootFromTarget(record?.target, roots);
+    for (const node of Array.from(record?.addedNodes || [])) {
+      collectMessageRootsFromAddedNode(node, roots);
+    }
+  }
+  return uniqueMessageRoots(roots);
+}
+
+function collectMessageRootFromTarget(node, roots) {
+  if (!(node instanceof HTMLElement)) {
+    if (node?.parentElement instanceof HTMLElement) collectMessageRootFromTarget(node.parentElement, roots);
+    return;
+  }
+
+  const root = node.matches?.(MESSAGE_SELECTOR) ? node : node.closest?.(MESSAGE_SELECTOR);
+  if (root instanceof HTMLElement) roots.push(root);
+}
+
+function collectMessageRootsFromAddedNode(node, roots) {
+  if (!(node instanceof HTMLElement)) {
+    if (node?.parentElement instanceof HTMLElement) collectMessageRootFromTarget(node.parentElement, roots);
+    return;
+  }
+
+  const root = node.matches?.(MESSAGE_SELECTOR) ? node : node.closest?.(MESSAGE_SELECTOR);
+  if (root instanceof HTMLElement) roots.push(root);
+  for (const child of Array.from(node.querySelectorAll?.(MESSAGE_SELECTOR) || [])) {
+    if (child instanceof HTMLElement) roots.push(child);
+  }
+}
+
+function uniqueMessageRoots(roots) {
+  const seen = new Set();
+  const unique = [];
+  for (const root of roots || []) {
+    const messageRoot = root instanceof HTMLElement
+      ? (root.matches?.(MESSAGE_SELECTOR) ? root : root.closest?.(MESSAGE_SELECTOR))
+      : null;
+    if (!(messageRoot instanceof HTMLElement) || seen.has(messageRoot)) continue;
+    seen.add(messageRoot);
+    unique.push(messageRoot);
+  }
+  return unique;
+}
+
+function messagePayloadSignature(markdown) {
+  return String(markdown?.textContent || "");
 }
 
 function syncMentionedFilesPanel(messageNode, markdown, state) {
@@ -274,15 +353,20 @@ function validateLocalFilePath(value, state = {}) {
   if (!raw) return copyOnlyPathInfo("");
   if (raw.startsWith("file://")) {
     const path = pathFromFileUrl(raw);
-    const normalized = normalizeAbsoluteLocalPath(path);
-    if (path && isSafeAbsoluteLocalPath(path) && isSafeAbsoluteLocalPath(normalized)) {
-      return openablePathInfo(normalized, "file-url", raw);
+    const trustedPath = resolveTrustedAbsolutePath(path, state);
+    if (trustedPath) return openablePathInfo(trustedPath, "file-url", raw);
+    if (path && isSafeAbsoluteLocalPath(path) && isSafeAbsoluteLocalPath(normalizeAbsoluteLocalPath(path))) {
+      return copyOnlyPathInfo(raw, "Copy only - outside trusted workspace roots");
     }
     return copyOnlyPathInfo(raw, "Invalid file URL");
   }
   if (isSafeAbsoluteLocalPath(raw)) {
+    const trustedPath = resolveTrustedAbsolutePath(raw, state);
+    if (trustedPath) return openablePathInfo(trustedPath, "absolute", raw);
     const normalized = normalizeAbsoluteLocalPath(raw);
-    if (isSafeAbsoluteLocalPath(normalized)) return openablePathInfo(normalized, "absolute", raw);
+    if (isSafeAbsoluteLocalPath(normalized)) {
+      return copyOnlyPathInfo(raw, "Copy only - outside trusted workspace roots");
+    }
     return copyOnlyPathInfo(raw, "Copy only - invalid local path");
   }
   const resolved = resolveTrustedRelativePath(raw, state);
@@ -326,6 +410,22 @@ function pathFromFileUrl(value) {
 
 function isSafeAbsoluteLocalPath(value) {
   return /^\/(?:Users|Volumes|private|tmp|var)\//.test(String(value || ""));
+}
+
+function resolveTrustedAbsolutePath(value, state) {
+  const normalized = normalizeAbsoluteLocalPath(value);
+  if (!isSafeAbsoluteLocalPath(value) || !isSafeAbsoluteLocalPath(normalized)) return "";
+  return isPathWithinTrustedRoots(normalized, state) ? normalized : "";
+}
+
+function isPathWithinTrustedRoots(path, state) {
+  const normalizedPath = normalizeAbsoluteLocalPath(path);
+  for (const root of trustedWorkspaceRoots(state)) {
+    const normalizedRoot = normalizeAbsoluteLocalPath(root).replace(/\/+$/, "");
+    if (!normalizedRoot) continue;
+    if (normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`)) return true;
+  }
+  return false;
 }
 
 function normalizeAbsoluteLocalPath(value) {
@@ -1030,10 +1130,13 @@ function renderCopyPathButton(path) {
 }
 
 function openFilePreviewPath(filePath, state, row) {
-  const path = cleanText(filePath, 360);
-  if (!path) return;
+  const pathInfo = validateLocalFilePath(filePath, state);
+  if (!pathInfo.canOpen) {
+    showFileOpenState(row, pathInfo.reason || "Copy only", "copy");
+    return;
+  }
   const request = {
-    path,
+    path: pathInfo.openPath,
     openMode: "workspace",
   };
   fetch("vscode://codex/open-file", {
@@ -1373,7 +1476,7 @@ function samplePayloadText() {
               {
                 name: "thomashulihan-codex-chat-ui",
                 kind: "directory",
-                path: "tweaks/base/thomashulihan-codex-chat-ui",
+                path: "vendor/tweakers/tweaks/codex-chat-ui",
                 children: [
                   { path: "index.js", description: "Renderer and settings" },
                   { path: "manifest.json", description: "Tweak metadata" },
@@ -2176,7 +2279,7 @@ function settingsSection(title, rows) {
 
 function toggleRow({ label, description, checked, onChange }) {
   const row = document.createElement("label");
-  row.className = "flex cursor-pointer items-center justify-between gap-4 p-3";
+  row.className = "group flex cursor-pointer items-center justify-between gap-4 p-3";
   const left = document.createElement("div");
   left.className = "flex min-w-0 flex-col gap-1";
   const title = document.createElement("div");
@@ -2190,10 +2293,30 @@ function toggleRow({ label, description, checked, onChange }) {
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = checked;
-  input.className = "h-4 w-4";
-  input.addEventListener("change", () => onChange(input.checked));
+  input.className = "peer sr-only";
+  input.setAttribute("role", "switch");
+  input.setAttribute("aria-label", label);
+  input.setAttribute("aria-checked", checked ? "true" : "false");
 
-  row.append(left, input);
+  const switchTrack = document.createElement("span");
+  switchTrack.className = [
+    "relative inline-flex h-6 w-10 shrink-0 rounded-full border border-token-border-light",
+    "bg-token-bg-secondary transition-colors",
+    "after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full",
+    "after:bg-token-text-secondary after:transition-transform",
+    "peer-checked:bg-token-main-surface-primary peer-checked:after:translate-x-4",
+    "peer-checked:after:bg-token-text-primary",
+    "peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2",
+    "peer-focus-visible:outline-token-text-primary",
+  ].join(" ");
+  switchTrack.setAttribute("aria-hidden", "true");
+
+  input.addEventListener("change", () => {
+    input.setAttribute("aria-checked", input.checked ? "true" : "false");
+    onChange(input.checked);
+  });
+
+  row.append(left, input, switchTrack);
   return row;
 }
 

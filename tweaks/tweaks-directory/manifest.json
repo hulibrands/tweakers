@@ -1,6 +1,6 @@
 {
   "id": "co.thomashulihan.tweaks-directory",
-  "name": "Tweaks Directory",
+  "name": "ShadGPT Tweaks Directory",
   "version": "0.1.0",
   "githubRepo": "hulibrands/tweakers",
   "description": "Adds installed tweaks and the Tweak Store as a Tweaks tab in the Plugins directory.",

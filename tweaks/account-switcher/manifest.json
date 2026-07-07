@@ -1,8 +1,8 @@
 {
   "id": "co.thomashulihan.account-switcher",
-  "name": "Easy Account Switcher",
-  "version": "0.1.0",
-  "description": "Save, switch, and manage local Codex auth sessions from the account menu.",
+  "name": "ShadGPT Account Switcher",
+  "version": "0.1.1",
+  "description": "Local ShadGPT account switcher with popup accordion, guarded switching, usage summaries, and Accounts settings.",
   "githubRepo": "hulibrands/tweakers",
   "forkOf": {
     "upstreamId": "me.erkin.codex-plusplus-account-switcher",
@@ -21,6 +21,11 @@
     "settings"
   ],
   "scope": "both",
+  "permissions": [
+    "ipc",
+    "settings",
+    "filesystem"
+  ],
   "main": "index.bundled.js",
   "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/account-switcher"
 }
