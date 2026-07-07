@@ -94,6 +94,14 @@ test("slash-menu-polish marks only the menu root, preserves item events, and cle
 
   assert.equal(fixture.menu.getAttribute("data-codexpp-slash-menu"), "true");
   assert.equal(fixture.menuItem.hasAttribute("data-codexpp-slash-menu"), false);
+  assert.equal(fixture.menuItem.querySelector("img"), null);
+
+  const inheritedIcon = fixture.skillItem.querySelector("[data-codexpp-slash-menu-inherited-skill-icon='true']");
+  assert.ok(inheritedIcon);
+  assert.equal(inheritedIcon.getAttribute("src"), "file:///tmp/matt-avatar.png");
+  assert.equal(inheritedIcon.getAttribute("data-codexpp-slash-menu-icon-shape"), "circle");
+  assert.equal(fixture.skillIcon.getAttribute("data-codexpp-slash-menu-hidden-skill-icon"), "true");
+  assert.equal(fixture.skillIcon.style.display, "none");
 
   const clickEvent = new FakeMouseEvent("click", { bubbles: true });
   fixture.menuItem.dispatchEvent(clickEvent);
@@ -107,16 +115,48 @@ test("slash-menu-polish marks only the menu root, preserves item events, and cle
   assert.equal(keyEvent.defaultPrevented, false);
   assert.equal(keyEvent.propagationStopped, false);
 
+  fixture.api.storage.set("feature:slash-menu-inherited-skill-icons", false);
+  fixture.context.window.dispatchEvent(
+    new FakeCustomEvent("codexpp-ui-improvements-setting-changed", {
+      detail: { id: "slash-menu-inherited-skill-icons", value: false, source: "test" },
+    }),
+  );
+  fixture.flush();
+  assert.equal(fixture.document.querySelectorAll("[data-codexpp-slash-menu-inherited-skill-icon]").length, 0);
+  assert.equal(fixture.skillIcon.hasAttribute("data-codexpp-slash-menu-hidden-skill-icon"), false);
+  assert.equal(fixture.skillIcon.style.display, "");
+
   fixture.context.module.exports.stop();
   fixture.flush();
 
   assert.equal(fixture.document.querySelectorAll("[data-codexpp-slash-menu]").length, 0);
+  assert.equal(fixture.document.querySelectorAll("[data-codexpp-slash-menu-inherited-skill-icon]").length, 0);
+  assert.equal(fixture.skillIcon.hasAttribute("data-codexpp-slash-menu-hidden-skill-icon"), false);
+  assert.equal(fixture.skillIcon.style.display, "");
   assert.equal(
     fixture.document.head
       .querySelectorAll("style")
       .some((node) => /codexpp-slash-menu|data-codexpp-slash-menu/.test(node.textContent)),
     false,
   );
+});
+
+test("slash-menu-polish inherits skill icons from metadata when plugin detail is not visible", async () => {
+  const fixture = createSlashMenuFixture({ includePluginDetail: false });
+
+  runTweak(fixture);
+  fixture.flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.flush();
+
+  const inheritedIcon = fixture.skillItem.querySelector("[data-codexpp-slash-menu-inherited-skill-icon='true']");
+  assert.ok(inheritedIcon);
+  assert.equal(inheritedIcon.getAttribute("src"), "file:///tmp/metadata-matt-avatar.png");
+  assert.equal(inheritedIcon.getAttribute("data-codexpp-slash-menu-icon-shape"), "circle");
+  assert.equal(fixture.skillIcon.getAttribute("data-codexpp-slash-menu-hidden-skill-icon"), "true");
+
+  fixture.context.module.exports.stop();
+  fixture.flush();
 });
 
 test("tweak-mention-menu opens from percent trigger and inserts a short tweak mention", async () => {
@@ -129,7 +169,9 @@ test("tweak-mention-menu opens from percent trigger and inserts a short tweak me
   fixture.input.selectionStart = fixture.input.value.length;
   fixture.input.selectionEnd = fixture.input.value.length;
   fixture.document.activeElement = fixture.input;
-  fixture.input.dispatchEvent(new FakeEvent("input", { bubbles: true }));
+  fixture.input.dispatchEvent(new FakeEvent("input", { bubbles: true, data: "%", inputType: "insertText" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.flush();
   await new Promise((resolve) => setImmediate(resolve));
   fixture.flush();
 
@@ -157,7 +199,9 @@ test("tweak-mention-menu resolves contenteditable composer targets", async () =>
 
   fixture.input.textContent = "%Bet";
   fixture.document.activeElement = fixture.input;
-  fixture.input.dispatchEvent(new FakeEvent("input", { bubbles: true }));
+  fixture.input.dispatchEvent(new FakeEvent("input", { bubbles: true, data: "%", inputType: "insertText" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.flush();
   await new Promise((resolve) => setImmediate(resolve));
   fixture.flush();
 
@@ -244,9 +288,24 @@ function appendCodexSettingsLayout(document) {
   return { dialog, shell, sidebar, nav, navRoot, main };
 }
 
-function createSlashMenuFixture() {
+function createSlashMenuFixture(options = {}) {
   const fixture = createFixture({ enabledFeature: "slash-menu-polish" });
   const { document } = fixture;
+
+  const pluginDetail = document.createElement("section");
+  pluginDetail.setRect({ left: 80, top: 40, width: 720, height: 220, right: 800, bottom: 260 });
+
+  const pluginIcon = document.createElement("img");
+  pluginIcon.setAttribute("src", "file:///tmp/matt-avatar.png");
+  pluginIcon.setAttribute("data-codexpp-native-plugin-github-icon", "true");
+  pluginIcon.src = "file:///tmp/matt-avatar.png";
+  pluginIcon.setRect({ left: 96, top: 56, width: 64, height: 64, right: 160, bottom: 120 });
+
+  const pluginTitle = document.createElement("h1");
+  pluginTitle.textContent = "mattpocock/skills";
+  pluginTitle.setRect({ left: 176, top: 56, width: 240, height: 40, right: 416, bottom: 96 });
+
+  pluginDetail.append(pluginIcon, pluginTitle);
 
   const composer = document.createElement("div");
   composer.setAttribute("data-testid", "composer");
@@ -269,18 +328,32 @@ function createSlashMenuFixture() {
   menuItem.textContent = "Summarize";
   menuItem.setRect({ left: 112, top: 400, width: 296, height: 32, right: 408, bottom: 432 });
 
+  const skillItem = document.createElement("button");
+  skillItem.setAttribute("role", "menuitem");
+  skillItem.setRect({ left: 112, top: 436, width: 296, height: 32, right: 408, bottom: 468 });
+
+  const skillIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  skillIcon.setAttribute("aria-hidden", "true");
+
+  const skillText = document.createElement("span");
+  skillText.textContent = "Skills: Ask Matt";
+  skillItem.append(skillIcon, skillText);
+
   const secondItem = document.createElement("button");
   secondItem.setAttribute("role", "menuitem");
   secondItem.textContent = "Explain";
-  secondItem.setRect({ left: 112, top: 436, width: 296, height: 32, right: 408, bottom: 468 });
+  secondItem.setRect({ left: 112, top: 472, width: 296, height: 32, right: 408, bottom: 504 });
 
-  menu.append(menuItem, secondItem);
+  menu.append(menuItem, skillItem, secondItem);
+  if (options.includePluginDetail !== false) document.body.appendChild(pluginDetail);
   document.body.append(composer, menu);
 
   return {
     ...fixture,
     menu,
     menuItem,
+    skillIcon,
+    skillItem,
   };
 }
 
@@ -379,8 +452,9 @@ function createFixture({ enabledFeature }) {
     },
     storage: {
       get(key, fallback) {
-        if (key.startsWith("feature:")) return key === `feature:${enabledFeature}`;
         if (storage.has(key)) return storage.get(key);
+        if (key === "feature:slash-menu-inherited-skill-icons") return fallback;
+        if (key.startsWith("feature:")) return key === `feature:${enabledFeature}`;
         return fallback;
       },
       set(key, value) {
@@ -408,6 +482,38 @@ function createFixture({ enabledFeature }) {
               enabled: true,
             },
           ]);
+        }
+        if (channel === "slash-menu-plugin-icons") {
+          return Promise.resolve({
+            status: "ok",
+            plugins: [
+              {
+                id: "skills",
+                name: "skills",
+                displayName: "mattpocock/skills",
+                label: "mattpocock/skills",
+                githubRepo: "mattpocock/skills",
+                iconSrc: "file:///tmp/metadata-matt-avatar.png",
+                iconShape: "circle",
+                iconSource: "github",
+              },
+            ],
+            skills: [
+              {
+                name: "ask-matt",
+                displayName: "Ask Matt",
+                slash: "$ask-matt",
+                pluginId: "skills",
+                pluginName: "skills",
+                pluginDisplayName: "mattpocock/skills",
+                pluginLabel: "mattpocock/skills",
+                inheritedFromPlugin: true,
+                iconSrc: "file:///tmp/metadata-matt-avatar.png",
+                iconShape: "circle",
+                iconSource: "github",
+              },
+            ],
+          });
         }
         return Promise.resolve(null);
       },
@@ -491,6 +597,8 @@ class FakeEvent {
     this.cancelable = init.cancelable ?? true;
     this.target = null;
     this.currentTarget = null;
+    this.data = init.data;
+    this.inputType = init.inputType;
     this.defaultPrevented = false;
     this.propagationStopped = false;
     this.immediatePropagationStopped = false;

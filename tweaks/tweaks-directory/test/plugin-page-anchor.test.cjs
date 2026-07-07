@@ -16,9 +16,11 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
+const fs = require("node:fs");
+const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = fs;
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
+const path = require("node:path");
 
 const {
   PLUGIN_PAGE_ANCHOR_CHAIN,
@@ -45,11 +47,21 @@ const {
   isInsideAppSidebar,
   groupNativeSkillRowsByPlugin,
   createNativeDirectoryMetaCache,
+  pluginSkillsForDir,
+  nativePluginMetadataRows,
+  sanitizeNativeMetadataHref,
+  sanitizeNativeIconUrl,
+  isSafeRelativeAssetPath,
+  normalizeNativePluginClis,
+  renderNativePluginClisSection,
+  readPluginMetadata,
   pluginStatusesSignature,
+  nativeObserverMutationRoot,
   pluginDirectoryCounts,
   buildPluginDirectoryHealth,
   syncConfiguredPluginActionButtons,
   syncNativeDirectoryInstalledAction,
+  syncNativeDirectoryIconFrames,
 } = require("../index.cjs").__test;
 
 // ---------------------------------------------------------------------------
@@ -560,6 +572,31 @@ test("hasNativeDirectorySearch — rejects a node with no search input", () => {
   }
 });
 
+test("native observer work is scoped to directory mutations", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const { page } = buildOldMarkupPluginPage(doc);
+    doc.body.appendChild(page);
+    const state = { panel: null, root: page };
+
+    const unrelated = doc.createElement("div");
+    unrelated.textContent = "New chat Projects Settings";
+    doc.body.appendChild(unrelated);
+    assert.equal(nativeObserverMutationRoot(state, [{ target: unrelated, addedNodes: [unrelated], removedNodes: [] }]), null);
+
+    const row = doc.createElement("div");
+    row.textContent = "DebugPro";
+    page.appendChild(row);
+    assert.equal(nativeObserverMutationRoot(state, [{ target: page, addedNodes: [row], removedNodes: [] }]), page);
+
+    const { page: addedPage } = buildNewMarkupPluginPage(doc);
+    assert.equal(nativeObserverMutationRoot({ panel: null, root: null }, [{ target: doc.body, addedNodes: [addedPage], removedNodes: [] }]), addedPage);
+  } finally {
+    restore();
+  }
+});
+
 test("hasNativeDirectoryListingSignal — recognises 'Featured', 'Recommended', 'Try in chat'", () => {
   assert.equal(hasNativeDirectoryListingSignal("Featured plugins here"), true);
   assert.equal(hasNativeDirectoryListingSignal("Recommended for you"), true);
@@ -777,6 +814,11 @@ test("Tweaks Directory sort dates prefer installed filesystem metadata", () => {
   assert.equal(rowDateMs(row, "used"), 300);
 });
 
+test("Tweaks Directory filesystem-backed sort label says file accessed", () => {
+  const option = sortOptionsForMode("tweaks").find((item) => item.key === "used");
+  assert.equal(option.label, "File Accessed");
+});
+
 test("Tweaks Directory sort dates fall back to store approval time", () => {
   const row = {
     installed: null,
@@ -932,7 +974,8 @@ test("native directory metadata marks installed from Codex plugin config, not ca
 });
 
 function writeNativePluginFixture(home, id, displayName, version) {
-  const pluginDir = join(home, ".codex", "plugins", "cache", "local-plugins", id, version, ".codex-plugin");
+  const root = join(home, ".codex", "plugins", "cache", "local-plugins", id, version);
+  const pluginDir = join(root, ".codex-plugin");
   mkdirSync(pluginDir, { recursive: true });
   writeFileSync(join(pluginDir, "plugin.json"), JSON.stringify({
     name: id,
@@ -941,7 +984,36 @@ function writeNativePluginFixture(home, id, displayName, version) {
       includes: [{ kind: "skill", name: `${id}-skill`, displayName: `${displayName} Skill` }],
     },
   }, null, 2));
+  return root;
 }
+
+test("native directory metadata reads plugin CLI sidecars", () => {
+  const home = mkdtempSync(join(tmpdir(), "codexpp-native-cli-meta-"));
+  try {
+    const pluginRoot = writeNativePluginFixture(home, "mcp-app-builder", "MCP App Builder", "0.1.0");
+    writeFileSync(join(pluginRoot, ".cli.json"), JSON.stringify({
+      commands: [
+        {
+          name: "validate_app_scaffold",
+          description: "Validate a scaffold.",
+          command: "node scripts/validate_app_scaffold.mjs /tmp/app",
+          cwd: ".",
+          mode: "read-only",
+          examples: ["node scripts/validate_app_scaffold.mjs /tmp/app"],
+        },
+        { name: "skip", command: "node skip.js", mode: "danger" },
+      ],
+    }, null, 2));
+
+    const meta = getNativeDirectoryMeta({ home });
+    const plugin = meta.plugins.find((item) => item.id === "mcp-app-builder");
+    assert.equal(plugin.cliCommands.length, 1);
+    assert.equal(plugin.cliCommands[0].name, "validate_app_scaffold");
+    assert.equal(plugin.cliCommands[0].mode, "read-only");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("plugin health reports enabled config entries missing cache metadata", () => {
   const health = buildPluginDirectoryHealth({
@@ -1236,6 +1308,190 @@ test("native skill row metadata creates plugin-carrying fallback for known plugi
   assert.equal(meta.pluginLabel, "Agent Teams");
   assert.equal(meta.name, "Missing Skill");
   assert.equal(meta.slash, "");
+});
+
+test("skill frontmatter icon files are treated as custom skill icons", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "td-skill-icon-"));
+  try {
+    const pluginDir = join(tmp, "plugin");
+    const skillDir = join(pluginDir, "skills", "custom-skill");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "icon.png"), "not-empty");
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: custom-skill\ndescription: Uses its own icon.\nicon: ./icon.png\n---\n",
+    );
+
+    const skills = pluginSkillsForDir(fs, path, pluginDir, {
+      id: "demo",
+      name: "demo",
+      displayName: "Demo",
+      label: "Demo",
+      dir: pluginDir,
+      iconPath: "./assets/default.png",
+      iconUrl: "",
+      iconShape: "circle",
+      iconSource: "github",
+      installed: true,
+      enabled: true,
+    }, {});
+
+    assert.equal(skills.length, 1);
+    assert.equal(skills[0].iconInheritedFromPlugin, false);
+    assert.equal(skills[0].iconPath, "./skills/custom-skill/icon.png");
+    assert.equal(skills[0].iconShape, "");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("skill metadata rows show inherited icon status", () => {
+  const rows = nativePluginMetadataRows({
+    kind: "skill",
+    name: "ask-matt",
+    displayName: "Ask Matt",
+    pluginLabel: "mattpocock/skills",
+    iconPath: "./assets/owner-avatar.png",
+    iconInheritedFromPlugin: true,
+  });
+
+  assert.equal(rows.find((row) => row.label === "Plugin").value, "mattpocock/skills");
+  assert.equal(rows.find((row) => row.label === "Skill Icon").value, "Inherited from mattpocock/skills");
+  assert.equal(rows.find((row) => row.label === "Icon Source").value, "./assets/owner-avatar.png");
+});
+
+test("native directory GitHub icon frames are marked circular", () => {
+  const row = new FakeElement("div");
+  const outerFrame = new FakeElement("div");
+  const frame = new FakeElement("div");
+  const image = new FakeElement("img");
+  frame.appendChild(image);
+  outerFrame.appendChild(frame);
+  row.appendChild(outerFrame);
+
+  syncNativeDirectoryIconFrames([{ row, meta: { iconShape: "circle" } }]);
+
+  assert.equal(image.dataset.codexppNativePluginGithubIcon, "true");
+  assert.equal(frame.dataset.codexppNativePluginGithubIconFrame, "true");
+  assert.equal(outerFrame.dataset.codexppNativePluginGithubIconFrame, "true");
+
+  syncNativeDirectoryIconFrames([{ row, meta: { iconShape: "rounded-square" } }]);
+
+  assert.equal(image.dataset.codexppNativePluginGithubIcon, undefined);
+  assert.equal(frame.dataset.codexppNativePluginGithubIconFrame, undefined);
+  assert.equal(outerFrame.dataset.codexppNativePluginGithubIconFrame, undefined);
+});
+
+test("plugin metadata falls back to marketplace icon for non-GitHub marketplace wrappers", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "td-marketplace-icon-"));
+  try {
+    const marketplaceRoot = join(tmp, "example-marketplace");
+    const pluginDir = join(marketplaceRoot, "plugins", "demo");
+    mkdirSync(join(pluginDir, ".claude-plugin"), { recursive: true });
+    mkdirSync(join(marketplaceRoot, ".codex-marketplace"), { recursive: true });
+    mkdirSync(join(marketplaceRoot, "assets"), { recursive: true });
+    writeFileSync(join(marketplaceRoot, "assets", "favicon.ico"), "not-empty");
+    writeFileSync(join(pluginDir, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "demo" }));
+    writeFileSync(
+      join(marketplaceRoot, ".codex-marketplace", "metadata.json"),
+      JSON.stringify({ name: "example", iconPath: "./assets/favicon.ico", iconSource: "favicon", iconCacheKey: "test-cache" }),
+    );
+
+    const meta = readPluginMetadata(pluginDir, { fs, path });
+    assert.equal(meta.iconPath, "");
+    assert.match(meta.iconUrl, /^file:\/\//);
+    assert.match(meta.iconUrl, /favicon\.ico/);
+    assert.match(meta.iconUrl, /codex_icon_cache=test-cache/);
+    assert.equal(meta.iconShape, "rounded");
+    assert.equal(meta.iconSource, "favicon");
+    assert.equal(meta.marketplaceIconShape, "rounded");
+    assert.equal(meta.marketplaceIconSource, "favicon");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("plugin metadata rows show marketplace icon source", () => {
+  const rows = nativePluginMetadataRows({
+    kind: "plugin",
+    displayName: "mattpocock/skills",
+    iconPath: "./assets/owner-avatar.png",
+    iconSource: "github",
+    iconShape: "circle",
+    iconCacheKey: "avatar-cache",
+    marketplaceIconUrl: "https://avatars.githubusercontent.com/u/28293365?s=256",
+    marketplaceIconSource: "github",
+    marketplaceIconShape: "circle",
+    marketplaceIconCacheKey: "avatar-cache",
+  });
+
+  assert.equal(rows.find((row) => row.label === "Plugin Icon Source").value, "GitHub avatar, circle frame, cache-busted");
+  assert.equal(rows.find((row) => row.label === "Marketplace Icon").href, "https://avatars.githubusercontent.com/u/28293365?s=256");
+  assert.equal(rows.find((row) => row.label === "Marketplace Icon Source").value, "GitHub avatar, circle frame, cache-busted");
+});
+
+test("native metadata links reject local files and unsafe schemes", () => {
+  assert.equal(sanitizeNativeMetadataHref("https://example.com/docs"), "https://example.com/docs");
+  assert.equal(sanitizeNativeMetadataHref("http://example.com/docs"), "http://example.com/docs");
+  assert.equal(sanitizeNativeMetadataHref("file:///Users/example/plugin/icon.png"), "");
+  assert.equal(sanitizeNativeMetadataHref("/Users/example/plugin/icon.png"), "");
+  assert.equal(sanitizeNativeMetadataHref("javascript:alert(1)"), "");
+
+  const rows = nativePluginMetadataRows({
+    kind: "plugin",
+    website: "file:///tmp/local.html",
+    documentation: "javascript:alert(1)",
+    githubRepoUrl: "https://github.com/example/plugin",
+    marketplaceIconUrl: "/Users/example/icon.png",
+  });
+  assert.equal(rows.find((row) => row.label === "Website").href, "");
+  assert.equal(rows.find((row) => row.label === "Documentation").href, "");
+  assert.equal(rows.find((row) => row.label === "GitHub Repo URL").href, "https://github.com/example/plugin");
+  assert.equal(rows.find((row) => row.label === "Marketplace Icon").href, "");
+});
+
+test("native icon URLs reject local files and unsupported data types", () => {
+  assert.equal(sanitizeNativeIconUrl("https://example.com/icon.png"), "https://example.com/icon.png");
+  assert.equal(sanitizeNativeIconUrl("data:image/png;base64,AAAA"), "data:image/png;base64,AAAA");
+  assert.equal(sanitizeNativeIconUrl("file:///Users/example/icon.png"), "");
+  assert.equal(sanitizeNativeIconUrl("/Users/example/icon.png"), "");
+  assert.equal(sanitizeNativeIconUrl("data:text/html;base64,PGgxPkJvb208L2gxPg=="), "");
+  assert.equal(sanitizeNativeIconUrl("javascript:alert(1)"), "");
+});
+
+test("native local asset paths stay relative to plugin roots", () => {
+  assert.equal(isSafeRelativeAssetPath("./assets/icon.png"), "assets/icon.png");
+  assert.equal(isSafeRelativeAssetPath("assets/nested/icon.svg"), "assets/nested/icon.svg");
+  assert.equal(isSafeRelativeAssetPath("../outside/icon.png"), "");
+  assert.equal(isSafeRelativeAssetPath("/tmp/icon.png"), "");
+  assert.equal(isSafeRelativeAssetPath("file:///tmp/icon.png"), "");
+});
+
+test("native plugin CLI section renders display-only commands", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const clis = normalizeNativePluginClis({
+      commands: [{
+        name: "validate_app_scaffold",
+        description: "Validate a scaffold.",
+        command: "node scripts/validate_app_scaffold.mjs /tmp/app",
+        cwd: ".",
+        mode: "read-only",
+        examples: ["node scripts/validate_app_scaffold.mjs /tmp/app"],
+      }],
+    });
+    const section = renderNativePluginClisSection(clis);
+    doc.body.appendChild(section);
+
+    assert.equal(section.dataset.codexppNativePluginClis, "true");
+    assert.match(section.textContent, /CLIs/);
+    assert.match(section.textContent, /validate_app_scaffold/);
+    assert.match(section.textContent, /node scripts\/validate_app_scaffold\.mjs \/tmp\/app/);
+    assert.equal(section.querySelectorAll("button").length, 0);
+  } finally {
+    restore();
+  }
 });
 
 test("native directory title parsing and slug matching avoid short fuzzy tokens", () => {

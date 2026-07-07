@@ -2,6 +2,7 @@ const { errorMessage } = require("./utils");
 const { invoke } = require("./ipc");
 const { t } = require("./i18n");
 const { protectInteractiveControl } = require("./dom-utils");
+const { confirmAccountAction } = require("./ui-confirmation");
 const { renderAccountsPageState } = require("./ui-settings");
 const {
   accountPanelShell,
@@ -37,6 +38,8 @@ function renderAccountPanel(state, panel, accountState) {
   }
 
   const list = document.createElement("div");
+  list.setAttribute("role", "group");
+  list.setAttribute("aria-label", t("accounts.title"));
   list.style.cssText = `display:flex;flex-direction:column;min-width:0;margin-left:${PANEL_ROW_LEFT_INSET + 8}px;padding:2px 0 6px;`;
 
   if (accounts.length === 0) {
@@ -54,6 +57,7 @@ function renderAccountPanel(state, panel, accountState) {
   }
 
   list.appendChild(configureAccountsRow(state, panel));
+  wireAccountListKeyboard(list, panel, accountState);
   const body = document.createElement("div");
   body.setAttribute("data-codexpp-account-switcher-body", "accounts");
   body.style.cssText = "overflow:hidden;opacity:1;";
@@ -223,9 +227,14 @@ function findRateLimitsChevron(panel) {
 function accountRow(state, panel, accountState, name) {
   const row = document.createElement("button");
   row.type = "button";
-  row.title = accountDisplayName(accountState, name, { includeCurrent: false });
+  const displayName = accountDisplayName(accountState, name, { includeCurrent: false });
+  const isCurrent = accountState.current === name;
+  row.title = displayName;
+  row.setAttribute("data-codexpp-account-switcher-list-item", "account");
+  row.setAttribute("data-codexpp-account-name", name);
+  row.setAttribute("aria-current", isCurrent ? "true" : "false");
   const normalBackground =
-    accountState.current === name
+    isCurrent
       ? "var(--color-token-list-hover-background, var(--color-token-bg-tertiary, color-mix(in srgb,currentColor 8%,transparent)))"
       : "transparent";
   row.style.cssText =
@@ -238,6 +247,7 @@ function accountRow(state, panel, accountState, name) {
     "display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;";
   row.appendChild(nameText);
   const usage = accountUsageSummary(accountState, name);
+  row.setAttribute("aria-label", accountRowAriaLabel(displayName, usage, isCurrent));
   if (usage) {
     const usageText = document.createElement("span");
     usageText.textContent = usage;
@@ -263,113 +273,22 @@ function accountRow(state, panel, accountState, name) {
   protectInteractiveControl(row);
   bindButtonAction(row, async () => {
     if (accountState.current === name) return;
-    const confirmed = await confirmSwitchAccount(state, accountState, name);
+    const confirmed = await confirmAccountAction(state, accountState, "switch", { name });
     if (!confirmed) return;
     void runPanelAction(state, panel, "switch", { name }, t("accounts.switching"));
   });
   return row;
 }
 
-function confirmSwitchAccount(state, accountState, name) {
-  const email = accountDisplayName(accountState, name, { includeCurrent: false });
-  document.querySelector("[data-codexpp-account-switcher-confirm]")?.remove();
-
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.setAttribute("data-codexpp-account-switcher-confirm", "true");
-    overlay.style.cssText =
-      "position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;" +
-      "background:rgba(0,0,0,.18);color:var(--color-token-text-primary,currentColor);";
-
-    const dialog = document.createElement("div");
-    dialog.setAttribute("role", "alertdialog");
-    dialog.setAttribute("aria-modal", "true");
-    dialog.style.cssText =
-      "width:min(360px,calc(100vw - 32px));border-radius:12px;border:1px solid var(--color-token-border,rgba(0,0,0,.12));" +
-      "background:var(--color-background-panel,var(--color-token-bg-primary,#fff));box-shadow:0 18px 48px rgba(0,0,0,.22);" +
-      "padding:18px;display:flex;flex-direction:column;gap:14px;font:inherit;";
-
-    const title = document.createElement("div");
-    title.textContent = t("accounts.confirmTitle");
-    title.style.cssText = "font-size:17px;font-weight:600;line-height:1.3;";
-    dialog.appendChild(title);
-
-    const message = document.createElement("div");
-    message.textContent = t("accounts.confirmMessage", { email });
-    message.style.cssText =
-      "font-size:14px;line-height:1.45;color:var(--color-token-text-secondary,currentColor);";
-    dialog.appendChild(message);
-
-    const actions = document.createElement("div");
-    actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
-
-    const cancel = confirmButton(t("accounts.confirmCancel"), false);
-    const confirm = confirmButton(t("accounts.confirmSwitch"), true);
-    actions.append(cancel, confirm);
-    dialog.appendChild(actions);
-    overlay.appendChild(dialog);
-
-    let done = false;
-    const finish = (value) => {
-      if (done) return;
-      done = true;
-      document.removeEventListener("keydown", onKeyDown, true);
-      overlay.remove();
-      resolve(value);
-    };
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        finish(false);
-      }
-    };
-
-    overlay.addEventListener("pointerdown", (event) => {
-      if (event.target === overlay) finish(false);
-    });
-    // Bubble phase, not capture: a capture-phase stopPropagation on the dialog
-    // fires before the click reaches the Cancel/Switch buttons and kills it,
-    // leaving the buttons dead. Bubbling lets the buttons handle it first.
-    dialog.addEventListener("pointerdown", (event) => event.stopPropagation());
-    dialog.addEventListener("click", (event) => event.stopPropagation());
-    cancel.addEventListener("click", () => finish(false));
-    confirm.addEventListener("click", () => finish(true));
-    document.addEventListener("keydown", onKeyDown, true);
-    document.body.appendChild(overlay);
-    cancel.focus();
-  });
-}
-
-function confirmButton(label, primary) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = label;
-  button.style.cssText =
-    "height:32px;border-radius:8px;border:1px solid color-mix(in srgb,currentColor 14%,transparent);" +
-    "padding:0 12px;font:inherit;font-size:13px;cursor:pointer;" +
-    (primary
-      ? "background:var(--color-token-text-primary,currentColor);color:var(--color-token-bg-primary,#fff);"
-      : "background:color-mix(in srgb,currentColor 5%,transparent);color:var(--color-token-text-primary,currentColor);");
-  addButtonFeedback(button, {
-    normal: { background: button.style.background },
-    hover: {
-      background: primary
-        ? "color-mix(in srgb,var(--color-token-text-primary,currentColor) 88%,transparent)"
-        : "color-mix(in srgb,currentColor 10%,transparent)",
-    },
-    active: {
-      background: primary
-        ? "color-mix(in srgb,var(--color-token-text-primary,currentColor) 78%,transparent)"
-        : "color-mix(in srgb,currentColor 16%,transparent)",
-      transform: "scale(0.98)",
-    },
-  });
-  return button;
+function accountRowAriaLabel(displayName, usage, isCurrent) {
+  const action = isCurrent ? "Current account" : "Switch to account";
+  return [action, displayName, usage ? `Usage ${usage}` : ""].filter(Boolean).join(". ");
 }
 
 function configureAccountsRow(state, panel) {
   const button = document.createElement("button");
   button.type = "button";
+  button.setAttribute("data-codexpp-account-switcher-list-item", "configure");
   button.textContent = t("accounts.configure");
   button.style.cssText =
     "width:100%;border:0;background:transparent;color:var(--color-token-text-secondary,currentColor);" +
@@ -386,6 +305,48 @@ function configureAccountsRow(state, panel) {
   protectInteractiveControl(button);
   bindButtonAction(button, () => openAccountsSettings(state, panel));
   return button;
+}
+
+function wireAccountListKeyboard(list, panel, accountState) {
+  const items = accountListItems(list);
+  if (!items.length) return;
+  const current = items.find((item) => item.getAttribute("data-codexpp-account-name") === accountState.current);
+  setAccountListTabStop(items, current || items[0]);
+
+  const onKeyDown = (event) => {
+    if (event.defaultPrevented) return;
+    const active = items.includes(document.activeElement) ? document.activeElement : items.find((item) => item.tabIndex === 0) || items[0];
+    const index = Math.max(0, items.indexOf(active));
+    let next = null;
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = items[(index + 1) % items.length];
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = items[(index - 1 + items.length) % items.length];
+    else if (event.key === "Home") next = items[0];
+    else if (event.key === "End") next = items[items.length - 1];
+    else if (event.key === "Escape") next = panel.querySelector("button[aria-expanded='true']");
+    else if (event.key?.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const needle = event.key.toLowerCase();
+      next = items
+        .slice(index + 1)
+        .concat(items.slice(0, index + 1))
+        .find((item) => item.textContent.trim().toLowerCase().startsWith(needle));
+    }
+    if (!next) return;
+    event.preventDefault();
+    setAccountListTabStop(items, next);
+    next.focus();
+  };
+
+  list.addEventListener("keydown", onKeyDown);
+  for (const item of items) item.addEventListener("keydown", onKeyDown);
+}
+
+function accountListItems(list) {
+  return Array.from(list.querySelectorAll("[data-codexpp-account-switcher-list-item]"))
+    .filter((item) => item instanceof HTMLElement && !item.disabled);
+}
+
+function setAccountListTabStop(items, active) {
+  for (const item of items) item.tabIndex = item === active ? 0 : -1;
 }
 
 function openAccountsSettings(state, panel) {
@@ -423,7 +384,7 @@ async function runPanelAction(state, panel, action, payload, loadingText) {
     const accountState = await invoke(state, action, payload);
     if (action === "switch" || action === "clear-active") {
       setPanelStatus(panel, authReloadMessage(action, accountState));
-      scheduleAppRelaunch(state, panel);
+      scheduleAppRelaunch(state, panel, accountState);
       return;
     }
     renderAccountPanel(state, panel, accountState);
@@ -448,7 +409,8 @@ function authReloadMessage(action, accountState) {
   return t("accounts.switchedRelaunching", { email });
 }
 
-function scheduleAppRelaunch(state, panel) {
+function scheduleAppRelaunch(state, panel, accountState) {
+  if (accountState?.relaunchScheduled) return;
   window.setTimeout(() => {
     invoke(state, "relaunch").catch((error) => {
       setPanelStatus(panel, t("accounts.relaunchFailed", { error: errorMessage(error) }));

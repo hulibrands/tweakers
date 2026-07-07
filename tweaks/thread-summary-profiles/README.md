@@ -29,5 +29,5 @@ Privacy rules:
 Focused tests can be run with:
 
 ```sh
-node --test tweaks/base/thomashulihan-thread-summary-profiles/test/*.test.js
+node --test vendor/tweakers/tweaks/thread-summary-profiles/test/*.test.js
 ```

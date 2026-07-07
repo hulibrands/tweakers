@@ -1,8 +1,23 @@
 "use strict";
 
 const ROOT_ATTR = "data-codexpp-shadcn-ui";
-const STYLE_ID = "codexpp-shadcn-codex-ui-style";
+const ROOT_OWNER_ATTR = "data-codexpp-shadcn-ui-owner";
+const ACTIVE_OWNERS_ATTR = "data-codexpp-shadcn-ui-active-owners";
+const SHADGPT_OWNER_ID = "co.thomashulihan.shadcn-codex-ui";
+const UPSTREAM_OWNER_ID = "co.Arconte112.shadcn-codex-ui";
+const OWNER_ID = SHADGPT_OWNER_ID;
+const OWNER_PRIORITY = 100;
+const STYLE_ID = "codexpp-shadcn-codex-ui-style--shadgpt";
+const LEGACY_STYLE_ID = "codexpp-shadcn-codex-ui-style";
 const STORAGE_KEY = "settings";
+const RUNTIME_OWNER_PRIORITIES = Object.freeze({
+  [SHADGPT_OWNER_ID]: 100,
+  [UPSTREAM_OWNER_ID]: 10,
+});
+const RUNTIME_STYLE_IDS = Object.freeze({
+  [SHADGPT_OWNER_ID]: "codexpp-shadcn-codex-ui-style--shadgpt",
+  [UPSTREAM_OWNER_ID]: "codexpp-shadcn-codex-ui-style--upstream",
+});
 
 const DEFAULT_SETTINGS = Object.freeze({
   themeMode: "light",
@@ -43,7 +58,7 @@ const FLAG_DEFS = Object.freeze([
   {
     key: "settings",
     label: "Settings",
-    description: "Style this tweak page and Codex++ settings surfaces with shadcn-like cards and controls.",
+    description: "Style this tweak page and ShadGPT settings surfaces with shadcn-like cards and controls.",
   },
   {
     key: "dialogs",
@@ -58,64 +73,6 @@ const COMPATIBILITY_DEFS = Object.freeze([
     label: "UI Improvements sidebar",
     description:
       "Keep UI Improvements sidebar behavior, but restyle its injected rows, grids, labels, and menus with shadcn tokens.",
-  },
-]);
-
-const UI_IMPROVEMENT_FEATURE_DEFS = Object.freeze([
-  {
-    id: "hide-upgrade-prompts",
-    title: "Hide upgrade prompts",
-    description: 'Hide the "Upgrade" pill in the app sidebar and the "Get Plus" button in the top bar.',
-  },
-  {
-    id: "show-usage-in-sidebar",
-    title: "Show usage in sidebar",
-    description: "Render 5-hour and weekly rate limits where the upgrade button was.",
-  },
-  {
-    id: "show-message-metrics-on-hover",
-    title: "Show message metrics on hover",
-    description: "Show per-turn token usage beside assistant messages.",
-  },
-  {
-    id: "square-sidebar",
-    title: "Square sidebar corners",
-    description: "Remove rounded inner content corners so the app sits flush against the sidebar.",
-  },
-  {
-    id: "settings-search",
-    title: "Settings search",
-    description: "Add a search field above Settings tabs so sections can be filtered quickly.",
-  },
-  {
-    id: "match-sidebar-width",
-    title: "Match settings sidebar width",
-    description: "Keep Settings from jumping wider than the main app sidebar.",
-  },
-  {
-    id: "sidebar-action-grid",
-    title: "Sidebar action grid",
-    description: "Render New chat, Search, Plugins, and Automations as a compact 2x2 grid.",
-  },
-  {
-    id: "sidebar-project-backgrounds",
-    title: "Sidebar project label colors",
-    description: "Color project labels and icons without adding grouped project cards.",
-  },
-  {
-    id: "sidebar-chat-multi-select",
-    title: "Multi-select sidebar chats",
-    description: "Cmd/Ctrl-click sidebar chats to select multiple rows, then right-click for batch actions.",
-  },
-  {
-    id: "show-pinned-chat-project-names",
-    title: "Show project label for pinned chats",
-    description: "Show a subdued project label under pinned chats and chronological chat rows.",
-  },
-  {
-    id: "slash-menu-polish",
-    title: "Slash menu polish",
-    description: "Tighten slash menu rows with calmer section headers and clearer active state.",
   },
 ]);
 
@@ -174,6 +131,18 @@ const THEME_MODES = Object.freeze([
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ]);
+
+// Canonical ShadGPT design-token style guide. Names + display grouping only;
+// the VALUES are parsed live from coreTokenCss() so the guide can never drift
+// from the theme the app actually renders.
+const THEME_TOKEN_GROUPS = Object.freeze([
+  { label: "Base", tokens: ["background", "foreground", "card", "card-foreground", "popover", "popover-foreground"] },
+  { label: "Brand", tokens: ["primary", "primary-foreground", "secondary", "secondary-foreground", "accent", "accent-foreground", "muted", "muted-foreground"] },
+  { label: "Functional", tokens: ["destructive", "border", "input", "ring"] },
+  { label: "Charts", tokens: ["chart-1", "chart-2", "chart-3", "chart-4", "chart-5"] },
+  { label: "Sidebar", tokens: ["sidebar", "sidebar-foreground", "sidebar-primary", "sidebar-primary-foreground", "sidebar-accent", "sidebar-accent-foreground", "sidebar-border", "sidebar-ring"] },
+]);
+const SHADCN_THEME_TOKEN_ORDER = Object.freeze(THEME_TOKEN_GROUPS.flatMap((group) => group.tokens));
 
 const FONT_ASSET_MIME = "font/woff2";
 const FONT_ASSET_MAX_BYTES = 1024 * 1024;
@@ -242,7 +211,22 @@ const FONT_FACE_DEFS = Object.freeze([
   },
 ]);
 
-/** @type {import("@codex-plusplus/sdk").Tweak} */
+// Typeface specimens for the Design & Style "Typefaces" container. Available
+// styles are derived live from FONT_FACE_DEFS (both families are variable, 100–900,
+// normal + italic); these are the named weights/styles the UI actually uses.
+const TYPEFACES = Object.freeze([
+  { name: "Geist", cssVar: "var(--font-sans)", role: "UI / sans" },
+  { name: "Geist Mono", cssVar: "var(--font-mono)", role: "Code / mono" },
+]);
+const TYPEFACE_STYLES = Object.freeze([
+  { label: "Regular", weight: 400, style: "normal" },
+  { label: "Medium", weight: 500, style: "normal" },
+  { label: "Semibold", weight: 600, style: "normal" },
+  { label: "Bold", weight: 700, style: "normal" },
+  { label: "Italic", weight: 400, style: "italic" },
+]);
+
+/** @type {import("@shadgpt/sdk").Tweak} */
 module.exports = {
   async start(api) {
     if (api.process === "main") return registerFontAssetHandler(api);
@@ -258,8 +242,11 @@ module.exports = {
       fontAssetUrls: Object.create(null),
       fontAssetMissing: [],
       fontDiagnostics: null,
+      fontDiagnosticsTimers: new Set(),
+      fontDiagnosticsActive: false,
       uiImprovementsListener: null,
       appearanceObserver: null,
+      appearanceObserverRoots: new Set(),
       appearanceSyncTimer: null,
       appearanceSurfaceListener: null,
     };
@@ -275,8 +262,8 @@ module.exports = {
     if (typeof api.settings?.registerPage === "function") {
       state.pageHandle = api.settings.registerPage({
         id: "main",
-        title: "Shadcn Codex UI",
-        description: "Scoped shadcn-style tokens and surface treatments for Codex++.",
+        title: "Style + Design",
+        description: "Scoped shadcn-style tokens and surface treatments for ShadGPT.",
         iconSvg:
           '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">' +
           '<rect x="3" y="3" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.5"/>' +
@@ -299,6 +286,7 @@ module.exports = {
     removeSystemThemeListener(state);
     removeUiImprovementsListener(state);
     removeAppearanceOverride(state);
+    cancelFontDiagnostics(state);
     disconnectRuntimeStyleObserver(state);
     state.pageHandle?.unregister();
     state.pageHandle = null;
@@ -405,15 +393,15 @@ function removeUiImprovementsListener(state) {
 function installAppearanceOverride(state) {
   if (typeof window === "undefined" || typeof document === "undefined") return;
 
-  state.appearanceSurfaceListener = () => scheduleAppearanceOverride(state);
+  state.appearanceSurfaceListener = () => {
+    syncAppearanceObserver(state);
+    scheduleAppearanceOverride(state);
+  };
   window.addEventListener("codexpp:settings-surface", state.appearanceSurfaceListener);
 
   if (typeof MutationObserver === "function") {
     state.appearanceObserver = new MutationObserver(() => scheduleAppearanceOverride(state));
-    state.appearanceObserver.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true,
-    });
+    syncAppearanceObserver(state);
   }
 
   scheduleAppearanceOverride(state);
@@ -426,19 +414,24 @@ function removeAppearanceOverride(state) {
   state.appearanceSurfaceListener = null;
   state.appearanceObserver?.disconnect();
   state.appearanceObserver = null;
+  state.appearanceObserverRoots?.clear?.();
   if (state.appearanceSyncTimer) clearTimeout(state.appearanceSyncTimer);
   state.appearanceSyncTimer = null;
-  clearAppearanceOverride();
+  clearAppearanceOverride(OWNER_ID);
 }
 
-function clearAppearanceOverride() {
+function clearAppearanceOverride(ownerId = null) {
   document.querySelectorAll("[data-codexpp-shadcn-native-appearance]").forEach((node) => {
+    if (ownerId && node.getAttribute("data-codexpp-shadcn-native-appearance-owner") !== ownerId) return;
     node.removeAttribute("data-codexpp-shadcn-native-appearance");
     node.removeAttribute("data-codexpp-shadcn-theme-mode");
+    node.removeAttribute("data-codexpp-shadcn-native-appearance-owner");
   });
   document.querySelectorAll("[data-codexpp-shadcn-appearance-hidden]").forEach((node) => {
+    if (ownerId && node.getAttribute("data-codexpp-shadcn-appearance-hidden-owner") !== ownerId) return;
     node.hidden = false;
     node.removeAttribute("data-codexpp-shadcn-appearance-hidden");
+    node.removeAttribute("data-codexpp-shadcn-appearance-hidden-owner");
   });
 }
 
@@ -446,13 +439,14 @@ function scheduleAppearanceOverride(state) {
   if (state.appearanceSyncTimer) return;
   state.appearanceSyncTimer = setTimeout(() => {
     state.appearanceSyncTimer = null;
+    syncAppearanceObserver(state);
     syncAppearanceOverride(state);
   }, 80);
 }
 
 function syncAppearanceOverride(state) {
-  if (!state.settings.flags.settings) {
-    clearAppearanceOverride();
+  if (!state.settings.flags.settings || !isPreferredRuntimeOwner(OWNER_ID)) {
+    clearAppearanceOverride(OWNER_ID);
     return;
   }
   const root = findNativeAppearanceRoot();
@@ -460,11 +454,58 @@ function syncAppearanceOverride(state) {
   clearAppearanceOverride();
   root.setAttribute("data-codexpp-shadcn-native-appearance", "true");
   root.setAttribute("data-codexpp-shadcn-theme-mode", state.settings.themeMode);
+  root.setAttribute("data-codexpp-shadcn-native-appearance-owner", OWNER_ID);
+}
+
+function syncAppearanceObserver(state) {
+  if (!state.appearanceObserver) return;
+  const roots = findAppearanceSearchRoots();
+  const sameRoots =
+    state.appearanceObserverRoots?.size === roots.length &&
+    roots.every((root) => state.appearanceObserverRoots.has(root));
+  if (sameRoots) return;
+
+  state.appearanceObserver.disconnect();
+  state.appearanceObserverRoots = new Set(roots);
+  for (const root of roots) {
+    state.appearanceObserver.observe(root, { childList: true, subtree: true });
+  }
+}
+
+function findAppearanceSearchRoots() {
+  const selectors = [
+    "[data-codexpp-shadcn-native-appearance]",
+    "[aria-label='Appearance settings']",
+    "[role='dialog'].settings-dialog",
+    ".settings-dialog",
+    "[data-codexpp-settings-sidebar='true']",
+    "[data-codexpp='native-nav-header']",
+    "[data-codexpp='nav-group']",
+    "[data-codexpp='pages-group']",
+  ].join(",");
+  return uniqueElements(Array.from(document.querySelectorAll(selectors)).map((node) => settingsSurfaceRoot(node)));
+}
+
+function settingsSurfaceRoot(node) {
+  return (
+    node.closest?.("[role='dialog'].settings-dialog") ||
+    node.closest?.(".settings-dialog") ||
+    node.closest?.("[data-radix-popper-content-wrapper]") ||
+    node.closest?.("[role='dialog']") ||
+    node
+  );
+}
+
+function uniqueElements(nodes) {
+  return Array.from(new Set(nodes.filter(Boolean)));
 }
 
 function findNativeAppearanceRoot() {
-  const headings = Array.from(document.querySelectorAll("h1,h2,h3,[role='heading'],button,div,span"))
-    .filter((node) => ownText(node) === "Appearance");
+  const roots = findAppearanceSearchRoots();
+  const headings = roots.flatMap((root) =>
+    Array.from(root.querySelectorAll("h1,h2,h3,[role='heading'],button,[role='tab']"))
+      .filter((node) => ownText(node) === "Appearance"),
+  );
 
   for (const heading of headings) {
     const root = findAppearanceRootFromHeading(heading);
@@ -515,25 +556,38 @@ function applyRuntime(state) {
 
   if (!css) {
     disconnectRuntimeStyleObserver(state);
-    removeRuntime();
+    removeRuntime(state);
     return;
   }
 
-  root.setAttribute(ROOT_ATTR, effectiveThemeMode(state));
-  let style = document.getElementById(STYLE_ID);
-  if (!style) {
-    style = document.createElement("style");
-    style.id = STYLE_ID;
-    style.setAttribute("data-owner", "co.thomashulihan.shadcn-codex-ui");
-    document.head.appendChild(style);
-  }
+  registerRuntimeOwner(OWNER_ID);
+  removeLegacyRuntimeStyleIfOwned();
+  const style = ensureRuntimeStyle(OWNER_ID);
   style.textContent = css;
-  syncRuntimeStyleOrder(state);
+  style.setAttribute("data-owner-priority", String(OWNER_PRIORITY));
+  style.setAttribute("data-theme-mode", effectiveThemeMode(state));
+  const activeOwner = preferredRuntimeOwner();
+  const ownsRuntime = activeOwner === OWNER_ID;
+  style.disabled = !ownsRuntime;
+
+  if (ownsRuntime) {
+    root.setAttribute(ROOT_ATTR, effectiveThemeMode(state));
+    root.setAttribute(ROOT_OWNER_ATTR, OWNER_ID);
+    disableInactiveRuntimeStyles(OWNER_ID);
+    syncRuntimeStyleOrder(state);
+    syncAppearanceOverride(state);
+  } else {
+    disconnectRuntimeStyleObserver(state);
+  }
 }
 
-function removeRuntime() {
+function removeRuntime(state = null) {
+  unregisterRuntimeOwner(OWNER_ID);
   document.getElementById(STYLE_ID)?.remove();
-  document.documentElement.removeAttribute(ROOT_ATTR);
+  if (document.documentElement.getAttribute(ROOT_OWNER_ATTR) === OWNER_ID) {
+    promotePreferredRuntimeOwner(state);
+  }
+  clearAppearanceOverride(OWNER_ID);
 }
 
 function syncRuntimeStyleOrder(state) {
@@ -560,7 +614,7 @@ function shouldFloatRuntimeStyle(settings) {
 
 function moveRuntimeStyleToEnd() {
   const style = document.getElementById(STYLE_ID);
-  if (!style || style.parentElement !== document.head) return;
+  if (!style || style.parentElement !== document.head || style.disabled) return;
   if (document.head.lastElementChild === style) return;
   document.head.appendChild(style);
 }
@@ -568,6 +622,90 @@ function moveRuntimeStyleToEnd() {
 function disconnectRuntimeStyleObserver(state) {
   state.styleOrderObserver?.disconnect();
   state.styleOrderObserver = null;
+}
+
+function ensureRuntimeStyle(ownerId) {
+  const styleId = RUNTIME_STYLE_IDS[ownerId];
+  let style = document.getElementById(styleId);
+  if (!style) {
+    style = document.createElement("style");
+    style.id = styleId;
+    document.head.appendChild(style);
+  }
+  style.setAttribute("data-owner", ownerId);
+  style.setAttribute("data-codexpp-shadcn-runtime-style", "true");
+  return style;
+}
+
+function removeLegacyRuntimeStyleIfOwned() {
+  const legacy = document.getElementById(LEGACY_STYLE_ID);
+  if (!legacy) return;
+  const owner = legacy.getAttribute("data-owner");
+  const ownerPriority = RUNTIME_OWNER_PRIORITIES[owner] || 0;
+  if (!owner || owner === OWNER_ID || ownerPriority < OWNER_PRIORITY) legacy.remove();
+}
+
+function parseRuntimeOwners() {
+  return new Set(
+    String(document.documentElement.getAttribute(ACTIVE_OWNERS_ATTR) || "")
+      .split(/\s+/)
+      .map((owner) => owner.trim())
+      .filter(Boolean),
+  );
+}
+
+function writeRuntimeOwners(owners) {
+  const value = Array.from(owners)
+    .filter(Boolean)
+    .sort((left, right) => (RUNTIME_OWNER_PRIORITIES[right] || 0) - (RUNTIME_OWNER_PRIORITIES[left] || 0))
+    .join(" ");
+  if (value) document.documentElement.setAttribute(ACTIVE_OWNERS_ATTR, value);
+  else document.documentElement.removeAttribute(ACTIVE_OWNERS_ATTR);
+}
+
+function registerRuntimeOwner(ownerId) {
+  const owners = parseRuntimeOwners();
+  owners.add(ownerId);
+  writeRuntimeOwners(owners);
+}
+
+function unregisterRuntimeOwner(ownerId) {
+  const owners = parseRuntimeOwners();
+  owners.delete(ownerId);
+  writeRuntimeOwners(owners);
+}
+
+function preferredRuntimeOwner() {
+  return Array.from(parseRuntimeOwners())
+    .filter((ownerId) => !!document.getElementById(RUNTIME_STYLE_IDS[ownerId]))
+    .sort((left, right) => (RUNTIME_OWNER_PRIORITIES[right] || 0) - (RUNTIME_OWNER_PRIORITIES[left] || 0))[0] || null;
+}
+
+function isPreferredRuntimeOwner(ownerId) {
+  return preferredRuntimeOwner() === ownerId;
+}
+
+function disableInactiveRuntimeStyles(activeOwner) {
+  for (const [ownerId, styleId] of Object.entries(RUNTIME_STYLE_IDS)) {
+    const style = document.getElementById(styleId);
+    if (!style) continue;
+    style.disabled = ownerId !== activeOwner;
+  }
+}
+
+function promotePreferredRuntimeOwner(state = null) {
+  const ownerId = preferredRuntimeOwner();
+  const root = document.documentElement;
+  if (!ownerId) {
+    root.removeAttribute(ROOT_ATTR);
+    root.removeAttribute(ROOT_OWNER_ATTR);
+    return;
+  }
+  const style = document.getElementById(RUNTIME_STYLE_IDS[ownerId]);
+  const themeMode = style?.getAttribute("data-theme-mode") || (state ? effectiveThemeMode(state) : "light");
+  root.setAttribute(ROOT_ATTR, themeMode);
+  root.setAttribute(ROOT_OWNER_ATTR, ownerId);
+  disableInactiveRuntimeStyles(ownerId);
 }
 
 function effectiveThemeMode(state) {
@@ -643,7 +781,7 @@ function fontFaceCss(fontAssetUrls) {
       `  font-style: ${def.style};`,
       "  font-display: swap;",
       "  font-weight: 100 900;",
-      `  src: url("${url}") format("woff2-variations");`,
+      `  src: url("${url}") format("woff2");`,
       `  unicode-range: ${def.unicodeRange};`,
       "}",
     ].join("\n");
@@ -657,11 +795,26 @@ function refreshFontDiagnostics(state, { log = false } = {}) {
 }
 
 function scheduleFontDiagnostics(state) {
+  state.fontDiagnosticsActive = true;
   refreshFontDiagnostics(state, { log: true });
   if (document.fonts?.ready) {
-    document.fonts.ready.then(() => refreshFontDiagnostics(state, { log: true })).catch(() => {});
+    document.fonts.ready
+      .then(() => {
+        if (state.fontDiagnosticsActive) refreshFontDiagnostics(state, { log: true });
+      })
+      .catch(() => {});
   }
-  setTimeout(() => refreshFontDiagnostics(state), 500);
+  const timer = setTimeout(() => {
+    state.fontDiagnosticsTimers.delete(timer);
+    if (state.fontDiagnosticsActive) refreshFontDiagnostics(state);
+  }, 500);
+  state.fontDiagnosticsTimers.add(timer);
+}
+
+function cancelFontDiagnostics(state) {
+  state.fontDiagnosticsActive = false;
+  for (const timer of state.fontDiagnosticsTimers || []) clearTimeout(timer);
+  state.fontDiagnosticsTimers?.clear?.();
 }
 
 function collectFontDiagnostics(state) {
@@ -711,13 +864,13 @@ html[${ROOT_ATTR}] {
   --radius: 0.625rem;
   ${shadcnPaletteCssVars()}
   --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --foreground: oklch(0 0 0);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0 0 0);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
+  --popover-foreground: oklch(0 0 0);
+  --primary: oklch(0 0 0);
+  --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -733,10 +886,10 @@ html[${ROOT_ATTR}] {
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0 0 0);
+  --sidebar-primary: oklch(0 0 0);
+  --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
@@ -906,39 +1059,16 @@ html[${ROOT_ATTR}] [class*="divide-token"] > * + * {
   border-color: var(--border, #d4d4d8) !important;
 }
 
-html[${ROOT_ATTR}] button,
-html[${ROOT_ATTR}] [role="button"],
-html[${ROOT_ATTR}] a,
-html[${ROOT_ATTR}] input,
-html[${ROOT_ATTR}] textarea,
-html[${ROOT_ATTR}] select {
-  font-family: var(--font-sans) !important;
-}
-
-html[${ROOT_ATTR}] button:not([disabled]),
-html[${ROOT_ATTR}] [role="button"]:not([aria-disabled="true"]),
-html[${ROOT_ATTR}] a[href],
-html[${ROOT_ATTR}] summary,
-html[${ROOT_ATTR}] label[for],
-html[${ROOT_ATTR}] select {
-  cursor: pointer !important;
-}
-
-html[${ROOT_ATTR}] input,
-html[${ROOT_ATTR}] textarea,
-html[${ROOT_ATTR}] select {
-  background: var(--background, #ffffff) !important;
-  border-color: var(--input, #d4d4d8) !important;
-  color: var(--foreground, #09090b) !important;
-}
-
 html[${ROOT_ATTR}] ::selection {
   background: color-mix(in srgb, var(--codexpp-shadcn-ui-accent, #1d4ed8) 24%, transparent);
 }
 
-html[${ROOT_ATTR}] * {
+html[${ROOT_ATTR}] {
+  /* Inherited by all descendants — no universal '*' selector (which forced a
+     style recalc over every node on each streamed token) and no
+     text-rendering: optimizeLegibility (expensive per-glyph kerning on a
+     constantly-mutating chat DOM). Antialiasing preserves the macOS look. */
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
 `.trim();
 }
@@ -1060,6 +1190,33 @@ html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="title"] {
     black
   ) !important;
   font-weight: 700 !important;
+}
+
+html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="project-expander"],
+html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="project-expander"]:hover,
+html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="project-expander"]:focus,
+html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="project-expander"]:focus-visible {
+  background: transparent !important;
+  background-color: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  color: color-mix(
+    in srgb,
+    var(--codexpp-project-text-color, var(--codexpp-project-tint, var(--foreground, #09090b))) 82%,
+    black
+  ) !important;
+  font-weight: 700 !important;
+  -webkit-text-fill-color: color-mix(
+    in srgb,
+    var(--codexpp-project-text-color, var(--codexpp-project-tint, var(--foreground, #09090b))) 82%,
+    black
+  ) !important;
+}
+
+html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="project-expander"] :where(*) {
+  color: inherit !important;
+  font-weight: inherit !important;
+  -webkit-text-fill-color: inherit !important;
 }
 
 html[${ROOT_ATTR}] [data-codexpp-sidebar-project-backgrounds="unread"] {
@@ -1339,6 +1496,134 @@ html[${ROOT_ATTR}] .codexpp-shadcn-section-heading {
 html[${ROOT_ATTR}] .codexpp-shadcn-section-copy,
 html[${ROOT_ATTR}] .codexpp-shadcn-description {
   color: var(--muted-foreground, #52525b);
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  width: 100%;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-swatches {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-swatch {
+  border: 1px solid var(--border, #d4d4d8);
+  height: 22px;
+  width: 15px;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-swatch:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-swatch:last-child {
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-name {
+  color: var(--foreground, #09090b);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-value {
+  color: var(--muted-foreground, #52525b);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-token-typo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-theme-code {
+  background: var(--muted, #f4f4f5);
+  border: 1px solid var(--border, #d4d4d8);
+  border-radius: var(--radius, 0.5rem);
+  color: var(--foreground, #09090b);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 17px;
+  padding: 10px 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-theme-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-theme-actions button {
+  background: var(--background, #ffffff);
+  border: 1px solid var(--border, #d4d4d8);
+  border-radius: var(--radius, 0.5rem);
+  color: var(--foreground, #09090b);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 12px;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-theme-actions button:hover {
+  background: var(--accent, #f4f4f5);
+  color: var(--accent-foreground, #18181b);
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-typeface {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-typeface-name {
+  color: var(--foreground, #09090b);
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-typeface-styles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+html[${ROOT_ATTR}] .codexpp-shadcn-typeface-style {
+  color: var(--foreground, #09090b);
+  font-size: 17px;
+  line-height: 1.35;
 }
 
 html[${ROOT_ATTR}] .codexpp-shadcn-row {
@@ -1652,6 +1937,19 @@ function renderSettingsPage(root, state) {
   themeCard.appendChild(themeRow);
   root.appendChild(themeCard);
 
+  root.appendChild(
+    sectionHeader(
+      "Design & Style",
+      "The ShadGPT default theme — shadcn neutral tokens, typography, and radius. This is the canonical style guide; the values are read live from the active theme.",
+    ),
+  );
+  root.appendChild(renderDesignStyleCard(state));
+
+  root.appendChild(
+    sectionHeader("Typefaces", "The fonts in use — each name and the styles applied, set in their own typeface."),
+  );
+  root.appendChild(renderFontSpecimenCard(state));
+
   root.appendChild(sectionHeader("Fonts", "Confirm that Shadcn typography is loading from bundled Geist assets."));
   root.appendChild(renderFontDiagnosticsCard(state));
 
@@ -1675,20 +1973,6 @@ function renderSettingsPage(root, state) {
   }
   root.appendChild(compatibilityCard);
 
-  root.appendChild(sectionHeader("UI Improvements", "Control the existing UI Improvements tweak from this Shadcn surface."));
-
-  const improvementsCard = card();
-  const bridge = uiImprovementsBridge();
-  const featureDefs = Array.isArray(bridge?.features) && bridge.features.length
-    ? bridge.features
-    : UI_IMPROVEMENT_FEATURE_DEFS;
-  for (const feature of featureDefs) {
-    const item = rowShell(feature.title, feature.description);
-    item.appendChild(renderUiImprovementSwitch(state, feature));
-    improvementsCard.appendChild(item);
-  }
-  root.appendChild(improvementsCard);
-
   root.appendChild(sectionHeader("Project Colors", "Choose Shadcn-friendly project row accents for the sidebar."));
   root.appendChild(renderProjectColorCard(state));
 
@@ -1701,7 +1985,7 @@ function renderSettingsPage(root, state) {
 
 function renderFontDiagnosticsCard(state) {
   const fontCard = card();
-  const row = rowShell("Font diagnostics", "Shows whether this live Codex++ window can use the bundled Geist faces.");
+  const row = rowShell("Font diagnostics", "Shows whether this live ShadGPT window can use the bundled Geist faces.");
   row.classList.add("codexpp-shadcn-row--stack");
   row.setAttribute("data-codexpp-shadcn-font-diagnostics", "true");
   fontCard.appendChild(row);
@@ -1747,6 +2031,192 @@ function statusBadge(label, ok) {
   badge.setAttribute("data-status", ok ? "ok" : "missing");
   badge.textContent = ok ? `${label}: loaded` : `${label}: missing`;
   return badge;
+}
+
+function extractBlockVars(css, opener) {
+  const vars = Object.create(null);
+  const start = css.indexOf(opener);
+  if (start < 0) return vars;
+  const bodyStart = start + opener.length;
+  const end = css.indexOf("\n}", bodyStart);
+  const body = css.slice(bodyStart, end < 0 ? css.length : end);
+  for (const match of body.matchAll(/--([a-z0-9-]+)\s*:\s*([^;]+);/gi)) {
+    vars[match[1]] = match[2].trim();
+  }
+  return vars;
+}
+
+// Single source of truth: read the live theme values straight out of the CSS the
+// app injects, so the style guide and exported shadcn theme always match.
+function themePalette() {
+  const css = coreTokenCss();
+  const light = extractBlockVars(css, `html[${ROOT_ATTR}] {`);
+  const dark = extractBlockVars(css, `html[${ROOT_ATTR}="dark"] {`);
+  return {
+    radius: light.radius || "0.625rem",
+    fontSans: light["font-sans"] || "",
+    fontMono: light["font-mono"] || "",
+    light,
+    dark,
+  };
+}
+
+// Emit the ShadGPT default theme as standard shadcn CSS variables (:root / .dark),
+// ready to copy into a shadcn project's globals.css.
+function shadcnThemeCss() {
+  const palette = themePalette();
+  const emit = (map) =>
+    SHADCN_THEME_TOKEN_ORDER
+      .filter((token) => map[token])
+      .map((token) => `  --${token}: ${map[token]};`)
+      .join("\n");
+  return [
+    ":root {",
+    `  --radius: ${palette.radius};`,
+    emit(palette.light),
+    "}",
+    "",
+    ".dark {",
+    emit(palette.dark),
+    "}",
+    "",
+  ].join("\n");
+}
+
+function renderDesignStyleCard(state) {
+  void state;
+  const palette = themePalette();
+  const wrap = card();
+
+  for (const group of THEME_TOKEN_GROUPS) {
+    const row = rowShell(group.label, `${group.tokens.length} tokens`);
+    row.classList.add("codexpp-shadcn-row--stack");
+    const grid = document.createElement("div");
+    grid.className = "codexpp-shadcn-token-grid";
+    for (const token of group.tokens) {
+      const lightVal = palette.light[token] || "";
+      const darkVal = palette.dark[token] || lightVal;
+      const item = document.createElement("div");
+      const swatches = document.createElement("div");
+      const lightSw = document.createElement("span");
+      const darkSw = document.createElement("span");
+      const meta = document.createElement("div");
+      const name = document.createElement("span");
+      const value = document.createElement("span");
+
+      item.className = "codexpp-shadcn-token";
+      swatches.className = "codexpp-shadcn-token-swatches";
+      lightSw.className = "codexpp-shadcn-token-swatch";
+      lightSw.style.background = lightVal;
+      lightSw.title = `light: ${lightVal}`;
+      darkSw.className = "codexpp-shadcn-token-swatch";
+      darkSw.style.background = darkVal;
+      darkSw.title = `dark: ${darkVal}`;
+      swatches.append(lightSw, darkSw);
+      meta.className = "codexpp-shadcn-token-meta";
+      name.className = "codexpp-shadcn-token-name";
+      name.textContent = `--${token}`;
+      value.className = "codexpp-shadcn-token-value";
+      value.textContent = lightVal;
+      meta.append(name, value);
+      item.append(swatches, meta);
+      grid.appendChild(item);
+    }
+    row.appendChild(grid);
+    wrap.appendChild(row);
+  }
+
+  const typoRow = rowShell("Typography & radius", `Geist + Geist Mono · radius ${palette.radius}`);
+  typoRow.classList.add("codexpp-shadcn-row--stack");
+  const typo = document.createElement("div");
+  typo.className = "codexpp-shadcn-token-typo";
+  const sans = document.createElement("div");
+  sans.style.fontFamily = palette.fontSans || "var(--font-sans)";
+  sans.textContent = "Sans · Geist — The quick brown fox 0123456789";
+  const mono = document.createElement("div");
+  mono.style.fontFamily = palette.fontMono || "var(--font-mono)";
+  mono.textContent = "Mono · Geist Mono — const theme = 0123456789;";
+  typo.append(sans, mono);
+  typoRow.appendChild(typo);
+  wrap.appendChild(typoRow);
+
+  const themeRow = rowShell(
+    "shadcn theme",
+    "The ShadGPT default theme as shadcn CSS variables. Copy it to reuse, or paste into a shadcn project's globals.css.",
+  );
+  themeRow.classList.add("codexpp-shadcn-row--stack");
+  const css = shadcnThemeCss();
+  const field = document.createElement("textarea");
+  field.className = "codexpp-shadcn-theme-code";
+  field.readOnly = true;
+  field.rows = 14;
+  field.spellcheck = false;
+  field.value = css;
+  field.addEventListener("focus", () => field.select());
+  const actions = document.createElement("div");
+  actions.className = "codexpp-shadcn-theme-actions";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy theme";
+  copy.addEventListener("click", () => {
+    field.focus();
+    field.select();
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(css).catch(() => {});
+    } else {
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* clipboard unavailable */
+      }
+    }
+    copy.textContent = "Copied";
+    setTimeout(() => {
+      copy.textContent = "Copy theme";
+    }, 1500);
+  });
+  actions.appendChild(copy);
+  themeRow.append(field, actions);
+  wrap.appendChild(themeRow);
+
+  return wrap;
+}
+
+function renderFontSpecimenCard(state) {
+  void state;
+  const wrap = card();
+  for (const face of TYPEFACES) {
+    const styles = [...new Set(FONT_FACE_DEFS.filter((def) => def.family === face.name).map((def) => def.style))];
+    const hasItalic = styles.includes("italic");
+    const row = rowShell(face.name, `${face.role} · variable 100–900 · ${styles.join(" + ")}`);
+    row.classList.add("codexpp-shadcn-row--stack");
+
+    const block = document.createElement("div");
+    block.className = "codexpp-shadcn-typeface";
+
+    const title = document.createElement("div");
+    title.className = "codexpp-shadcn-typeface-name";
+    title.style.fontFamily = face.cssVar;
+    title.textContent = face.name;
+    block.appendChild(title);
+
+    const specimens = document.createElement("div");
+    specimens.className = "codexpp-shadcn-typeface-styles";
+    for (const styleDef of TYPEFACE_STYLES) {
+      if (styleDef.style === "italic" && !hasItalic) continue;
+      const sample = document.createElement("div");
+      sample.className = "codexpp-shadcn-typeface-style";
+      sample.style.fontFamily = face.cssVar;
+      sample.style.fontWeight = String(styleDef.weight);
+      sample.style.fontStyle = styleDef.style;
+      sample.textContent = `${styleDef.label} ${styleDef.weight}${styleDef.style === "italic" ? " Italic" : ""} — The quick brown fox 0123`;
+      specimens.appendChild(sample);
+    }
+    block.appendChild(specimens);
+    row.appendChild(block);
+    wrap.appendChild(row);
+  }
+  return wrap;
 }
 
 function sectionHeader(title, description) {
@@ -1842,42 +2312,6 @@ function renderSwitch(state, key) {
     });
     saveSettings(state);
     applyRuntime(state);
-    if (state.pageRoot) renderSettingsPage(state.pageRoot, state);
-  });
-
-  return button;
-}
-
-function renderUiImprovementSwitch(state, feature) {
-  const button = document.createElement("button");
-  const knob = document.createElement("span");
-  const bridge = uiImprovementsBridge();
-  const available = !!bridge?.setFeature;
-  const value = available ? !!bridge.getFeature?.(feature.id) : false;
-
-  button.type = "button";
-  button.className = "codexpp-shadcn-switch";
-  button.setAttribute("role", "switch");
-  button.setAttribute("aria-label", feature.title || feature.id);
-  button.setAttribute("aria-checked", String(value));
-  if (!available) {
-    button.disabled = true;
-    button.style.opacity = "0.45";
-    button.style.cursor = "not-allowed";
-  }
-  button.appendChild(knob);
-
-  button.addEventListener("click", () => {
-    const next = button.getAttribute("aria-checked") !== "true";
-    const liveBridge = uiImprovementsBridge();
-    if (liveBridge?.setFeature) liveBridge.setFeature(feature.id, next);
-    else {
-      window.dispatchEvent(
-        new CustomEvent(UI_IMPROVEMENTS_EVENT, {
-          detail: { id: feature.id, value: next, source: "shadcn-codex-ui" },
-        }),
-      );
-    }
     if (state.pageRoot) renderSettingsPage(state.pageRoot, state);
   });
 

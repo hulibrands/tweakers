@@ -10,7 +10,7 @@ tweak is disabled or fails to load.
 ## Verify
 
 ```sh
-node -c tweaks/base/tweaks-directory/index.cjs
+node -c vendor/tweakers/tweaks/tweaks-directory/index.cjs
 cd packages
-node --import tsx packages/installer/src/cli.ts validate-tweak ../tweaks/base/tweaks-directory
+node --import tsx packages/installer/src/cli.ts validate-tweak ../vendor/tweakers/tweaks/tweaks-directory
 ```

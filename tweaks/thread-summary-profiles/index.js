@@ -41,6 +41,9 @@ module.exports = {
     parseSupabaseConfigToml,
     sanitizeAction,
     activeModalWorkspaceContextCached,
+    userRootForPlatform,
+    trustedProjectPathsForStorage,
+    isTrustedProjectPath,
     inferRendererProjectContext,
     extractProjectPathFromVisibleText,
     injectProfilesSection,
@@ -67,7 +70,7 @@ function startMain(api, cleanup) {
   const path = require("node:path");
   const childProcess = require("node:child_process");
   const home = os.homedir();
-  const userRoot = userRootForPlatform(home, path);
+  const userRoot = userRootForPlatform(home, path, { fs, env: process.env });
 
   cleanup.push(api.ipc.handle(IPC_GET_SUMMARY, (input = {}) => getCachedThreadProfileSummary(input, {
     fs,
@@ -102,13 +105,9 @@ function startRenderer(api, cleanup) {
   };
 
   schedule();
-  const observer = new MutationObserver((mutations) => {
-    if (shouldIgnoreProfileMutations(mutations)) return;
-    schedule();
-  });
-  observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+  const disconnectObservers = observeThreadSummaryPanelMutations(document, schedule);
   cleanup.push(() => {
-    observer.disconnect();
+    disconnectObservers();
     if (raf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(raf);
     document.querySelectorAll(`[${SECTION_ATTR}="true"]`).forEach((node) => node.remove());
   });
@@ -183,7 +182,7 @@ function chromeRow(projectPath, options = {}) {
       action: settingsAction("projects"),
     });
   }
-  const value = cleanText(primary.profileName || assignment.profileName || primary.profileDirectory || assignment.profileDirectory || "Set", 120);
+  const value = friendlyAccountLabel(primary.profileName || assignment.profileName || primary.profileDirectory || assignment.profileDirectory || "Set");
   const detail = cleanText(primary.profileDirectory || assignment.profileDirectory || "", 120);
   return baseRow("chrome", "Chrome", value, {
     detail,
@@ -247,7 +246,7 @@ function googleWorkspaceRow(projectPath, service, options = {}) {
       action: settingsAction("projects"),
     });
   }
-  return baseRow(service, label, assignment.email || assignment.accountName || "Set", {
+  return baseRow(service, label, friendlyAccountLabel(assignment.accountName || assignment.profileName || assignment.displayName || assignment.label || assignment.name || assignment.email || "Set"), {
     detail: assignment.source ? `Source: ${assignment.source}` : "",
     state: "set",
     status: freshness("Project default", assignment.updatedAt),
@@ -452,6 +451,60 @@ function shouldIgnoreProfileMutations(mutations = []) {
     const changed = [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])];
     return changed.length > 0 && changed.every(isProfileSectionOwnedNode);
   });
+}
+
+function observeThreadSummaryPanelMutations(rootDocument, onChange) {
+  const Observer = typeof MutationObserver === "function" ? MutationObserver : null;
+  if (!Observer || !rootDocument) return () => {};
+  const observers = [];
+  const observedPanels = new Set();
+  const observePanel = (panel) => {
+    if (!isElement(panel) || observedPanels.has(panel)) return;
+    const observer = new Observer((mutations) => {
+      if (shouldIgnoreProfileMutations(mutations)) return;
+      onChange();
+    });
+    observer.observe(panel, { childList: true, subtree: true });
+    observers.push(observer);
+    observedPanels.add(panel);
+  };
+  const syncPanels = () => {
+    for (const panel of findThreadSummaryPanels(rootDocument)) observePanel(panel);
+  };
+  syncPanels();
+  const root = rootDocument.body || rootDocument.documentElement;
+  if (root) {
+    const rootObserver = new Observer((mutations) => {
+      if (!mutationListHasPotentialSummaryChange(mutations)) return;
+      onChange();
+      syncPanels();
+    });
+    rootObserver.observe(root, { childList: true, subtree: false });
+    observers.push(rootObserver);
+  }
+  return () => {
+    for (const observer of observers) {
+      try {
+        observer.disconnect();
+      } catch {}
+    }
+    observedPanels.clear();
+  };
+}
+
+function mutationListHasPotentialSummaryChange(mutations = []) {
+  const list = Array.from(mutations || []);
+  if (!list.length || shouldIgnoreProfileMutations(list)) return false;
+  return list.some((mutation) => {
+    const changed = [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])];
+    return !changed.length || changed.some(isPotentialThreadSummaryContainer);
+  });
+}
+
+function isPotentialThreadSummaryContainer(node) {
+  if (!isElement(node)) return false;
+  const tag = String(node.tagName || "").toLowerCase();
+  return tag === "aside" || tag === "section" || tag === "div";
 }
 
 function isProfileSectionOwnedNode(node) {
@@ -1198,7 +1251,7 @@ function readStorageFile(tweakId, options = {}) {
   const fs = options.fs || require("node:fs");
   const path = options.path || require("node:path");
   const home = options.home || require("node:os").homedir();
-  const userRoot = options.userRoot || userRootForPlatform(home, path);
+  const userRoot = options.userRoot || userRootForPlatform(home, path, options);
   const file = path.join(userRoot, "storage", `${tweakId}.json`);
   try {
     const value = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -1232,7 +1285,7 @@ function gitRepositoriesForProject(projectPathInput, options = {}) {
   const childProcess = options.childProcess || require("node:child_process");
   const home = options.home || require("node:os").homedir();
   const projectPath = normalizeProjectPath(projectPathInput, { path, home, allowEmpty: true });
-  if (!projectPath || projectPath.startsWith("codex-sidebar://") || !fs.existsSync(projectPath)) return [];
+  if (!projectPath || projectPath.startsWith("codex-sidebar://") || !isTrustedProjectPath(projectPath, options) || !fs.existsSync(projectPath)) return [];
   const gitRoot = gitRootForProject(projectPath, { fs, path, childProcess });
   if (!gitRoot) return [];
   const output = safeExec("git", ["-C", gitRoot, "remote", "-v"], childProcess);
@@ -1332,6 +1385,7 @@ function activeModalWorkspaceContext(projectPathInput, options = {}) {
   const env = { ...process.env, ...(options.env || {}) };
   const projectPath = normalizeProjectPath(projectPathInput, { path, home: options.home, allowEmpty: true });
   if (options.skipModalCli) return { profile: null, workspace: null, source: null, error: "Modal CLI skipped." };
+  if (!isTrustedProjectPath(projectPath, options)) return { profile: null, workspace: null, source: null, error: "Project path is not trusted." };
   const candidates = modalPythonCommandCandidates(projectPath, { fs, path, env });
   let lastError = "";
   for (const candidate of candidates) {
@@ -1464,13 +1518,14 @@ function projectPathFromStoredProjectName(name, options = {}) {
 
 function resolveStoredProjectPrefix(projectPath, options = {}) {
   if (!projectPath) return "";
+  const path = options.path || require("node:path");
   const normalized = projectPath.toLowerCase();
-  const storage = readProjectsStorage(options);
-  const projects = [...(storage.sidebarProjects || [])]
-    .map((project) => project.projectPath || "")
-    .filter(Boolean)
+  const projects = trustedProjectPathsForStorage(options)
     .sort((left, right) => right.length - left.length);
-  return projects.find((project) => normalized === project.toLowerCase() || normalized.startsWith(`${project.toLowerCase()}/`)) || "";
+  return projects.find((project) => {
+    const trusted = project.toLowerCase();
+    return normalized === trusted || normalized.startsWith(`${trusted.toLowerCase()}${path.sep}`);
+  }) || "";
 }
 
 function extractProjectPathFromVisibleText(text) {
@@ -1543,12 +1598,69 @@ function normalizeProjectPath(input, options = {}) {
   return path.resolve(input.replace(/^~(?=$|\/|\\)/, home));
 }
 
-function userRootForPlatform(home, path = require("node:path")) {
-  if (process.env.CODEX_PLUSPLUS_USER_ROOT) return path.resolve(process.env.CODEX_PLUSPLUS_USER_ROOT);
-  if (process.env.CODEX_PLUSPLUS_HOME) return path.resolve(process.env.CODEX_PLUSPLUS_HOME);
-  if (process.platform === "darwin") return path.join(home, "Library", "Application Support", "codex-plusplus");
-  if (process.platform === "win32") return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "codex-plusplus");
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "codex-plusplus");
+function trustedProjectPathsForStorage(options = {}) {
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const projects = new Set();
+  const add = (value) => {
+    const normalized = normalizeProjectPath(value || "", { path, home, allowEmpty: true });
+    if (normalized && !normalized.startsWith("codex-sidebar://")) projects.add(normalized);
+  };
+  const chromeStorage = readChromeStorage(options);
+  for (const key of Object.keys(chromeStorage.assignments || {})) add(key);
+  const projectStorage = readProjectsStorage(options);
+  for (const project of projectStorage.sidebarProjects || []) add(project?.projectPath || project?.path || project?.cwd);
+  for (const group of [
+    projectStorage.googleWorkspaceAssignments,
+    projectStorage.modalWorkspaceAssignments,
+    projectStorage.decodoAssignments,
+  ]) {
+    for (const key of Object.keys(group || {})) add(key);
+  }
+  return [...projects];
+}
+
+function isTrustedProjectPath(projectPathInput, options = {}) {
+  const path = options.path || require("node:path");
+  const home = options.home || require("node:os").homedir();
+  const projectPath = normalizeProjectPath(projectPathInput, { path, home, allowEmpty: true });
+  if (!projectPath || projectPath.startsWith("codex-sidebar://")) return false;
+  return trustedProjectPathsForStorage(options).some((trustedPath) => {
+    return projectPath === trustedPath || projectPath.startsWith(`${trustedPath}${path.sep}`);
+  });
+}
+
+function userRootForPlatform(home, path = require("node:path"), options = {}) {
+  const env = options.env || process.env;
+  if (env.CODEX_PLUSPLUS_USER_ROOT) return path.resolve(env.CODEX_PLUSPLUS_USER_ROOT);
+  if (env.CODEX_PLUSPLUS_HOME) return path.resolve(env.CODEX_PLUSPLUS_HOME);
+  const platform = options.platform || process.platform;
+  const fs = options.fs || safeRequireFs();
+  const firstExistingOrDefault = (preferred, legacy) => {
+    if (fs?.existsSync?.(preferred)) return preferred;
+    if (fs?.existsSync?.(legacy)) return legacy;
+    return preferred;
+  };
+  if (platform === "darwin") {
+    return firstExistingOrDefault(
+      path.join(home, "Library", "Application Support", "ShadGPT", "TweakerLibrary"),
+      path.join(home, "Library", "Application Support", "codex-plusplus"),
+    );
+  }
+  if (platform === "win32") {
+    const appData = env.APPDATA || path.join(home, "AppData", "Roaming");
+    return firstExistingOrDefault(path.join(appData, "ShadGPT", "TweakerLibrary"), path.join(appData, "codex-plusplus"));
+  }
+  const configRoot = env.XDG_CONFIG_HOME || path.join(home, ".config");
+  return firstExistingOrDefault(path.join(configRoot, "ShadGPT", "TweakerLibrary"), path.join(configRoot, "codex-plusplus"));
+}
+
+function safeRequireFs() {
+  try {
+    return require("node:fs");
+  } catch {
+    return null;
+  }
 }
 
 function findTomlTableBlock(content, tableName) {
@@ -1617,14 +1729,14 @@ function installStyles() {
     [${SECTION_ATTR}="true"] { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; flex: 0 0 100%; grid-column: 1 / -1; }
     [${SECTION_ATTR}="true"].codexpp-thread-summary-profiles--fallback { padding: 14px 28px 16px; border-top: 1px solid var(--border-light, rgba(127,127,127,.18)); font: inherit; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__details { width: 100%; max-width: 100%; }
-    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary { box-sizing: border-box; display: flex; min-width: 0; width: 100%; align-items: center; gap: 8px; padding: 0; list-style: none; color: var(--text-secondary, #6b7280); font: inherit; font-weight: 400; cursor: pointer; user-select: none; }
+    .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary { box-sizing: border-box; display: flex; min-width: 0; width: 100%; align-items: center; gap: 8px; padding: 0; list-style: none; color: var(--text-secondary, currentColor); font: inherit; font-weight: 400; cursor: pointer; user-select: none; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary::-webkit-details-marker { display: none; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary::marker { content: ""; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__summary:focus-visible { outline: 2px solid var(--focus-border, rgba(37,99,235,.6)); outline-offset: 2px; border-radius: 4px; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-weight: inherit; color: inherit; padding: 0; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__chevron { width: 8px; height: 8px; flex: 0 0 auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform .16s ease; opacity: .9; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__details:not([open]) .codexpp-thread-summary-profiles__chevron { transform: rotate(-45deg); }
-    .codexpp-thread-summary-profiles__collapsed-summary { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary, #6b7280); font: inherit; opacity: .85; }
+    .codexpp-thread-summary-profiles__collapsed-summary { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary, currentColor); font: inherit; opacity: .85; }
     .codexpp-thread-summary-profiles--fallback .codexpp-thread-summary-profiles__content { display: flex; flex-direction: column; gap: 6px; padding-top: 12px; }
     .codexpp-thread-summary-profiles__row { box-sizing: border-box; width: 100%; min-width: 0; border: 0; background: transparent; color: inherit; text-align: left; text-decoration: none; font: inherit; }
     .codexpp-thread-summary-profiles__row:not(.codexpp-thread-summary-profiles__row--native) { min-height: 30px; display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; padding: 3px 0; border-radius: 6px; }
@@ -1639,31 +1751,31 @@ function installStyles() {
     button.codexpp-thread-summary-profiles__static-icon, a.codexpp-thread-summary-profiles__static-icon { cursor: pointer; }
     .codexpp-thread-summary-profiles__icon { position: relative; width: 14px; height: 14px; margin-top: 2px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; opacity: .9; overflow: hidden; flex: 0 0 auto; }
     .codexpp-thread-summary-profiles__icon::before, .codexpp-thread-summary-profiles__icon::after { content: ""; position: absolute; box-sizing: border-box; }
-    .codexpp-thread-summary-profiles__icon.icon-chrome { border-radius: 50%; background: conic-gradient(#e11d48 0 33%, #f59e0b 0 66%, #16a34a 0); }
-    .codexpp-thread-summary-profiles__icon.icon-chrome::after { inset: 4px; border-radius: 50%; background: #2563eb; box-shadow: 0 0 0 2px var(--background-primary, #fff); }
-    .codexpp-thread-summary-profiles__icon.icon-supabase { background: #16a34a; clip-path: polygon(18% 8%, 82% 50%, 18% 92%); }
+    .codexpp-thread-summary-profiles__icon.icon-chrome { border-radius: 50%; border: 1.5px solid currentColor; }
+    .codexpp-thread-summary-profiles__icon.icon-chrome::after { inset: 4px; border-radius: 50%; background: currentColor; }
+    .codexpp-thread-summary-profiles__icon.icon-supabase { background: currentColor; clip-path: polygon(18% 8%, 82% 50%, 18% 92%); }
     .codexpp-thread-summary-profiles__icon.icon-github { border-radius: 50%; background: currentColor; }
-    .codexpp-thread-summary-profiles__icon.icon-github::after { width: 8px; height: 4px; left: 3px; bottom: -1px; border-radius: 4px 4px 0 0; background: var(--background-primary, #fff); }
-    .codexpp-thread-summary-profiles__icon.icon-google-drive { background: conic-gradient(from 30deg, #16a34a 0 33%, #f59e0b 0 66%, #2563eb 0); clip-path: polygon(50% 0, 100% 86%, 0 86%); }
-    .codexpp-thread-summary-profiles__icon.icon-gmail { border-radius: 3px; border: 2px solid #dc2626; border-top-color: #f59e0b; background: transparent; }
+    .codexpp-thread-summary-profiles__icon.icon-github::after { width: 8px; height: 4px; left: 3px; bottom: -1px; border-radius: 4px 4px 0 0; background: var(--background-primary, Canvas); }
+    .codexpp-thread-summary-profiles__icon.icon-google-drive { background: currentColor; clip-path: polygon(50% 0, 100% 86%, 0 86%); }
+    .codexpp-thread-summary-profiles__icon.icon-gmail { border-radius: 3px; border: 2px solid currentColor; background: transparent; }
     .codexpp-thread-summary-profiles__icon.icon-modal { border-radius: 3px; background: currentColor; }
-    .codexpp-thread-summary-profiles__icon.icon-modal::after { inset: 3px; border-left: 2px solid var(--background-primary, #fff); border-right: 2px solid var(--background-primary, #fff); }
+    .codexpp-thread-summary-profiles__icon.icon-modal::after { inset: 3px; border-left: 2px solid var(--background-primary, Canvas); border-right: 2px solid var(--background-primary, Canvas); }
     .codexpp-thread-summary-profiles__icon.icon-decodo { border-radius: 50%; background: currentColor; }
-    .codexpp-thread-summary-profiles__icon.icon-decodo::after { inset: 4px; border-radius: 50%; background: var(--background-primary, #fff); }
+    .codexpp-thread-summary-profiles__icon.icon-decodo::after { inset: 4px; border-radius: 50%; background: var(--background-primary, Canvas); }
     .codexpp-thread-summary-profiles__icon.icon-railway { background: currentColor; clip-path: polygon(50% 0, 95% 86%, 5% 86%); }
     .codexpp-thread-summary-profiles__body { min-width: 0; display: flex; flex-direction: column; gap: 0; }
     .codexpp-thread-summary-profiles__main { min-width: 0; display: grid; grid-template-columns: minmax(58px, .42fr) minmax(0, 1fr); align-items: baseline; gap: 10px; }
-    .codexpp-thread-summary-profiles__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; color: var(--text-secondary, #6b7280); }
+    .codexpp-thread-summary-profiles__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; color: var(--text-secondary, currentColor); }
     .codexpp-thread-summary-profiles__value { min-width: 0; max-width: 100%; justify-self: end; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 16px; color: var(--text-primary, currentColor); }
-    .codexpp-thread-summary-profiles__meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 15px; color: var(--text-secondary, #6b7280); }
+    .codexpp-thread-summary-profiles__meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 15px; color: var(--text-secondary, currentColor); }
     .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__body { flex: 1 1 auto; min-width: 0; }
     .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__main { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
     .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__label, .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__value { font: inherit; line-height: inherit; color: inherit; }
     .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__value { margin-left: auto; }
-    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__meta { font: inherit; line-height: inherit; color: var(--text-secondary, #6b7280); opacity: .9; }
+    .codexpp-thread-summary-profiles__row--native .codexpp-thread-summary-profiles__meta { font: inherit; line-height: inherit; color: var(--text-secondary, currentColor); opacity: .9; }
     .codexpp-thread-summary-profiles__empty[hidden] { display: none !important; }
-    .codexpp-thread-summary-profiles__row.is-warning .codexpp-thread-summary-profiles__meta { color: #b45309; }
-    .codexpp-thread-summary-profiles__row.is-error .codexpp-thread-summary-profiles__meta { color: #b91c1c; }
+    .codexpp-thread-summary-profiles__row.is-warning .codexpp-thread-summary-profiles__meta { color: var(--text-warning, var(--text-secondary, currentColor)); }
+    .codexpp-thread-summary-profiles__row.is-error .codexpp-thread-summary-profiles__meta { color: var(--text-error, var(--text-secondary, currentColor)); }
     @media (max-width: 420px) {
       [${SECTION_ATTR}="true"].codexpp-thread-summary-profiles--fallback { padding-left: 22px; padding-right: 22px; }
       .codexpp-thread-summary-profiles__main { grid-template-columns: minmax(48px, .38fr) minmax(0, 1fr); gap: 8px; }
@@ -1739,6 +1851,21 @@ function shortDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString().slice(0, 10);
+}
+
+function friendlyAccountLabel(value) {
+  const raw = cleanText(value || "", 160);
+  if (!raw || !raw.includes("@")) return raw || "Set";
+  const lower = raw.toLowerCase();
+  const known = {
+    "tommyhulihabasketballl@gmail.com": "THB",
+    "codex@thereality.report": "Codex",
+    "admin@thereality.report": "TRR",
+  };
+  if (known[lower]) return known[lower];
+  const local = raw.split("@")[0].replace(/\+.*$/, "").replace(/[._-]+/g, " ").trim();
+  const label = local.replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return cleanText(label || "Account", 80);
 }
 
 function cleanText(value, limit) {

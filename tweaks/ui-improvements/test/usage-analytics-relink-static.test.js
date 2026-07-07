@@ -1,10 +1,10 @@
 "use strict";
 
 /**
- * T5.2 — usage-analytics relink static tests
+ * T5.2 — usage IPC relink static tests
  *
  * Verify that show-usage-in-sidebar uses the shared IPC path when the
- * usage-analytics tweak is present (no second independent /wham/usage loop),
+ * built-in usage IPC path is present (no second independent /wham/usage loop),
  * and falls back gracefully when it is absent.
  *
  * All checks are static source-analysis (no DOM, no live runtime) to match
@@ -99,16 +99,16 @@ test("renderer bridge is guarded by ipcUsageConfirmed so it is never activated w
 
 // ─── 2. No duplicate independent polling loop ───────────────────────────────
 
-test("show-usage-in-sidebar does not create a second MutationObserver for usage", () => {
-  // Count MutationObserver instantiations in the feature source.
-  // There should be at most one (the existing childList+subtree observer
-  // for DOM-anchor tracking) — not a second one for usage text scanning.
+test("show-usage-in-sidebar uses the shared document observer", () => {
+  // The feature subscribes to the shared hub for DOM-anchor tracking instead
+  // of creating another broad document observer of its own.
   const moMatches = [...usageFeatureSrc.matchAll(/new MutationObserver\s*\(/g)];
   assert.equal(
     moMatches.length,
-    1,
-    `Expected exactly 1 MutationObserver in show-usage-in-sidebar, found ${moMatches.length}`,
+    0,
+    `Expected no feature-owned MutationObserver in show-usage-in-sidebar, found ${moMatches.length}`,
   );
+  assert.match(usageFeatureSrc, /subscribeDocumentMutations\(onMutate, \{ childList: true \}\)/);
 });
 
 test("show-usage-in-sidebar rAF-debounces its MutationObserver callback", () => {

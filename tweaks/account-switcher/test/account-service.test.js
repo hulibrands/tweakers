@@ -107,6 +107,99 @@ test("state includes cached account usage metadata", async () => {
   }
 });
 
+test("destructive account actions require a fresh matching intent", async () => {
+  await withTempHome(async (home) => {
+    const codexDir = path.join(home, ".codex");
+    const accountsDir = path.join(codexDir, "auth_accounts");
+    await fs.mkdir(accountsDir, { recursive: true });
+    await fs.writeFile(path.join(accountsDir, "work.json"), authWithEmail("work@example.com"));
+
+    const { createAccountService } = require("../src/account/service");
+    const service = createAccountService({ log: { info() {}, warn() {} } });
+
+    const denied = await service.handle({ action: "delete", name: "work" });
+    assert.equal(denied.ok, false);
+    assert.match(denied.error, /fresh confirmation intent/i);
+    assert.equal(await fs.readFile(path.join(accountsDir, "work.json"), "utf8"), authWithEmail("work@example.com"));
+
+    const intentResult = await service.handle({ action: "create-intent", intentAction: "delete", name: "work" });
+    assert.equal(intentResult.ok, true);
+    assert.equal(typeof intentResult.state.intent, "string");
+
+    const wrongName = await service.handle({ action: "delete", name: "personal", intent: intentResult.state.intent });
+    assert.equal(wrongName.ok, false);
+    assert.match(wrongName.error, /fresh confirmation intent/i);
+
+    const secondIntent = await service.handle({ action: "create-intent", intentAction: "delete", name: "work" });
+    const deleted = await service.handle({ action: "delete", name: "work", intent: secondIntent.state.intent });
+    assert.equal(deleted.ok, true);
+    await assert.rejects(fs.stat(path.join(accountsDir, "work.json")), { code: "ENOENT" });
+
+    const reused = await service.handle({ action: "delete", name: "work", intent: secondIntent.state.intent });
+    assert.equal(reused.ok, false);
+    assert.match(reused.error, /fresh confirmation intent/i);
+  });
+});
+
+test("switching writes private backups and prunes stale account-switcher backups", async () => {
+  await withTempHome(async (home) => {
+    const codexDir = path.join(home, ".codex");
+    const accountsDir = path.join(codexDir, "auth_accounts");
+    await fs.mkdir(accountsDir, { recursive: true });
+    await fs.writeFile(path.join(codexDir, "auth.json"), authWithEmail("active@example.com"), { mode: 0o644 });
+    await fs.writeFile(path.join(accountsDir, "work.json"), authWithEmail("work@example.com"), { mode: 0o644 });
+    await fs.writeFile(path.join(codexDir, "auth.account-switcher-unrelated.txt"), "keep");
+
+    for (let index = 0; index < 10; index += 1) {
+      const file = path.join(codexDir, `auth.account-switcher-prev-2026-05-${String(index + 1).padStart(2, "0")}T00-00-00-000Z.json`);
+      await fs.writeFile(file, authWithEmail(`old-${index}@example.com`));
+      await touch(file, `2026-05-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`);
+    }
+
+    const { createAccountService } = require("../src/account/service");
+    const service = createAccountService({ log: { info() {}, warn() {} } });
+    const intentResult = await service.handle({ action: "create-intent", intentAction: "switch", name: "work" });
+    const switched = await service.handle({ action: "switch", name: "work", intent: intentResult.state.intent });
+
+    assert.equal(switched.ok, true);
+    const entries = await fs.readdir(codexDir);
+    const backups = entries.filter((entry) => /^auth\.account-switcher-(?:prev|backup)-.+\.json$/.test(entry)).sort();
+    assert.equal(backups.length, 8);
+    assert.equal(entries.includes("auth.account-switcher-unrelated.txt"), true);
+    assert.equal(backups.some((entry) => entry.includes("2026-05-01")), false);
+    assert.equal(backups.some((entry) => entry.includes("2026-05-02")), false);
+    assert.equal(backups.some((entry) => !entry.includes("2026-05-")), true);
+
+    if (process.platform !== "win32") {
+      const newestBackup = backups.find((entry) => !entry.includes("2026-05-"));
+      assert.ok(newestBackup);
+      const backupMode = (await fs.stat(path.join(codexDir, newestBackup))).mode & 0o777;
+      const activeMode = (await fs.stat(path.join(codexDir, "auth.json"))).mode & 0o777;
+      assert.equal(backupMode, 0o600);
+      assert.equal(activeMode, 0o600);
+    }
+  });
+});
+
+test("saving the current account stores the snapshot as a private file", async () => {
+  await withTempHome(async (home) => {
+    const codexDir = path.join(home, ".codex");
+    const accountsDir = path.join(codexDir, "auth_accounts");
+    await fs.mkdir(accountsDir, { recursive: true });
+    await fs.writeFile(path.join(codexDir, "auth.json"), authWithEmail("active@example.com"), { mode: 0o644 });
+
+    const { createAccountService } = require("../src/account/service");
+    const service = createAccountService({ log: { warn() {} } });
+    const result = await service.handle({ action: "save", name: "active" });
+
+    assert.equal(result.ok, true);
+    if (process.platform !== "win32") {
+      const savedMode = (await fs.stat(path.join(accountsDir, "active.json"))).mode & 0o777;
+      assert.equal(savedMode, 0o600);
+    }
+  });
+});
+
 test("refresh-usage stores active account usage", async () => {
   const originalHome = process.env.HOME;
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-account-switcher-"));

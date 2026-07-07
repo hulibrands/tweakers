@@ -26,6 +26,8 @@ test("usage bridge ready event is reusable across hot reloads", () => {
 });
 
 test("sidebar project color bridge uses shadcn 700 color families", () => {
+  assert.match(source, /const PROJECT_COLOR_PALETTE = Object\.freeze\(\[/);
+  assert.match(source, /const PALETTE = PROJECT_COLOR_PALETTE;/);
   assert.match(source, /id: "blue", label: "Blue", value: "#1d4ed8"/);
   assert.match(source, /id: "rose", label: "Rose", value: "#be123c"/);
   assert.match(source, /id: "mauve", label: "Mauve", value: "#524959"/);
@@ -62,9 +64,34 @@ test("project context menu exposes color and settings shortcuts", () => {
   assert.match(source, /Could not open Project settings for/);
   assert.match(source, /nativeMenu\.insertBefore\(settingsItem, removeItem\)/);
   assert.match(source, /nativeMenu\.insertBefore\(trigger, removeItem\)/);
-  assert.match(source, /window\.setTimeout\(injectColorMenuIntoNativeMenu, delay\)/);
+  assert.match(source, /setMenuTimer\(injectColorMenuIntoNativeMenu, delay\)/);
   assert.match(source, /const openMenuRoots = \(\) =>/);
   assert.match(source, /const nativeMenuItems = \(root\) =>/);
+  assert.match(source, /const isNativeProjectMenuRoot = \(node\) =>/);
+  assert.match(source, /!mainSidebar\(\)\?\.contains\?\.\(node\)/);
+  assert.match(source, /clearLeakedMenuItems\(sidebar\)/);
+  assert.match(source, /const menuTimers = new Set\(\);/);
+  assert.match(source, /const setMenuTimer = \(callback, delay\) =>/);
+  assert.match(source, /const clearMenuTimers = \(\) =>/);
+  assert.match(source, /clearMenuTimers\(\);[\s\S]*pendingContextMenu = null;/);
+  assert.match(source, /if \(disposed \|\| !pendingContextMenu \|\| Date\.now\(\) - pendingContextMenu\.at > 1500\) return;/);
+});
+
+test("message metrics are opt-in and archived scans require explicit opt-in", () => {
+  assert.match(source, /"show-message-metrics-on-hover": false/);
+  assert.match(source, /process\.env\.SHADGPT_UI_MESSAGE_METRICS_INCLUDE_ARCHIVED === "1"/);
+  assert.match(source, /path\.join\(home, "\.codex", "sessions"\)/);
+  assert.match(source, /path\.join\(home, "\.codex", "archived_sessions"\)/);
+});
+
+test("main legacy brand scrubber disconnects injected page observers", () => {
+  assert.match(source, /const disposalScript = legacyBrandMainDisposalScript\(\);/);
+  assert.match(source, /previous\?\.dispose\?\.\(\);[\s\S]*const inject = \(wc\) =>/);
+  assert.match(source, /const disconnectInjectedObserver = \(wc\) =>/);
+  assert.match(source, /wc\.executeJavaScript\(disposalScript, true\)/);
+  assert.match(source, /function legacyBrandMainDisposalScript\(\)/);
+  assert.match(source, /scrubber\?\.observer\?\.disconnect\?\.\(\);/);
+  assert.match(source, /delete window\[KEY\];/);
 });
 
 test("sidebar project rows do not render expanded projects as cards", () => {

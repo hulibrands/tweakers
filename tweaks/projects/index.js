@@ -37,6 +37,8 @@ const MAX_ENV_SCAN_DEPTH = 6;
 const DEFAULT_PROJECT_ENV_SCAN_TIMEOUT_MS = 8000;
 const MIN_PROJECT_ENV_SCAN_TIMEOUT_MS = 1000;
 const MAX_PROJECT_ENV_SCAN_TIMEOUT_MS = 60000;
+const PROJECT_CONTEXT_SCAN_DELAY_MS = 250;
+const PROJECT_CONTEXT_TYPING_PAUSE_MS = 1500;
 const PROJECT_COLOR_OPTIONS = Object.freeze([
   { id: "auto", label: "Auto", value: "#71717a" },
   { id: "neutral", label: "Neutral", value: "#404040" },
@@ -73,9 +75,11 @@ const PROJECT_OVERLAY_OPTIONS = Object.freeze([
   { id: "strong", label: "Strong" },
 ]);
 const DEFAULT_PROJECT_OVERLAY_INTENSITY = "medium";
-const PROJECT_PAGE_SYNC_INTERVAL_MS = 4000;
+const PROJECT_PAGE_SYNC_INTERVAL_MS = 30000;
+const PROJECT_PAGE_SYNC_EVENT_THROTTLE_MS = 750;
 const PROJECT_PAGE_SYNC_UNAVAILABLE_RETRY_MS = 15000;
 const PROJECT_PAGE_SYNC_ERROR_RETRY_MS = 8000;
+const PROJECT_PAGE_SYNC_SLOW_LOG_MS = 75;
 const agentsWriter = loadAgentsWriter() || {};
 const chromeRouting = loadChromeRouting();
 
@@ -153,13 +157,17 @@ module.exports = {
     saveChromeVerifierResult,
     normalizeSidebarProjects,
     detectActiveProjectFromConversationContext,
+    isProjectContextComposerTarget,
+    projectContextTypingPauseMs: () => PROJECT_CONTEXT_TYPING_PAUSE_MS,
     extractProjectPathFromVisibleText,
     activeChromeProfileTileState,
     buildProjectConnectionInstructionBlock: agentsWriter.buildProjectConnectionInstructionBlock,
     isProjectAgentsInstructionWriteDisabled: agentsWriter.isProjectAgentsInstructionWriteDisabled,
     previewProjectConnectionInstructions: agentsWriter.previewProjectConnectionInstructions,
+    projectAgentsInstructionPluginRawOutputEnabled: agentsWriter.projectAgentsInstructionPluginRawOutputEnabled,
     projectAgentsInstructionPluginWriteDisabled: agentsWriter.projectAgentsInstructionPluginWriteDisabled,
     projectConnectionInstructionSummary: agentsWriter.projectConnectionInstructionSummary,
+    setProjectAgentsInstructionPluginRawOutputEnabled: agentsWriter.setProjectAgentsInstructionPluginRawOutputEnabled,
     setProjectAgentsInstructionWriteDisabled: agentsWriter.setProjectAgentsInstructionWriteDisabled,
     setProjectAgentsInstructionPluginWriteDisabled: agentsWriter.setProjectAgentsInstructionPluginWriteDisabled,
     syncProjectConnectionInstructions: agentsWriter.syncProjectConnectionInstructions,
@@ -200,6 +208,7 @@ function startMain(api, cleanup) {
   cleanup.push(api.ipc.handle("setActiveChromeProject", (projectPath) => handlers.setActiveChromeProject(projectPath)));
   cleanup.push(api.ipc.handle("setAgentsInstructionWritePreference", (input) => handlers.setAgentsInstructionWritePreference(input)));
   cleanup.push(api.ipc.handle("setAgentsInstructionPluginWritePreference", (input) => handlers.setAgentsInstructionPluginWritePreference(input)));
+  cleanup.push(api.ipc.handle("setAgentsInstructionPluginRawOutputPreference", (input) => handlers.setAgentsInstructionPluginRawOutputPreference(input)));
   cleanup.push(api.ipc.handle("previewProjectAgentsInstruction", (input) => handlers.previewProjectAgentsInstruction(input)));
   cleanup.push(api.ipc.handle("repairProjectAgentsInstruction", (input) => handlers.repairProjectAgentsInstruction(input)));
   cleanup.push(api.ipc.handle("runChromeRoutingVerifier", (input) => handlers.runChromeRoutingVerifier(input)));
@@ -373,6 +382,15 @@ function createMainHandlers(api) {
     };
   };
 
+  const setAgentsInstructionPluginRawOutputPreference = (input) => {
+    const preference = agentsWriter.setProjectAgentsInstructionPluginRawOutputEnabled(input, agentsWriterOptions());
+    return {
+      ...preference,
+      preview: agentsWriter.previewProjectConnectionInstructions(input, agentsWriterOptions()),
+      agentsInstruction: syncAgentsInstruction(input),
+    };
+  };
+
   const previewProjectAgentsInstruction = (input) => agentsWriter.previewProjectConnectionInstructions(input, agentsWriterOptions());
 
   const runChromeRoutingVerifier = (input = {}) => {
@@ -446,6 +464,7 @@ function createMainHandlers(api) {
       supabaseProfiles: listSupabaseProfiles(),
       agentsInstructionWritesDisabled: agentsWriter.isProjectAgentsInstructionWriteDisabled(projectPath, agentsWriterOptions()),
       agentsInstructionPluginWriteDisabled: agentsWriter.projectAgentsInstructionPluginWriteDisabled(projectPath, agentsWriterOptions()),
+      agentsInstructionPluginRawOutputEnabled: agentsWriter.projectAgentsInstructionPluginRawOutputEnabled(projectPath, agentsWriterOptions()),
       agentsInstructionPreview: agentsWriter.previewProjectConnectionInstructions({ projectPath, projectName }, agentsWriterOptions()),
       projectColor: projectColorStorage[projectColorKey] || "auto",
       projectOverlayIntensity: projectOverlayStorage[projectColorKey] || DEFAULT_PROJECT_OVERLAY_INTENSITY,
@@ -481,6 +500,7 @@ function createMainHandlers(api) {
     saveSidebarProjectOrder,
     setAgentsInstructionWritePreference,
     setAgentsInstructionPluginWritePreference,
+    setAgentsInstructionPluginRawOutputPreference,
     previewProjectAgentsInstruction,
     repairProjectAgentsInstruction,
     runChromeRoutingVerifier,
@@ -2175,11 +2195,12 @@ function revealEnvValueFromDisk(input, options = {}) {
   const fs = options.fs || require("node:fs");
   const key = String(input?.key || "");
   if (!key) throw new Error("Environment key is required.");
+  requireEnvActionConfirmation(input, "revealing");
   const { filePath } = resolveProjectEnvFile(input, options, "revealed");
   const entries = parseDotenv(fs.readFileSync(filePath, "utf8"), filePath);
   const entry = entries.find((candidate) => candidate.key === key);
   if (!entry) throw new Error(`Environment key was not found: ${key}`);
-  return { key, value: entry.value, sourceFile: filePath };
+  return { key, value: entry.value, sourceFile: filePath, audit: envActionAudit("revealed", key, filePath) };
 }
 
 function updateEnvValueOnDisk(input, options = {}) {
@@ -2187,6 +2208,7 @@ function updateEnvValueOnDisk(input, options = {}) {
   const key = String(input?.key || "");
   const value = String(input?.value ?? "");
   if (!key) throw new Error("Environment key is required.");
+  requireEnvActionConfirmation(input, "editing");
   const { filePath } = resolveProjectEnvFile(input, options, "edited");
   const original = fs.readFileSync(filePath, "utf8");
   const lines = original.split(/\r?\n/);
@@ -2199,7 +2221,21 @@ function updateEnvValueOnDisk(input, options = {}) {
   });
   if (!changed) throw new Error(`Environment key was not found: ${key}`);
   fs.writeFileSync(filePath, next.join("\n"), "utf8");
-  return { key, value: redactValue(value), sourceFile: filePath };
+  return { key, value: redactValue(value), sourceFile: filePath, audit: envActionAudit("edited", key, filePath) };
+}
+
+function requireEnvActionConfirmation(input, action) {
+  if (input?.confirmed === true) return;
+  throw new Error(`Confirm before ${action} an environment value.`);
+}
+
+function envActionAudit(action, key, sourceFile) {
+  return {
+    action,
+    key,
+    sourceFile,
+    at: new Date().toISOString(),
+  };
 }
 
 function resolveProjectEnvFile(input, options = {}, action = "used") {
@@ -2217,7 +2253,7 @@ function resolveProjectEnvFile(input, options = {}, action = "used") {
   const relative = path.relative(realProjectPath, realFilePath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Environment file must be inside the project.");
   if (!isSupportedEnvFileName(path.basename(requestedPath))) throw new Error(`Only project .env files can be ${action}.`);
-  return { projectPath: realProjectPath, filePath: realFilePath };
+  return { projectPath: realProjectPath, filePath: requestedPath };
 }
 
 function formatDotenvValue(value, previousRaw = "") {
@@ -2281,16 +2317,18 @@ function formatSupabaseTomlBlock(profile) {
 }
 
 function findTomlTableBlock(content, tableName) {
-  const header = `[${tableName}]`;
-  const start = content.indexOf(header);
-  if (start < 0) return null;
-  const rest = content.slice(start + header.length);
-  const nextMatch = /\n\[[^\]]+\]/.exec(rest);
-  const end = nextMatch ? start + header.length + nextMatch.index + 1 : content.length;
+  const text = String(content || "");
+  const header = new RegExp(`^\\s*\\[${escapeRegExp(tableName)}\\]\\s*(?:#.*)?$`, "m");
+  const match = header.exec(text);
+  if (!match) return null;
+  const bodyStart = match.index + match[0].length;
+  const rest = text.slice(bodyStart);
+  const nextMatch = /^\s*\[[^\]\r\n]+\]\s*(?:#.*)?$/m.exec(rest);
+  const end = nextMatch ? bodyStart + nextMatch.index : text.length;
   return {
-    start,
+    start: match.index,
     end,
-    body: content.slice(start + header.length, end),
+    body: text.slice(bodyStart, end),
   };
 }
 
@@ -2384,6 +2422,7 @@ function startRenderer(api, cleanup) {
       '<path d="M6 8h8M6 11h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
       "</svg>",
     render(root) {
+      scheduleProjectPagesSync({ force: true, reason: "render-main" });
       renderProjectsPage(root, api);
     },
   });
@@ -2394,18 +2433,46 @@ function startRenderer(api, cleanup) {
     projectPageHandles.clear();
   });
   const pageSyncState = createProjectPageSyncState();
-  syncProjectSettingsPages(api, projectPageHandles, pageSyncState);
-  const syncProjectPagesNow = () => {
-    pageSyncState.nextAllowedAt = 0;
-    syncProjectSettingsPages(api, projectPageHandles, pageSyncState);
+  const runProjectPagesSync = (options = {}) => {
+    void syncProjectSettingsPages(api, projectPageHandles, pageSyncState, Date.now(), options);
   };
+  const scheduleProjectPagesSync = (options = {}) => {
+    if (options.force) pageSyncState.pendingForce = true;
+    if (options.reason) pageSyncState.pendingReason = options.reason;
+    if (pageSyncState.pendingTimer) return;
+    pageSyncState.pendingTimer = window.setTimeout(() => {
+      pageSyncState.pendingTimer = null;
+      const force = pageSyncState.pendingForce;
+      const reason = pageSyncState.pendingReason;
+      pageSyncState.pendingForce = false;
+      pageSyncState.pendingReason = "";
+      pageSyncState.nextAllowedAt = 0;
+      runProjectPagesSync({ force, reason });
+    }, options.force ? 0 : PROJECT_PAGE_SYNC_EVENT_THROTTLE_MS);
+  };
+  runProjectPagesSync({ reason: "start" });
+  const syncProjectPagesNow = () => scheduleProjectPagesSync({ reason: "project-color" });
   window.addEventListener(PROJECT_COLOR_EVENT, syncProjectPagesNow);
   cleanup.push(() => window.removeEventListener(PROJECT_COLOR_EVENT, syncProjectPagesNow));
+  // Sync as soon as the settings-injector reports the Settings surface opened;
+  // otherwise a parked sync leaves project child pages out of the sidebar for
+  // up to a full interval after the user opens Settings.
+  const onSettingsSurface = (event) => {
+    if (event?.detail?.visible === true) scheduleProjectPagesSync({ reason: "settings-open" });
+  };
+  window.addEventListener("codexpp:settings-surface", onSettingsSurface);
+  cleanup.push(() => window.removeEventListener("codexpp:settings-surface", onSettingsSurface));
   const pageSyncTimer = setInterval(
-    () => syncProjectSettingsPages(api, projectPageHandles, pageSyncState),
+    () => runProjectPagesSync({ reason: "interval" }),
     PROJECT_PAGE_SYNC_INTERVAL_MS,
   );
-  cleanup.push(() => clearInterval(pageSyncTimer));
+  cleanup.push(() => {
+    clearInterval(pageSyncTimer);
+    if (pageSyncState.pendingTimer) {
+      clearTimeout(pageSyncState.pendingTimer);
+      pageSyncState.pendingTimer = null;
+    }
+  });
 }
 
 function createProjectPageSyncState() {
@@ -2413,20 +2480,63 @@ function createProjectPageSyncState() {
     nextAllowedAt: 0,
     mainUnavailableLogged: false,
     lastErrorMessage: "",
+    lastWantedKey: "",
+    pendingTimer: null,
+    syncCount: 0,
+    noopCount: 0,
+    registerCount: 0,
+    removeCount: 0,
+    settingsClosedSkipCount: 0,
+    settingsClosedLogged: false,
+    pendingForce: false,
+    pendingReason: "",
   };
 }
 
-async function syncProjectSettingsPages(api, handles, state = createProjectPageSyncState(), now = Date.now()) {
-  if (now < state.nextAllowedAt) return false;
+async function syncProjectSettingsPages(api, handles, state = createProjectPageSyncState(), now = Date.now(), options = {}) {
+  if (!options.force && now < state.nextAllowedAt) return false;
+  if (!options.force && !projectSettingsSurfaceMaybePresent()) {
+    state.settingsClosedSkipCount += 1;
+    state.nextAllowedAt = now + PROJECT_PAGE_SYNC_INTERVAL_MS;
+    if (!state.settingsClosedLogged) {
+      api.log?.debug?.("[projects] project settings page sync parked while Settings is closed", {
+        reason: options.reason || "unknown",
+        syncCount: state.syncCount,
+        skipped: state.settingsClosedSkipCount,
+      });
+      state.settingsClosedLogged = true;
+    }
+    return false;
+  }
+  const startedAt = Date.now();
+  state.syncCount += 1;
   try {
     const projects = await listProjectSettingsPageEntries(api);
     state.nextAllowedAt = 0;
     state.mainUnavailableLogged = false;
+    state.settingsClosedLogged = false;
     state.lastErrorMessage = "";
     const wanted = new Set();
-    for (const project of projects) {
+    const entries = projects.map((project) => {
       const pageId = `project-${slugify(project.name || project.projectPath)}`;
       const signature = projectSettingsPageSignature(project);
+      return { project, pageId, signature };
+    });
+    const wantedKey = entries.map((entry) => `${entry.pageId}\u0000${entry.signature}`).join("\n");
+    if (wantedKey === state.lastWantedKey && projectSettingsHandlesMatch(handles, entries)) {
+      state.noopCount += 1;
+      logProjectPageSyncIfSlow(api, state, {
+        durationMs: Date.now() - startedAt,
+        projectCount: entries.length,
+        registered: 0,
+        removed: 0,
+        noop: true,
+      });
+      return true;
+    }
+    state.lastWantedKey = wantedKey;
+    let registered = 0;
+    for (const { project, pageId, signature } of entries) {
       wanted.add(pageId);
       const existing = handles.get(pageId);
       if (existing?.signature === signature) continue;
@@ -2456,12 +2566,24 @@ async function syncProjectSettingsPages(api, handles, state = createProjectPageS
         },
       });
       handles.set(pageId, { handle, signature });
+      registered += 1;
     }
+    let removed = 0;
     for (const [pageId, entry] of handles) {
       if (wanted.has(pageId)) continue;
       unregisterSettingsHandle(entry.handle);
       handles.delete(pageId);
+      removed += 1;
     }
+    state.registerCount += registered;
+    state.removeCount += removed;
+    logProjectPageSyncIfChangedOrSlow(api, state, {
+      durationMs: Date.now() - startedAt,
+      projectCount: entries.length,
+      registered,
+      removed,
+      noop: false,
+    });
     return true;
   } catch (error) {
     const message = error?.message || String(error);
@@ -2480,6 +2602,47 @@ async function syncProjectSettingsPages(api, handles, state = createProjectPageS
     }
     return false;
   }
+}
+
+function projectSettingsSurfaceMaybePresent() {
+  if (typeof document === "undefined") return false;
+  // Prefer the settings-injector's authoritative signal; the selector probe
+  // below matches any open dialog, so it can only over-approximate.
+  const injectorFlag = document.documentElement?.dataset?.codexppSettingsSurface;
+  if (injectorFlag === "true") return true;
+  if (injectorFlag === "false") return false;
+  if (typeof location !== "undefined" && location.pathname.startsWith("/settings")) return true;
+  return document.querySelector(
+    "[role='dialog'],[data-radix-dialog-content],nav[aria-label='Settings'],[role='navigation'][aria-label='Settings']",
+  ) !== null;
+}
+
+function projectSettingsHandlesMatch(handles, entries) {
+  if (handles.size !== entries.length) return false;
+  return entries.every((entry) => handles.get(entry.pageId)?.signature === entry.signature);
+}
+
+function logProjectPageSyncIfChangedOrSlow(api, state, summary) {
+  if (summary.registered > 0 || summary.removed > 0 || summary.durationMs >= PROJECT_PAGE_SYNC_SLOW_LOG_MS) {
+    api.log?.debug?.("[projects] project settings pages sync", {
+      ...summary,
+      syncCount: state.syncCount,
+      noopCount: state.noopCount,
+      totalRegistered: state.registerCount,
+      totalRemoved: state.removeCount,
+    });
+  }
+}
+
+function logProjectPageSyncIfSlow(api, state, summary) {
+  if (summary.durationMs < PROJECT_PAGE_SYNC_SLOW_LOG_MS) return;
+  api.log?.debug?.("[projects] project settings pages sync noop", {
+    ...summary,
+    syncCount: state.syncCount,
+    noopCount: state.noopCount,
+    totalRegistered: state.registerCount,
+    totalRemoved: state.removeCount,
+  });
 }
 
 async function listProjectSettingsPageEntries(api) {
@@ -2548,11 +2711,17 @@ function unregisterSettingsHandle(handle) {
 
 function startActiveProjectContextDetector(api) {
   let disposed = false;
-  let scheduled = false;
+  let scheduledTimer = null;
+  let lastComposerInputAt = 0;
   let lastProjectPath = "";
 
   const run = async () => {
     if (disposed) return;
+    const quietDelay = projectContextComposerQuietDelayMs(lastComposerInputAt);
+    if (quietDelay > 0) {
+      schedule(quietDelay);
+      return;
+    }
     try {
       const activeProject = detectActiveProjectFromConversationContext({
         visibleText: activeProjectConversationText(),
@@ -2566,24 +2735,87 @@ function startActiveProjectContextDetector(api) {
     }
   };
 
-  const schedule = () => {
-    if (scheduled || disposed) return;
-    scheduled = true;
-    window.setTimeout(() => {
-      scheduled = false;
+  const schedule = (delayMs = PROJECT_CONTEXT_SCAN_DELAY_MS) => {
+    if (disposed) return;
+    const quietDelay = projectContextComposerQuietDelayMs(lastComposerInputAt);
+    const delay = Math.max(delayMs, quietDelay);
+    if (scheduledTimer) window.clearTimeout(scheduledTimer);
+    scheduledTimer = window.setTimeout(() => {
+      scheduledTimer = null;
       run();
-    }, 250);
+    }, delay);
   };
 
-  const observer = new MutationObserver(schedule);
+  const markComposerInput = (event) => {
+    if (!isProjectContextComposerTarget(event?.target)) return;
+    lastComposerInputAt = Date.now();
+    schedule(PROJECT_CONTEXT_TYPING_PAUSE_MS);
+  };
+
+  const observer = new MutationObserver((mutations) => {
+    if (mutations.every(shouldIgnoreProjectContextMutation)) return;
+    schedule();
+  });
   observer.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
+  document.addEventListener("beforeinput", markComposerInput, true);
+  document.addEventListener("input", markComposerInput, true);
   const timer = window.setInterval(run, 2500);
   run();
   return () => {
     disposed = true;
+    if (scheduledTimer) window.clearTimeout(scheduledTimer);
     observer.disconnect();
+    document.removeEventListener("beforeinput", markComposerInput, true);
+    document.removeEventListener("input", markComposerInput, true);
     window.clearInterval(timer);
   };
+}
+
+function projectContextComposerQuietDelayMs(lastComposerInputAt, now = Date.now()) {
+  if (!lastComposerInputAt) return 0;
+  return Math.max(0, PROJECT_CONTEXT_TYPING_PAUSE_MS - (now - lastComposerInputAt));
+}
+
+function shouldIgnoreProjectContextMutation(mutation) {
+  const nodes = [mutation?.target, ...Array.from(mutation?.addedNodes || [])].filter(Boolean);
+  return nodes.length > 0 && nodes.every(isProjectContextComposerMutationNode);
+}
+
+function isProjectContextComposerMutationNode(node) {
+  const element = projectContextElementFromTarget(node);
+  if (!element) return false;
+  if (isProjectContextComposerTarget(element)) return true;
+  if (typeof element.querySelector === "function") {
+    return Boolean(element.querySelector("textarea, input, [contenteditable='true'], [contenteditable='plaintext-only'], .ProseMirror"));
+  }
+  return false;
+}
+
+function isProjectContextComposerTarget(target) {
+  const element = projectContextElementFromTarget(target);
+  if (!element) return false;
+  const tagName = String(element.tagName || "").toLowerCase();
+  const type = String(element.getAttribute?.("type") || "text").toLowerCase();
+  const editable = element.getAttribute?.("contenteditable");
+  if (tagName === "textarea") return true;
+  if (tagName === "input" && !/^(button|checkbox|color|file|hidden|image|radio|range|reset|submit)$/.test(type)) return true;
+  if (editable === "true" || editable === "plaintext-only") return true;
+  return Boolean(element.closest?.([
+    "[data-testid*='composer']",
+    "[data-testid*='prompt']",
+    "[aria-label*='composer']",
+    "[aria-label*='message']",
+    "[data-codex-composer]",
+    ".ProseMirror",
+  ].join(", ")));
+}
+
+function projectContextElementFromTarget(target) {
+  if (!target) return null;
+  if (typeof HTMLElement === "function" && target instanceof HTMLElement) return target;
+  if (target.parentElement && typeof target.parentElement === "object") return target.parentElement;
+  if (typeof target.closest === "function" || typeof target.getAttribute === "function") return target;
+  return null;
 }
 
 function activeProjectConversationText(rootDocument = document) {
@@ -3084,12 +3316,19 @@ function agentsInstructionWriteRow(project, overview, context) {
   });
   const pluginToggles = el("div", "agents-plugin-toggle-list");
   const disabledPlugins = new Set(overview.agentsInstructionPluginWriteDisabled || []);
+  const rawPlugins = new Set(overview.agentsInstructionPluginRawOutputEnabled || []);
   for (const plugin of agentsPluginToggleOptions()) {
     const pluginLabel = el("label", "toggle-option compact-toggle-option");
     const pluginCheckbox = document.createElement("input");
     pluginCheckbox.type = "checkbox";
     pluginCheckbox.checked = !disabledPlugins.has(plugin.id);
     pluginLabel.append(pluginCheckbox, twoLineText(plugin.label, plugin.description));
+    const rawLabel = el("label", "toggle-option compact-toggle-option raw-toggle-option");
+    const rawCheckbox = document.createElement("input");
+    rawCheckbox.type = "checkbox";
+    rawCheckbox.checked = rawPlugins.has(plugin.id);
+    rawCheckbox.disabled = !pluginCheckbox.checked;
+    rawLabel.append(rawCheckbox, twoLineText(`${plugin.label} raw`, "Write account/path identifiers"));
     pluginCheckbox.addEventListener("change", async () => {
       const result = await context.api.ipc.invoke("setAgentsInstructionPluginWritePreference", {
         projectPath: project.projectPath,
@@ -3097,12 +3336,25 @@ function agentsInstructionWriteRow(project, overview, context) {
         pluginId: plugin.id,
         disabled: !pluginCheckbox.checked,
       });
+      rawCheckbox.disabled = !pluginCheckbox.checked;
       status.textContent = pluginCheckbox.checked
         ? `${plugin.label} writes enabled`
         : `${plugin.label} writes disabled`;
       updateAgentsPreviewNode(project, result.preview);
     });
-    pluginToggles.appendChild(pluginLabel);
+    rawCheckbox.addEventListener("change", async () => {
+      const result = await context.api.ipc.invoke("setAgentsInstructionPluginRawOutputPreference", {
+        projectPath: project.projectPath,
+        projectName: project.name,
+        pluginId: plugin.id,
+        enabled: rawCheckbox.checked,
+      });
+      status.textContent = rawCheckbox.checked
+        ? `${plugin.label} raw output enabled`
+        : `${plugin.label} raw output disabled`;
+      updateAgentsPreviewNode(project, result.preview);
+    });
+    pluginToggles.append(pluginLabel, rawLabel);
   }
   row.querySelector(".row-control").append(label, pluginToggles, status);
   return row;
@@ -3906,19 +4158,30 @@ function envInventoryView(project, inventory, api) {
         const editor = input("New value");
         editor.type = "password";
         editor.autocomplete = "off";
+        const auditStatus = el("span", "inline-help env-audit-status", "");
         const reveal = actionButton("Reveal", async () => {
-          const result = await api.ipc.invoke("revealEnvValue", { projectPath: project.projectPath, filePath: file.path, key: entry.key });
+          if (!confirmSensitiveEnvAction("reveal", file.relativePath, entry.key)) {
+            auditStatus.textContent = "Reveal cancelled";
+            return;
+          }
+          const result = await api.ipc.invoke("revealEnvValue", { projectPath: project.projectPath, filePath: file.path, key: entry.key, confirmed: true });
           value.textContent = result.value;
           editor.value = result.value;
           reveal.textContent = "Revealed";
+          auditStatus.textContent = envAuditStatusText(result.audit);
         }, "secondary");
         const save = actionButton("Save", async () => {
-          const result = await api.ipc.invoke("updateEnvValue", { projectPath: project.projectPath, filePath: file.path, key: entry.key, value: editor.value });
+          if (!confirmSensitiveEnvAction("edit", file.relativePath, entry.key)) {
+            auditStatus.textContent = "Edit cancelled";
+            return;
+          }
+          const result = await api.ipc.invoke("updateEnvValue", { projectPath: project.projectPath, filePath: file.path, key: entry.key, value: editor.value, confirmed: true });
           value.textContent = result.value;
           editor.value = "";
           save.textContent = "Saved";
+          auditStatus.textContent = envAuditStatusText(result.audit);
         });
-        line.append(el("code", "env-key", entry.key), value, editor, reveal, save);
+        line.append(el("code", "env-key", entry.key), value, editor, reveal, save, auditStatus);
         group.appendChild(line);
       }
       fileBlock.appendChild(group);
@@ -3926,6 +4189,19 @@ function envInventoryView(project, inventory, api) {
     card.appendChild(fileBlock);
   }
   return card;
+}
+
+function confirmSensitiveEnvAction(action, relativePath, key) {
+  if (typeof globalThis.confirm !== "function") return false;
+  const verb = action === "edit" ? "Edit" : "Reveal";
+  return globalThis.confirm(`${verb} ${key} in ${relativePath}?`);
+}
+
+function envAuditStatusText(audit) {
+  if (!audit?.action || !audit?.key || !audit?.at) return "";
+  const label = audit.action === "edited" ? "Edited" : "Revealed";
+  const time = new Date(audit.at).toLocaleTimeString();
+  return `${label} ${audit.key} at ${time}`;
 }
 
 function lazyEnvInventoryView(project, api) {
@@ -4297,8 +4573,9 @@ function projectsCss() {
     .env-file summary { cursor: pointer; font-weight: 650; font-size: 13px; }
     .env-category { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
     .env-category-title { font-size: 12px; color: var(--text-secondary, #6b7280); text-transform: uppercase; letter-spacing: 0; }
-    .env-key-row { display: grid; grid-template-columns: minmax(150px, 220px) minmax(80px, .7fr) minmax(120px, 1fr) auto auto; gap: 8px; align-items: center; }
+    .env-key-row { display: grid; grid-template-columns: minmax(150px, 220px) minmax(80px, .7fr) minmax(120px, 1fr) auto auto minmax(120px, .5fr); gap: 8px; align-items: center; }
     .env-key, .env-value { overflow-wrap: anywhere; }
+    .env-audit-status { min-width: 0; overflow-wrap: anywhere; }
     .empty-state { color: var(--text-secondary, #6b7280); font-size: 13px; }
     @media (max-width: 720px) {
       .project-summary, .setting-row, .env-key-row { grid-template-columns: 1fr; }
@@ -4741,7 +5018,8 @@ function cleanProjectLabel(value, projectPath = "") {
     const basename = projectPath.split(/[\\/]/).filter(Boolean).pop();
     if (basename) label = label.replace(new RegExp(`\\s+${escapeRegExp(basename)}$`, "i"), "");
   }
-  label = label.replace(/^ShadGPT\s+codex-plusplus$/i, "ShadGPT");
+  const legacyProjectLabel = ["codex", "plusplus"].join("-");
+  label = label.replace(new RegExp(`^ShadGPT\\s+${legacyProjectLabel}$`, "i"), "ShadGPT");
   return label;
 }
 

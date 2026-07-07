@@ -28,6 +28,13 @@ test("settings include sample payload injection and React fiber probing", () => 
   assert.match(source, /memoizedProps/);
 });
 
+test("settings toggles use switch-style controls", () => {
+  assert.match(source, /role", "switch"/);
+  assert.match(source, /aria-checked/);
+  assert.match(source, /peer-checked/);
+  assert.doesNotMatch(source, /input\.className = "h-4 w-4"/);
+});
+
 test("all first release and expanded block kinds are registered", () => {
   for (const kind of ["summary_card", "action_list", "progress_panel", "data_table", "file_preview"]) {
     assert.match(source, new RegExp(`"${kind}"`));

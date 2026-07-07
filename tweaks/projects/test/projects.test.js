@@ -79,6 +79,25 @@ test("active project context detector maps conversation cwd to the saved sidebar
   );
 });
 
+test("active project context detector treats prompt fields as typing surfaces", () => {
+  const previousHTMLElement = global.HTMLElement;
+  global.HTMLElement = FakeElement;
+  try {
+    const textarea = new FakeElement("textarea");
+    const checkbox = new FakeElement("input");
+    checkbox.setAttribute("type", "checkbox");
+    const editable = new FakeElement("div");
+    editable.setAttribute("contenteditable", "true");
+
+    assert.equal(tweak.isProjectContextComposerTarget(textarea), true);
+    assert.equal(tweak.isProjectContextComposerTarget(editable), true);
+    assert.equal(tweak.isProjectContextComposerTarget(checkbox), false);
+    assert.equal(tweak.projectContextTypingPauseMs(), 1500);
+  } finally {
+    global.HTMLElement = previousHTMLElement;
+  }
+});
+
 test("project discovery follows saved sidebar project order", () => {
   const home = tempDir();
   const trr = path.join(home, "Projects", "TRR");
@@ -387,12 +406,17 @@ test("Project Settings writes managed AGENTS.md plugin profile blocks", () => {
   assert.match(agents, /## Project Settings/);
   assert.doesNotMatch(agents, /## Plugin Profiles/);
   assert.match(agents, /\[@Chrome\]\(plugin:\/\/chrome@openai-bundled\)/);
-  assert.match(agents, /CODEX_CHROME_PREFERENCES_PATH="/);
-  assert.match(agents, /\[@gmail\]\(plugin:\/\/gmail@openai-curated\): use codex@thereality\.report/);
-  assert.match(agents, /\[@google-drive\]\(plugin:\/\/google-drive@openai-curated\): use codex@thereality\.report/);
-  assert.match(agents, /\[@modal-platform\]\(plugin:\/\/modal-platform@local-plugins\): use admin-56995 \/ admin-56995/);
-  assert.match(agents, /\[@decodo\]\(plugin:\/\/decodo@local-plugins\): use TRR Decodo \/ decodo-trr/);
-  assert.match(agents, /\[@supabase\]\(plugin:\/\/supabase@openai-curated\): use project trrproject with SUPABASE_ACCESS_TOKEN/);
+  assert.match(agents, /saved Chrome profile assignment/);
+  assert.match(agents, /saved Gmail account assignment/);
+  assert.match(agents, /saved Google Drive account assignment/);
+  assert.match(agents, /saved Modal workspace assignment/);
+  assert.match(agents, /saved Decodo account assignment/);
+  assert.match(agents, /saved Supabase project binding/);
+  assert.doesNotMatch(agents, /CODEX_CHROME_PREFERENCES_PATH="/);
+  assert.doesNotMatch(agents, /codex@thereality\.report/);
+  assert.doesNotMatch(agents, /admin-56995/);
+  assert.doesNotMatch(agents, /decodo-trr/);
+  assert.doesNotMatch(agents, /trrproject|SUPABASE_ACCESS_TOKEN/);
 
   const unchanged = tweak.syncProjectConnectionInstructions(
     { projectPath, projectName: "Repo" },
@@ -400,6 +424,25 @@ test("Project Settings writes managed AGENTS.md plugin profile blocks", () => {
   );
   assert.equal(unchanged.changed, false);
   assert.equal(unchanged.reason, "unchanged");
+
+  for (const pluginId of ["chrome", "gmail", "google-drive", "modal-platform", "decodo", "supabase"]) {
+    tweak.setProjectAgentsInstructionPluginRawOutputEnabled(
+      { projectPath, pluginId, enabled: true },
+      { userRoot, fs, path, home: userRoot },
+    );
+  }
+  const rawResult = tweak.syncProjectConnectionInstructions(
+    { projectPath, projectName: "Repo" },
+    { userRoot, fs, path, home: userRoot },
+  );
+  const rawAgents = fs.readFileSync(path.join(projectPath, "AGENTS.md"), "utf8");
+  assert.equal(rawResult.changed, true);
+  assert.match(rawAgents, /CODEX_CHROME_PREFERENCES_PATH="/);
+  assert.match(rawAgents, /\[@gmail\]\(plugin:\/\/gmail@openai-curated\): use codex@thereality\.report/);
+  assert.match(rawAgents, /\[@google-drive\]\(plugin:\/\/google-drive@openai-curated\): use codex@thereality\.report/);
+  assert.match(rawAgents, /\[@modal-platform\]\(plugin:\/\/modal-platform@local-plugins\): use admin-56995 \/ admin-56995/);
+  assert.match(rawAgents, /\[@decodo\]\(plugin:\/\/decodo@local-plugins\): use TRR Decodo \/ decodo-trr/);
+  assert.match(rawAgents, /\[@supabase\]\(plugin:\/\/supabase@openai-curated\): use project trrproject with SUPABASE_ACCESS_TOKEN/);
 });
 
 test("Project Settings previews and filters AGENTS.md blocks per plugin", () => {
@@ -448,6 +491,7 @@ test("Project Settings previews and filters AGENTS.md blocks per plugin", () => 
   assert.match(after.blockText, /\[@Chrome\]\(plugin:\/\/chrome@openai-bundled\)/);
   assert.doesNotMatch(after.blockText, /\[@decodo\]/);
   assert.deepEqual(after.pluginWriteDisabled, ["decodo"]);
+  assert.deepEqual(after.pluginRawOutputEnabled, []);
   assert.equal(after.connectionCount, 1);
 });
 
@@ -950,10 +994,18 @@ test("dotenv parser groups, redacts, and reveals values only on demand", () => {
 
   const parsed = tweak.parseDotenv(fs.readFileSync(envPath, "utf8"), envPath);
   const inventory = tweak.scanEnvInventory(projectPath, { fs, path });
-  const reveal = tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY" }, { fs, path, home: projectPath });
-  const dynamicReveal = tweak.revealEnvValueFromDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV" }, { fs, path, home: projectPath });
-  const update = tweak.updateEnvValueOnDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", value: "sk-new" }, { fs, path, home: projectPath });
-  const dynamicUpdate = tweak.updateEnvValueOnDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV", value: "production" }, { fs, path, home: projectPath });
+  assert.throws(
+    () => tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY" }, { fs, path, home: projectPath }),
+    /Confirm before revealing/,
+  );
+  assert.throws(
+    () => tweak.updateEnvValueOnDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", value: "sk-new" }, { fs, path, home: projectPath }),
+    /Confirm before editing/,
+  );
+  const reveal = tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", confirmed: true }, { fs, path, home: projectPath });
+  const dynamicReveal = tweak.revealEnvValueFromDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV", confirmed: true }, { fs, path, home: projectPath });
+  const update = tweak.updateEnvValueOnDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", value: "sk-new", confirmed: true }, { fs, path, home: projectPath });
+  const dynamicUpdate = tweak.updateEnvValueOnDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV", value: "production", confirmed: true }, { fs, path, home: projectPath });
 
   assert.equal(parsed.find((entry) => entry.key === "SUPABASE_URL").category, "Supabase");
   assert.equal(parsed.find((entry) => entry.key === "GMAIL_LABEL_ID").category, "Gmail");
@@ -968,11 +1020,16 @@ test("dotenv parser groups, redacts, and reveals values only on demand", () => {
   assert.equal(inventory.files[0].entries.find((entry) => entry.key === "OPENAI_API_KEY").redactedValue, "[redacted]");
   assert.doesNotMatch(JSON.stringify(inventory), /sk-secret/);
   assert.equal(reveal.value, "sk-secret");
+  assert.equal(reveal.audit.action, "revealed");
+  assert.equal(reveal.audit.key, "OPENAI_API_KEY");
+  assert.match(reveal.audit.at, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(dynamicReveal.value, "preview");
   assert.equal(update.value, "[redacted]");
+  assert.equal(update.audit.action, "edited");
+  assert.equal(update.audit.sourceFile, envPath);
   assert.equal(dynamicUpdate.value, "[redacted]");
-  assert.equal(tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY" }, { fs, path, home: projectPath }).value, "sk-new");
-  assert.equal(tweak.revealEnvValueFromDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV" }, { fs, path, home: projectPath }).value, "production");
+  assert.equal(tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", confirmed: true }, { fs, path, home: projectPath }).value, "sk-new");
+  assert.equal(tweak.revealEnvValueFromDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV", confirmed: true }, { fs, path, home: projectPath }).value, "production");
 });
 
 test("env reveal and edit reject symlink escapes outside the project", (t) => {
@@ -993,11 +1050,11 @@ test("env reveal and edit reject symlink escapes outside the project", (t) => {
   }
 
   assert.throws(
-    () => tweak.revealEnvValueFromDisk({ projectPath, filePath: symlinkEnv, key: "OPENAI_API_KEY" }, { fs, path, home: projectPath }),
+    () => tweak.revealEnvValueFromDisk({ projectPath, filePath: symlinkEnv, key: "OPENAI_API_KEY", confirmed: true }, { fs, path, home: projectPath }),
     /cannot be a symlink/,
   );
   assert.throws(
-    () => tweak.updateEnvValueOnDisk({ projectPath, filePath: symlinkEnv, key: "OPENAI_API_KEY", value: "changed" }, { fs, path, home: projectPath }),
+    () => tweak.updateEnvValueOnDisk({ projectPath, filePath: symlinkEnv, key: "OPENAI_API_KEY", value: "changed", confirmed: true }, { fs, path, home: projectPath }),
     /cannot be a symlink/,
   );
   assert.equal(fs.readFileSync(outsideEnv, "utf8"), "OPENAI_API_KEY=outside\n");
@@ -1037,15 +1094,15 @@ test("env reveal and edit require a known project when allowlist is provided", (
   const options = { fs, path, home: projectPath, allowedProjectPaths: [projectPath] };
 
   assert.equal(
-    tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY" }, options).value,
+    tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", confirmed: true }, options).value,
     "inside",
   );
   assert.throws(
-    () => tweak.revealEnvValueFromDisk({ projectPath: outsideProject, filePath: outsideEnvPath, key: "OPENAI_API_KEY" }, options),
+    () => tweak.revealEnvValueFromDisk({ projectPath: outsideProject, filePath: outsideEnvPath, key: "OPENAI_API_KEY", confirmed: true }, options),
     /known Codex projects/,
   );
   assert.throws(
-    () => tweak.updateEnvValueOnDisk({ projectPath: outsideProject, filePath: outsideEnvPath, key: "OPENAI_API_KEY", value: "changed" }, options),
+    () => tweak.updateEnvValueOnDisk({ projectPath: outsideProject, filePath: outsideEnvPath, key: "OPENAI_API_KEY", value: "changed", confirmed: true }, options),
     /known Codex projects/,
   );
   assert.equal(fs.readFileSync(outsideEnvPath, "utf8"), "OPENAI_API_KEY=outside\n");
@@ -1109,6 +1166,10 @@ test("project page sync backs off while main IPC handlers are unavailable", () =
   assert.match(source, /project settings page sync waiting for main handlers/);
   assert.match(source, /state\.nextAllowedAt = now \+ delayMs/);
   assert.match(source, /state\.lastErrorMessage !== message/);
+  assert.match(source, /function projectSettingsSurfaceMaybePresent\(\)/);
+  assert.match(source, /project settings page sync parked while Settings is closed/);
+  assert.match(source, /scheduleProjectPagesSync\(\{ force: true, reason: "render-main" \}\)/);
+  assert.match(source, /if \(!options\.force && now < state\.nextAllowedAt\) return false/);
 });
 
 test("renderer source evaluates without CommonJS require", () => {

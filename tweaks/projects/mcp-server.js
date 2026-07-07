@@ -26,6 +26,7 @@ const tools = [
       properties: {
         projectPath: { type: "string", description: "Absolute project path or cwd." },
         service: { type: "string", enum: ["gmail", "google-drive"], description: "Optional service to resolve." },
+        debug: { type: "boolean", description: "Return raw local paths and account identifiers." },
       },
       required: ["projectPath"],
     },
@@ -49,6 +50,7 @@ const tools = [
       type: "object",
       properties: {
         projectPath: { type: "string", description: "Absolute project path or cwd." },
+        debug: { type: "boolean", description: "Return raw local paths and account identifiers." },
       },
       required: ["projectPath"],
     },
@@ -157,6 +159,20 @@ function envFor(result) {
     env.GOOGLE_DRIVE_ACCOUNT_EMAIL = drive.email;
   }
   return env;
+}
+
+function redactEnv(env) {
+  return Object.fromEntries(Object.entries(env || {}).map(([key, value]) => [
+    key,
+    redactEnvValue(value),
+  ]));
+}
+
+function redactEnvValue(value) {
+  if (typeof value !== "string" || !value) return "";
+  if (value.startsWith("/")) return redactPath(value);
+  if (value.includes("@")) return redactEmail(value);
+  return "[redacted]";
 }
 
 function instructionsFor(result) {
@@ -331,6 +347,10 @@ function redactEmail(value) {
   return value.includes("@") ? "[redacted-email]" : value;
 }
 
+function rawOutputRequested(args) {
+  return args?.debug === true || args?.raw === true;
+}
+
 async function handle(message) {
   if (message.method === "initialize") {
     return {
@@ -344,28 +364,35 @@ async function handle(message) {
     const name = message.params?.name;
     const args = message.params?.arguments || {};
     if (name === "projects_google_workspace_resolve") {
+      const debug = rawOutputRequested(args);
       const result = resolveProject(args.projectPath, args.service);
+      const assignment = debug || !result ? result : redactGoogleWorkspaceAssignment(result);
+      const env = envFor(result);
       return text({
         matched: Boolean(result),
-        assignment: result,
-        env: envFor(result),
-        instructions: instructionsFor(result),
+        assignment,
+        env: debug ? env : redactEnv(env),
+        instructions: instructionsFor(assignment),
       });
     }
     if (name === "projects_google_workspace_list_assignments") {
       return text({ assignments: listProjectAssignments(args.projectPath, { debug: args.debug === true }) });
     }
     if (name === "projects_chrome_profile_resolve") {
+      const debug = rawOutputRequested(args);
       const match = resolveChromeProject(args.projectPath);
       const fallback = match ? null : defaultChromeProfile();
       const resolved = match || fallback;
-      const preferredProfiles = normalizePreferredProfiles(resolved);
+      const assignment = debug || !match ? match : redactChromeAssignment(match);
+      const defaultProfile = debug || !fallback ? fallback : redactChromeAssignment(fallback);
+      const resolvedForOutput = debug || !resolved ? resolved : redactChromeAssignment(resolved);
+      const preferredProfiles = normalizePreferredProfiles(resolvedForOutput);
       return text({
         matched: Boolean(match),
-        assignment: match,
-        defaultProfile: fallback,
+        assignment,
+        defaultProfile,
         preferredProfiles,
-        env: resolved ? { CODEX_CHROME_PREFERENCES_PATH: preferredProfiles[0]?.preferencesPath || resolved.preferencesPath } : {},
+        env: resolvedForOutput ? { CODEX_CHROME_PREFERENCES_PATH: preferredProfiles[0]?.preferencesPath || resolvedForOutput.preferencesPath } : {},
       });
     }
     if (name === "projects_chrome_profile_list_assignments") {

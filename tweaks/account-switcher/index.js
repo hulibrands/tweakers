@@ -1,7 +1,7 @@
 /**
  * Account Switcher
  *
- * Codex++ tweak that injects account management into Codex's account/settings
+ * ShadGPT tweak that injects account management into Codex's account/settings
  * popup. Main process owns all auth file operations; renderer only sends
  * account names and receives snapshot metadata.
  *
@@ -9,8 +9,6 @@
  */
 
 const { GLOBAL_SERVICE_KEY, IPC_HANDLER_KEY, IPC_CHANNEL } = require("./src/constants");
-const { createAccountService } = require("./src/account/service");
-const { startRenderer } = require("./src/renderer");
 
 // ─── Tweak export ─────────────────────────────────────────────────────────────
 
@@ -36,10 +34,12 @@ module.exports = {
       usageRefreshInFlight: false,
     };
     this._state = state;
+    const { startRenderer } = require("./src/renderer");
     startRenderer(state);
   },
 
   stop() {
+    cleanupMain();
     const state = this._state;
     if (!state) return;
     state.disposed = true;
@@ -53,25 +53,49 @@ module.exports = {
       }
     }
     this._pageHandle?.unregister?.();
-    document.querySelectorAll("[data-codexpp-account-switcher]").forEach((element) => {
-      element.remove();
-    });
+    document
+      .querySelectorAll("[data-codexpp-account-switcher], [data-codexpp-account-switcher-confirm]")
+      .forEach((element) => {
+        const cleanup = element.__codexppAccountSwitcherCleanup;
+        if (typeof cleanup === "function") cleanup();
+        else element.remove();
+      });
   },
 };
 
 // ─── Main process bootstrap ───────────────────────────────────────────────────
 
 function startMain(api) {
+  const { createAccountService } = require("./src/account/service");
   const service = createAccountService(api);
   globalThis[GLOBAL_SERVICE_KEY] = service;
 
   if (!globalThis[IPC_HANDLER_KEY]) {
-    api.ipc.handle(IPC_CHANNEL, async (message) => {
+    const dispose = api.ipc.handle(IPC_CHANNEL, async (message) => {
       const active = globalThis[GLOBAL_SERVICE_KEY];
+      if (!active || typeof active.handle !== "function") {
+        return { ok: false, error: "Account Switcher service is not active." };
+      }
       return active.handle(message);
     });
-    globalThis[IPC_HANDLER_KEY] = true;
+    globalThis[IPC_HANDLER_KEY] = { disposers: typeof dispose === "function" ? [dispose] : [] };
   }
 
   api.log.info("[account-switcher] main provider active");
+}
+
+function cleanupMain() {
+  require("./src/account/actions").resetAuthRelaunchState();
+  delete globalThis[GLOBAL_SERVICE_KEY];
+  const state = globalThis[IPC_HANDLER_KEY];
+  if (!state || state === true) return;
+  const disposers = Array.isArray(state.disposers) ? state.disposers : [];
+  for (const dispose of disposers.splice(0).reverse()) {
+    try {
+      dispose();
+    } catch {
+      /* handler may already be gone */
+    }
+  }
+  delete globalThis[IPC_HANDLER_KEY];
 }

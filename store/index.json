@@ -7,9 +7,9 @@
       "path": "tweaks/account-switcher",
       "manifest": {
         "id": "co.thomashulihan.account-switcher",
-        "name": "Easy Account Switcher",
-        "version": "0.1.0",
-        "description": "Save, switch, and manage local Codex auth sessions from the account menu.",
+        "name": "ShadGPT Account Switcher",
+        "version": "0.1.1",
+        "description": "Local ShadGPT account switcher with popup accordion, guarded switching, usage summaries, and Accounts settings.",
         "githubRepo": "hulibrands/tweakers",
         "forkOf": {
           "upstreamId": "me.erkin.codex-plusplus-account-switcher",
@@ -28,6 +28,11 @@
           "settings"
         ],
         "scope": "both",
+        "permissions": [
+          "ipc",
+          "settings",
+          "filesystem"
+        ],
         "main": "index.bundled.js",
         "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/account-switcher"
       }
@@ -64,8 +69,8 @@
       "path": "tweaks/followup",
       "manifest": {
         "id": "co.thomashulihan.followup",
-        "name": "Codex Follow-up",
-        "version": "0.3.0",
+        "name": "ShadGPT Follow-up",
+        "version": "0.3.1",
         "githubRepo": "hulibrands/tweakers",
         "forkOf": {
           "upstreamId": "co.Arconte112.followup",
@@ -74,7 +79,7 @@
           "upstreamCommitSha": "3d169c4f2f6508c3cf6a89a6531ed939209b5d6c",
           "forkedAt": "2026-05-17T22:00:00.000Z"
         },
-        "description": "Clickable context-aware follow-up prompts with AGENTS.md instruction sync.",
+        "description": "ShadGPT-owned Follow-up fork with local multi-select and ShadGPT instruction sync behavior.",
         "author": {
           "name": "Thomas Hulihan",
           "url": "https://github.com/hulibrands"
@@ -84,6 +89,11 @@
           "followups"
         ],
         "scope": "both",
+        "permissions": [
+          "ipc",
+          "settings",
+          "filesystem"
+        ],
         "main": "index.js",
         "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/followup"
       }
@@ -93,7 +103,7 @@
       "path": "tweaks/github-accounts",
       "manifest": {
         "id": "co.thomashulihan.github-accounts",
-        "name": "GitHub Accounts",
+        "name": "ShadGPT GitHub Accounts",
         "version": "0.1.0",
         "githubRepo": "hulibrands/tweakers",
         "description": "ShadGPT-owned GitHub Accounts fork for project-local Git identity assignment.",
@@ -138,8 +148,7 @@
           "command": "node",
           "args": [
             "./mcp-server.js"
-          ],
-          "enabledByDefault": false
+          ]
         }
       }
     },
@@ -148,18 +157,18 @@
       "path": "tweaks/mode-switcher",
       "manifest": {
         "id": "co.thomashulihan.mode-switcher",
-        "name": "Mode Switcher",
-        "version": "0.1.0",
+        "name": "ShadGPT Mode Switcher",
+        "version": "0.1.1",
         "githubRepo": "hulibrands/tweakers",
         "forkOf": {
           "upstreamId": "co.thomas.mode-switcher",
-          "upstreamGithubRepo": "hulibrands/tweakers",
+          "upstreamGithubRepo": "therealityreport/codex-tweaks",
           "upstreamPath": "mode-switcher",
           "upstreamVersion": "0.1.0",
           "upstreamCommitSha": "5c9e0563f24f4ad4ddd4337921f759b83f20dea8",
           "forkedAt": "2026-05-17T22:00:00.000Z"
         },
-        "description": "Toggle between vanilla Codex and Codex++ from the Config page.",
+        "description": "ShadGPT-owned mode switcher for toggling vanilla Codex and ShadGPT.",
         "author": {
           "name": "Thomas Hulihan",
           "url": "https://github.com/hulibrands"
@@ -169,7 +178,12 @@
           "ui",
           "config"
         ],
-        "scope": "both"
+        "scope": "both",
+        "permissions": [
+          "ipc",
+          "settings",
+          "filesystem"
+        ]
       }
     },
     {
@@ -180,7 +194,7 @@
         "name": "ShadGPT Projects",
         "version": "1.0.0",
         "githubRepo": "hulibrands/tweakers",
-        "description": "Adds a Projects settings page that coordinates project Chrome profiles, Google Workspace, Supabase, and environment inventory.",
+        "description": "Adds a Projects settings page that coordinates project Chrome, Google Workspace, Supabase, and environment inventory.",
         "author": {
           "name": "Thomas Hulihan",
           "url": "https://github.com/hulibrands"
@@ -189,24 +203,16 @@
         "tags": [
           "projects",
           "chrome",
-          "profiles",
-          "google",
           "supabase",
           "env"
         ],
         "scope": "both",
+        "mainStartupTimeoutMs": 15000,
         "permissions": [
           "ipc",
           "filesystem",
           "settings"
-        ],
-        "mcp": {
-          "command": "node",
-          "args": [
-            "./mcp-server.js"
-          ],
-          "enabledByDefault": false
-        }
+        ]
       }
     },
     {
@@ -214,10 +220,10 @@
       "path": "tweaks/shadcn-codex-ui",
       "manifest": {
         "id": "co.thomashulihan.shadcn-codex-ui",
-        "name": "Shadcn Codex UI",
+        "name": "ShadGPT Shadcn UI",
         "version": "0.1.0",
         "githubRepo": "hulibrands/tweakers",
-        "description": "Scoped, reversible shadcn-style token and surface treatment for Codex++.",
+        "description": "ShadGPT-owned Shadcn Codex UI fork with local palette and surface styling.",
         "iconUrl": "./assets/icon.png",
         "forkOf": {
           "upstreamId": "co.Arconte112.shadcn-codex-ui",
@@ -240,6 +246,7 @@
         ],
         "scope": "both",
         "permissions": [
+          "ipc",
           "settings"
         ]
       }
@@ -277,10 +284,10 @@
       "path": "tweaks/titlebar-controls",
       "manifest": {
         "id": "co.thomashulihan.titlebar-controls",
-        "name": "Titlebar Controls",
+        "name": "ShadGPT Titlebar Controls",
         "version": "0.1.0",
         "githubRepo": "hulibrands/tweakers",
-        "description": "Align Codex titlebar controls with the native macOS window buttons.",
+        "description": "ShadGPT-owned titlebar control alignment for Codex's native macOS window buttons.",
         "author": {
           "name": "Thomas Hulihan"
         },
@@ -291,6 +298,7 @@
           "macos"
         ],
         "scope": "renderer",
+        "permissions": [],
         "main": "index.js"
       }
     },
@@ -299,7 +307,7 @@
       "path": "tweaks/tweaks-directory",
       "manifest": {
         "id": "co.thomashulihan.tweaks-directory",
-        "name": "Tweaks Directory",
+        "name": "ShadGPT Tweaks Directory",
         "version": "0.1.0",
         "githubRepo": "hulibrands/tweakers",
         "description": "Adds installed tweaks and the Tweak Store as a Tweaks tab in the Plugins directory.",
@@ -318,6 +326,7 @@
           "codex.views"
         ],
         "scope": "both",
+        "mainStartupTimeoutMs": 10000,
         "main": "index.cjs"
       }
     },
@@ -326,7 +335,7 @@
       "path": "tweaks/ui-improvements",
       "manifest": {
         "id": "co.thomashulihan.ui-improvements",
-        "name": "UI Improvements",
+        "name": "ShadGPT UI Improvements",
         "version": "0.2.0",
         "githubRepo": "hulibrands/tweakers",
         "forkOf": {
@@ -349,6 +358,7 @@
         ],
         "scope": "both",
         "main": "index.js",
+        "mainStartupTimeoutMs": 15000,
         "homepage": "https://github.com/hulibrands/tweakers/tree/main/tweaks/ui-improvements",
         "permissions": [
           "ipc",

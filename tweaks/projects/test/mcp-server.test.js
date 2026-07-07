@@ -71,13 +71,15 @@ test("Projects MCP resolves Gmail and Google Drive assignments for cwd children"
   assert.equal(result.code, 0);
   const payload = JSON.parse(result.messages[0].result.content[0].text);
   assert.equal(payload.matched, true);
-  assert.equal(payload.assignment.projectPath, projectPath);
-  assert.equal(payload.assignment.services.gmail.email, "codex@thereality.report");
-  assert.equal(payload.assignment.services["google-drive"].email, "thomas@hulibrands.com");
-  assert.equal(payload.env.CODEX_PROJECT_GMAIL_ACCOUNT, "codex@thereality.report");
-  assert.equal(payload.env.CODEX_PROJECT_GOOGLE_DRIVE_ACCOUNT, "thomas@hulibrands.com");
+  assert.equal(payload.assignment.projectPath, `[redacted]/${path.basename(projectPath)}`);
+  assert.equal(payload.assignment.services.gmail.email, "[redacted-email]");
+  assert.equal(payload.assignment.services.gmail.accountId, "[redacted]");
+  assert.equal(payload.assignment.services["google-drive"].email, "[redacted-email]");
+  assert.equal(payload.env.CODEX_PROJECT_GMAIL_ACCOUNT, "[redacted-email]");
+  assert.equal(payload.env.CODEX_PROJECT_GOOGLE_DRIVE_ACCOUNT, "[redacted-email]");
   assert.match(payload.instructions.join("\n"), /@gmail/);
   assert.match(payload.instructions.join("\n"), /@google-drive/);
+  assert.doesNotMatch(JSON.stringify(payload), /codex@thereality\.report|thomas@hulibrands\.com/);
 });
 
 test("Projects MCP can resolve a single Google Workspace service", async () => {
@@ -90,7 +92,7 @@ test("Projects MCP can resolve a single Google Workspace service", async () => {
         method: "tools/call",
         params: {
           name: "projects_google_workspace_resolve",
-          arguments: { projectPath, service: "gmail" },
+          arguments: { projectPath, service: "gmail", debug: true },
         },
       }),
     ],
@@ -149,10 +151,11 @@ test("Projects MCP resolves Chrome profile assignments from the legacy Chrome st
   assert.equal(result.code, 0);
   const payload = JSON.parse(result.messages[0].result.content[0].text);
   assert.equal(payload.matched, true);
-  assert.equal(payload.assignment.projectPath, projectPath);
-  assert.equal(payload.preferredProfiles[0].preferencesPath, preferencesPath);
-  assert.deepEqual(payload.preferredProfiles[0].profileAliases, ["codex@thereality.report", "TRR"]);
-  assert.equal(payload.env.CODEX_CHROME_PREFERENCES_PATH, preferencesPath);
+  assert.equal(payload.assignment.projectPath, `[redacted]/${path.basename(projectPath)}`);
+  assert.equal(payload.preferredProfiles[0].preferencesPath, `[redacted]/${path.basename(preferencesPath)}`);
+  assert.deepEqual(payload.preferredProfiles[0].profileAliases, ["[redacted-email]", "TRR"]);
+  assert.equal(payload.env.CODEX_CHROME_PREFERENCES_PATH, `[redacted]/${path.basename(preferencesPath)}`);
+  assert.doesNotMatch(JSON.stringify(payload), /codex@thereality\.report|Chrome\/Profile 7/);
 });
 
 test("Projects MCP resolves Chrome profile assignments from Projects storage", async () => {
@@ -166,7 +169,7 @@ test("Projects MCP resolves Chrome profile assignments from Projects storage", a
         method: "tools/call",
         params: {
           name: "projects_chrome_profile_resolve",
-          arguments: { projectPath },
+          arguments: { projectPath, debug: true },
         },
       }),
     ],

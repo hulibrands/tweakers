@@ -6,6 +6,24 @@ const test = require("node:test");
 
 const tweak = require("../index.js").__test;
 
+test("user root resolver prefers ShadGPT TweakerLibrary before legacy codex-plusplus storage", () => {
+  const root = tempDir();
+  const shadgptRoot = path.join(root, "Library", "Application Support", "ShadGPT", "TweakerLibrary");
+  const legacyRoot = path.join(root, "Library", "Application Support", "codex-plusplus");
+  fs.mkdirSync(legacyRoot, { recursive: true });
+  fs.mkdirSync(shadgptRoot, { recursive: true });
+
+  assert.equal(tweak.userRootForPlatform(root, path, { fs, platform: "darwin", env: {} }), shadgptRoot);
+});
+
+test("user root resolver keeps legacy storage as fallback when ShadGPT root is absent", () => {
+  const root = tempDir();
+  const legacyRoot = path.join(root, "Library", "Application Support", "codex-plusplus");
+  fs.mkdirSync(legacyRoot, { recursive: true });
+
+  assert.equal(tweak.userRootForPlatform(root, path, { fs, platform: "darwin", env: {} }), legacyRoot);
+});
+
 test("source cleanup runs before repeated starts install new observers", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   assert.match(source, /function stopActiveCleanup\(\)/);
@@ -91,13 +109,14 @@ test("resolver emits project-scoped profile rows in stable order with local meta
   assert.equal(summary.rows[1].value, "abc123");
   assert.equal(summary.rows[1].detail, "database, docs");
   assert.equal(summary.rows[2].value, "hulibrands/codex-plusplus");
-  assert.equal(summary.rows[3].value, "drive@example.test");
-  assert.equal(summary.rows[4].value, "mail@example.test");
+  assert.equal(summary.rows[3].value, "Drive");
+  assert.equal(summary.rows[4].value, "Mail");
   assert.equal(summary.rows[5].status, "CLI checked");
   assert.equal(summary.rows[6].value, "Repo Decodo");
   assert.equal(summary.rows[7].value, "Railway Project");
   assert.ok(summary.rows.every((row) => row.action));
   assert.doesNotMatch(JSON.stringify(summary), /SUPABASE_ACCESS_TOKEN|bearer|token/i);
+  assert.doesNotMatch(JSON.stringify(summary), /@example\.test/);
 });
 
 test("resolver uses safe fallback rows when nothing is configured", () => {
@@ -143,6 +162,41 @@ test("resolver hides saved provider accounts without project assignment or proje
 
   assert.deepEqual(summary.rows, []);
   assert.doesNotMatch(JSON.stringify(summary), /Global|global-supabase|global-decodo/);
+});
+
+test("command-backed rows reject renderer-inferred paths outside trusted inventory", () => {
+  const root = tempDir();
+  const trustedProject = path.join(root, "trusted");
+  const untrustedProject = path.join(root, "untrusted");
+  const userRoot = path.join(root, "codex-plusplus");
+  let commandCalls = 0;
+  fs.mkdirSync(path.join(trustedProject, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(untrustedProject, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(userRoot, "storage"), { recursive: true });
+  fs.writeFileSync(path.join(userRoot, "storage", "co.thomashulihan.projects.json"), JSON.stringify({
+    sidebarProjects: [{ name: "Trusted", projectPath: trustedProject }],
+    modalWorkspaceAssignments: {
+      [trustedProject]: { profile: "expected", workspace: "expected-workspace" },
+    },
+  }), "utf8");
+
+  const summary = tweak.buildThreadProfileSummary({ projectPath: untrustedProject }, {
+    fs,
+    os,
+    path,
+    userRoot,
+    home: root,
+    childProcess: {
+      execFileSync() {
+        commandCalls += 1;
+        return "";
+      },
+    },
+  });
+
+  assert.equal(commandCalls, 0);
+  assert.equal(summary.rows.find((row) => row.id === "github"), undefined);
+  assert.equal(summary.rows.find((row) => row.id === "modal"), undefined);
 });
 
 test("resolver shows Railway only from project-local Railway config", () => {
@@ -401,7 +455,7 @@ test("resolver maps visible TRR workspace context to configured rows only", () =
   assert.equal(summary.projectPath, projectPath);
   assert.deepEqual(summary.rows.map((row) => row.id), ["chrome", "supabase", "github"]);
   assert.deepEqual(summary.rows.map((row) => row.value), [
-    "admin@thereality.report",
+    "TRR",
     "vwxfvzutyufrkhfgoeaa",
     "therealityreport/trr-workspace",
   ]);
@@ -429,6 +483,7 @@ test("action normalization rejects unsafe external and secret-looking targets", 
 
 test("source and packaged default thread summary profile copies stay in sync", () => {
   const repoRoot = findRepoRoot(__dirname);
+  if (!repoRoot) return;
   const sourceRoot = path.join(repoRoot, "tweaks", "base", "thomashulihan-thread-summary-profiles");
   const defaultRoot = path.join(repoRoot, "packages", "installer", "assets", "default-tweaks", "co.thomashulihan.thread-summary-profiles");
 
@@ -442,10 +497,14 @@ function tempDir() {
 function findRepoRoot(start) {
   let current = start;
   while (current && current !== path.dirname(current)) {
-    if (fs.existsSync(path.join(current, "package.json")) && fs.existsSync(path.join(current, "tweaks"))) return current;
+    if (
+      fs.existsSync(path.join(current, "package.json")) &&
+      fs.existsSync(path.join(current, "packages", "installer")) &&
+      fs.existsSync(path.join(current, "tweaks", "base"))
+    ) return current;
     current = path.dirname(current);
   }
-  throw new Error("Could not find repository root.");
+  return null;
 }
 
 function snapshotDirectory(root) {

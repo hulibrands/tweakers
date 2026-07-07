@@ -1,7 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const tweak = require("../index.js").__test;
+const threadSummaryProfiles = require("../index.js");
+const tweak = threadSummaryProfiles.__test;
 
 test("renderer inserts Profiles once and replaces stale content", async () => {
   const restore = installFakeDom();
@@ -137,6 +138,52 @@ test("renderer finds summary panels by visible stable headings", () => {
 
     assert.deepEqual(panels, [panel]);
   } finally {
+    restore();
+  }
+});
+
+test("renderer scopes mutation observers to summary panel roots", () => {
+  const restore = installFakeDom();
+  const previous = {
+    MutationObserver: global.MutationObserver,
+    requestAnimationFrame: global.requestAnimationFrame,
+    cancelAnimationFrame: global.cancelAnimationFrame,
+  };
+  const observed = [];
+  try {
+    global.MutationObserver = class FakeMutationObserver {
+      constructor(callback) {
+        this.callback = callback;
+      }
+
+      observe(target, options) {
+        observed.push({ target, options });
+      }
+
+      disconnect() {}
+    };
+    global.requestAnimationFrame = (callback) => {
+      callback();
+      return 1;
+    };
+    global.cancelAnimationFrame = () => {};
+
+    const panel = document.createElement("aside");
+    panel.append(section("Environment", "cwd /repo"), section("Sources", "files"), section("Progress", "done"));
+    document.body.appendChild(panel);
+
+    const api = fakeApi("Work");
+    api.process = "renderer";
+    threadSummaryProfiles.start(api);
+
+    assert.equal(observed.some((entry) => entry.target === document.body && entry.options.subtree === true), false);
+    assert.equal(observed.some((entry) => entry.target === document.body && entry.options.subtree === false), true);
+    assert.equal(observed.some((entry) => entry.target === panel && entry.options.subtree === true), true);
+  } finally {
+    threadSummaryProfiles.stop();
+    global.MutationObserver = previous.MutationObserver;
+    global.requestAnimationFrame = previous.requestAnimationFrame;
+    global.cancelAnimationFrame = previous.cancelAnimationFrame;
     restore();
   }
 });
