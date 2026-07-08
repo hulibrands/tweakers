@@ -9,12 +9,13 @@ const ACCOUNTS_KEY = "accounts";
 const ASSIGNMENTS_KEY = "assignments";
 const SIDEBAR_PROJECTS_KEY = "sidebarProjects";
 const CLOUD_PROJECT_PREFIX = "cloud:";
-const EXCLUDED_SIDEBAR_PROJECT_NAMES = new Set(["trr-app", "screenalytics"]);
+const EXCLUDED_SIDEBAR_PROJECT_NAMES = new Set();
 
 let activeCleanup = [];
 
 module.exports = {
   start(api) {
+    stopActiveCleanup();
     activeCleanup = [];
     if (api.process === "main") {
       try {
@@ -28,14 +29,18 @@ module.exports = {
   },
 
   stop() {
-    for (const cleanup of activeCleanup) {
-      try {
-        cleanup();
-      } catch {}
-    }
-    activeCleanup = [];
+    stopActiveCleanup();
   },
 };
+
+function stopActiveCleanup() {
+  for (const cleanup of activeCleanup) {
+    try {
+      cleanup();
+    } catch {}
+  }
+  activeCleanup = [];
+}
 
 function startMain(api, cleanup) {
   const fs = require("node:fs");
@@ -270,15 +275,7 @@ function startMain(api, cleanup) {
     }
   };
 
-  const knownProjectPaths = () => ({
-    TRR: path.join(os.homedir(), "Projects", "TRR"),
-    "THB-BBL": path.join(os.homedir(), "Projects", "THB-BBL"),
-    PLUGINS: path.join(os.homedir(), "Projects", "PLUGINS"),
-    "Google Takeout Visualization": path.join(os.homedir(), "Documents", "New project"),
-    "SKILLS MANAGER": path.join(os.homedir(), "Projects", "SKILLS MANAGER"),
-    Codex: path.join(os.homedir(), "Applications", "codex"),
-    ShadGPT: path.join(os.homedir(), "Applications", ["codex", "plusplus"].join("-")),
-  });
+  const knownProjectPaths = () => ({});
 
   const getSidebarProjects = () => {
     const value = api.storage.get(SIDEBAR_PROJECTS_KEY, []);
@@ -365,23 +362,26 @@ function startMain(api, cleanup) {
     const agentsFile = path.join(projectPath, "AGENTS.md");
     const target = agentsFile;
     const existing = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";
-    const usernamePart = account.username ? ` GitHub username: @${account.username}.` : "";
+    const accountName = managedBlockLine(account.name);
+    const username = account.username ? managedBlockLine(account.username) : "";
+    const projectLabelName = managedBlockLine(projectName || projectLabel(projectPath));
+    const usernamePart = username ? ` GitHub username: @${username}.` : "";
     const gitPart = gitResult?.applied
       ? ` Project-local Git identity was applied in ${gitResult.gitRoot}.`
       : ` Project-local Git identity was not applied automatically${gitResult?.reason ? `: ${singleLine(gitResult.reason)}` : ""}.`;
     const block =
       "<!-- codex-github-accounts:start -->\n" +
       "## GitHub Account Assignment\n" +
-      `- For GitHub work in this project, use the GitHub account "${account.name}".${usernamePart}\n` +
-      `- Use commit identity: ${account.name} <${account.email}>.\n` +
+      `- For GitHub work in this project, use the GitHub account "${accountName}".${usernamePart}\n` +
+      `- Use commit identity: ${accountName} <${account.email}>.\n` +
       "- Before creating commits, pull requests, releases, or GitHub issues from this project, verify the active GitHub CLI/auth account matches this assignment.\n" +
-      `- Assignment source: ShadGPT GitHub Accounts tweak for "${projectName || projectLabel(projectPath)}".${gitPart}\n` +
+      `- Assignment source: ShadGPT GitHub Accounts tweak for "${projectLabelName}".${gitPart}\n` +
       "<!-- codex-github-accounts:end -->";
     const pattern = /<!-- codex-github-accounts:start -->[\s\S]*?<!-- codex-github-accounts:end -->/;
     const next = pattern.test(existing)
       ? existing.replace(pattern, block)
       : `${existing.replace(/\s*$/, "")}${existing.trim() ? "\n\n" : ""}${block}\n`;
-    fs.writeFileSync(target, next);
+    writeFileAtomic(target, next);
     removeLegacyProjectInstruction(projectPath);
     return target;
   };
@@ -396,7 +396,7 @@ function startMain(api, cleanup) {
       const existing = fs.readFileSync(file, "utf8");
       const next = removeManagedInstructionBlock(existing);
       if (next === existing) continue;
-      fs.writeFileSync(file, next);
+      writeFileAtomic(file, next);
       changed = true;
     }
     return changed;
@@ -408,7 +408,7 @@ function startMain(api, cleanup) {
     const existing = fs.readFileSync(rulesFile, "utf8");
     const next = removeManagedInstructionBlock(existing);
     if (next === existing) return false;
-    fs.writeFileSync(rulesFile, next);
+    writeFileAtomic(rulesFile, next);
     return true;
   };
 
@@ -421,6 +421,16 @@ function startMain(api, cleanup) {
   };
 
   const singleLine = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const managedBlockLine = (value) =>
+    singleLine(value)
+      .replaceAll("<!-- codex-github-accounts:start -->", "")
+      .replaceAll("<!-- codex-github-accounts:end -->", "")
+      .trim();
+  const writeFileAtomic = (target, content) => {
+    const tmp = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.renameSync(tmp, target);
+  };
 
   cleanup.push(api.ipc.handle("listAccounts", () => getAccounts()));
   cleanup.push(api.ipc.handle("saveAccount", (input) => saveAccount(input)));
@@ -640,17 +650,26 @@ function accountSelectControl(accounts, selected) {
 
 function startSidebarProjectScanner(api) {
   let lastKey = "";
-  const scan = () => {
+  let scheduled = false;
+  const runScan = () => {
     const projects = scanSidebarProjectsFromDom();
     const key = JSON.stringify(projects);
     if (!projects.length || key === lastKey) return;
     lastKey = key;
     api.ipc.invoke("cacheSidebarProjects", projects).catch(() => {});
   };
+  const scan = () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      runScan();
+    });
+  };
   const observer = new MutationObserver(scan);
   observer.observe(document.documentElement, { childList: true, subtree: true });
-  scan();
-  const timer = setInterval(scan, 2000);
+  runScan();
+  const timer = setInterval(runScan, 2000);
   return () => {
     observer.disconnect();
     clearInterval(timer);
@@ -658,7 +677,8 @@ function startSidebarProjectScanner(api) {
 }
 
 function scanSidebarProjectsFromDom() {
-  const sidebar = document.querySelector("aside") || document.body;
+  const sidebar = document.querySelector("aside");
+  if (!sidebar) return [];
   const headers = Array.from(sidebar.querySelectorAll("div,span,p"))
     .filter((el) => compactText(el.textContent) === "Projects");
   for (const header of headers) {
@@ -807,16 +827,7 @@ function statusLine() {
 }
 
 function guessProjectPath(name) {
-  const explicit = {
-    "Menu Bar": "/Users/thomashulihan/Projects/Menu Bar",
-    TRR: "/Users/thomashulihan/Projects/TRR",
-    "THB-BBL": "/Users/thomashulihan/Projects/THB-BBL",
-    PLUGINS: "/Users/thomashulihan/Projects/PLUGINS",
-    "Google Takeout Visualization": "/Users/thomashulihan/Documents/New project",
-    "SKILLS MANAGER": "/Users/thomashulihan/Projects/SKILLS MANAGER",
-    Codex: "/Users/thomashulihan/Applications/codex",
-    ShadGPT: `/Users/thomashulihan/Applications/${["codex", "plusplus"].join("-")}`,
-  };
+  const explicit = {};
   if (explicit[name]) return explicit[name];
   const slug = slugify(name || "project");
   return `codex-sidebar://${slug || "project"}`;

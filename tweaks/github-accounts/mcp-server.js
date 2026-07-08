@@ -7,12 +7,23 @@ const path = require("node:path");
 const readline = require("node:readline");
 
 const TWEAK_ID = "co.thomashulihan.github-accounts";
-const STORAGE_FILE = path.join(
+const USER_ROOT =
+  process.env.SHADGPT_USER_ROOT ||
+  process.env.SHADGPT_TWEAKER_LIBRARY_HOME ||
   process.env.CODEX_PLUSPLUS_USER_ROOT ||
-    path.join(os.homedir(), "Library", "Application Support", ["codex", "plusplus"].join("-")),
-  "storage",
-  `${TWEAK_ID}.json`,
-);
+  defaultUserRoot();
+const STORAGE_FILE = path.join(USER_ROOT, "storage", `${TWEAK_ID}.json`);
+
+function defaultUserRoot() {
+  const home = os.homedir();
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "ShadGPT", "TweakerLibrary");
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "ShadGPT", "TweakerLibrary");
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(home, ".local", "share"), "ShadGPT", "TweakerLibrary");
+}
 
 const tools = [
   {
