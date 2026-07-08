@@ -107,7 +107,7 @@ function writeProjectConnectionInstructions(summary, options = {}) {
   if (!next.trim()) {
     if (fs.existsSync(target)) fs.unlinkSync(target);
   } else {
-    fs.writeFileSync(target, next, "utf8");
+    writeFileAtomicSync(target, next, { fs, path });
   }
   return {
     instructionFile: target,
@@ -415,22 +415,39 @@ function storageFileFor(tweakId, options = {}) {
   return path.join(userRoot, "storage", `${tweakId}.json`);
 }
 
+function writeFileAtomicSync(file, contents, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, contents, "utf8");
+  fs.renameSync(tmp, file);
+}
+
 function readStorageFile(tweakId, options = {}) {
   const fs = options.fs || require("node:fs");
+  const file = storageFileFor(tweakId, options);
+  let raw;
   try {
-    const value = JSON.parse(fs.readFileSync(storageFileFor(tweakId, options), "utf8"));
+    raw = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return {};
+    throw err;
+  }
+  try {
+    const value = JSON.parse(raw);
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   } catch {
+    try {
+      fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+    } catch {}
     return {};
   }
 }
 
 function writeStorageFile(tweakId, value, options = {}) {
-  const fs = options.fs || require("node:fs");
-  const path = options.path || require("node:path");
   const file = storageFileFor(tweakId, options);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  writeFileAtomicSync(file, `${JSON.stringify(value, null, 2)}\n`, options);
   return file;
 }
 

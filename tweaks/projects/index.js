@@ -174,6 +174,7 @@ module.exports = {
     writeProjectConnectionInstructions: agentsWriter.writeProjectConnectionInstructions,
     storageFileFor,
     readStorageFile,
+    writeStorageFile,
   },
 };
 
@@ -346,7 +347,7 @@ function createMainHandlers(api) {
     fs.mkdirSync(codexDir, { recursive: true });
     const current = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
     const next = upsertSupabaseConfigToml(current, normalized);
-    fs.writeFileSync(configPath, next, "utf8");
+    writeFileAtomicSync(configPath, next, { fs, path });
     return { configPath, binding: parseSupabaseConfigToml(next) };
   };
 
@@ -701,23 +702,39 @@ function storageFileFor(tweakId, options = {}) {
   return path.join(userRoot, "storage", `${tweakId}.json`);
 }
 
+function writeFileAtomicSync(file, contents, options = {}) {
+  const fs = options.fs || require("node:fs");
+  const path = options.path || require("node:path");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, contents, "utf8");
+  fs.renameSync(tmp, file);
+}
+
 function readStorageFile(tweakId, options = {}) {
   const fs = options.fs || require("node:fs");
   const file = storageFileFor(tweakId, options);
+  let raw;
   try {
-    const value = JSON.parse(fs.readFileSync(file, "utf8"));
+    raw = fs.readFileSync(file, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return {};
+    throw err;
+  }
+  try {
+    const value = JSON.parse(raw);
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   } catch {
+    try {
+      fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+    } catch {}
     return {};
   }
 }
 
 function writeStorageFile(tweakId, value, options = {}) {
-  const fs = options.fs || require("node:fs");
-  const path = options.path || require("node:path");
   const file = storageFileFor(tweakId, options);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  writeFileAtomicSync(file, `${JSON.stringify(value, null, 2)}\n`, options);
   return file;
 }
 
@@ -2211,6 +2228,7 @@ function updateEnvValueOnDisk(input, options = {}) {
   requireEnvActionConfirmation(input, "editing");
   const { filePath } = resolveProjectEnvFile(input, options, "edited");
   const original = fs.readFileSync(filePath, "utf8");
+  const eol = original.includes("\r\n") ? "\r\n" : "\n";
   const lines = original.split(/\r?\n/);
   let changed = false;
   const next = lines.map((line) => {
@@ -2220,7 +2238,7 @@ function updateEnvValueOnDisk(input, options = {}) {
     return `${match[1]}${match[2]}${match[3]}${formatDotenvValue(value, match[4])}`;
   });
   if (!changed) throw new Error(`Environment key was not found: ${key}`);
-  fs.writeFileSync(filePath, next.join("\n"), "utf8");
+  writeFileAtomicSync(filePath, next.join(eol), { fs, path: options.path || require("node:path") });
   return { key, value: redactValue(value), sourceFile: filePath, audit: envActionAudit("edited", key, filePath) };
 }
 

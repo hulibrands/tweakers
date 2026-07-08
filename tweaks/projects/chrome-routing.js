@@ -34,6 +34,13 @@ const CALLSITE_ANCHORS = [
 const HELPER_ANCHOR = "\nfunction resolveChromeProfileDirectoryFromLocalState(userDataDirectory) {";
 const LEGACY_PATCH_MARKER = "PROJECT_CHROME_PROFILE_STORE";
 
+function writeFileAtomicSync(file, contents) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, contents, "utf8");
+  fs.renameSync(tmp, file);
+}
+
 function chromeUserDataDir(options = {}) {
   if (options.env?.CODEX_CHROME_USER_DATA_DIR || process.env.CODEX_CHROME_USER_DATA_DIR) {
     return path.resolve(options.env?.CODEX_CHROME_USER_DATA_DIR || process.env.CODEX_CHROME_USER_DATA_DIR);
@@ -229,7 +236,7 @@ function writeActiveChromeProfileSignal(input, options = {}) {
   const before = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
   const next = `${JSON.stringify(signal, null, 2)}\n`;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  if (before !== next) fs.writeFileSync(filePath, next, "utf8");
+  if (before !== next) writeFileAtomicSync(filePath, next);
   return { changed: before !== next, skipped: false, path: filePath, signal };
 }
 
@@ -270,7 +277,7 @@ function patchBundledChromeRouting(options = {}) {
         const before = fs.readFileSync(filePath, "utf8");
         const after = patchChromeScriptSource(before, { logger, filePath });
         const changed = after !== before;
-        if (changed) fs.writeFileSync(filePath, after, "utf8");
+        if (changed) writeFileAtomicSync(filePath, after);
         const patched = isFullyPatched(after);
         results.push({
           filePath,

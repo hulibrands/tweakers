@@ -205,6 +205,59 @@ test("Chrome assignments write Projects storage and mirror legacy storage for ro
   assert.deepEqual(legacy.assignments[projectPath].preferredProfiles[0].profileAliases, ["work@example.com", "Work Alias"]);
 });
 
+test("project storage writes atomically and leaves no temp sibling", () => {
+  const userRoot = tempDir();
+  const file = tweak.writeStorageFile("co.thomashulihan.projects", { a: { b: 1 } }, { userRoot, fs, path });
+
+  assert.deepEqual(tweak.readStorageFile("co.thomashulihan.projects", { userRoot, fs, path }), { a: { b: 1 } });
+  assert.deepEqual(fs.readdirSync(path.dirname(file)).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("project storage preserves corrupt files before returning empty state", () => {
+  const userRoot = tempDir();
+  const file = tweak.storageFileFor("co.thomashulihan.projects", { userRoot, path });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{ not json", "utf8");
+
+  assert.deepEqual(tweak.readStorageFile("co.thomashulihan.projects", { userRoot, fs, path }), {});
+  const corrupt = fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith(`${path.basename(file)}.corrupt-`));
+  assert.equal(corrupt.length, 1);
+  assert.equal(fs.readFileSync(path.join(path.dirname(file), corrupt[0]), "utf8"), "{ not json");
+});
+
+test("project storage writes fresh JSON after preserving corrupt input", () => {
+  const userRoot = tempDir();
+  const file = tweak.storageFileFor("co.thomashulihan.projects", { userRoot, path });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{ not json", "utf8");
+
+  assert.deepEqual(tweak.readStorageFile("co.thomashulihan.projects", { userRoot, fs, path }), {});
+  tweak.writeStorageFile("co.thomashulihan.projects", { a: 1 }, { userRoot, fs, path });
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { a: 1 });
+  const corrupt = fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith(`${path.basename(file)}.corrupt-`));
+  assert.equal(fs.readFileSync(path.join(path.dirname(file), corrupt[0]), "utf8"), "{ not json");
+});
+
+test("project storage treats missing files as empty and unreadable files as errors", () => {
+  const userRoot = tempDir();
+  const denied = new Error("denied");
+  denied.code = "EACCES";
+  const missing = new Error("missing");
+  missing.code = "ENOENT";
+
+  assert.deepEqual(tweak.readStorageFile("co.thomashulihan.projects", {
+    userRoot,
+    path,
+    fs: { readFileSync: () => { throw missing; } },
+  }), {});
+  assert.throws(() => tweak.readStorageFile("co.thomashulihan.projects", {
+    userRoot,
+    path,
+    fs: { readFileSync: () => { throw denied; } },
+  }), /denied/);
+});
+
 test("active Chrome profile signal writes a validated project route", () => {
   const userRoot = tempDir();
   const projectPath = path.join(userRoot, "repo");
@@ -1030,6 +1083,16 @@ test("dotenv parser groups, redacts, and reveals values only on demand", () => {
   assert.equal(dynamicUpdate.value, "[redacted]");
   assert.equal(tweak.revealEnvValueFromDisk({ projectPath, filePath: envPath, key: "OPENAI_API_KEY", confirmed: true }, { fs, path, home: projectPath }).value, "sk-new");
   assert.equal(tweak.revealEnvValueFromDisk({ projectPath, filePath: dynamicEnvPath, key: "VERCEL_ENV", confirmed: true }, { fs, path, home: projectPath }).value, "production");
+});
+
+test("env edit preserves CRLF line endings", () => {
+  const projectPath = tempDir();
+  const envPath = path.join(projectPath, ".env");
+  fs.writeFileSync(envPath, "FIRST=one\r\nTARGET=old\r\nLAST=three\r\n", "utf8");
+
+  tweak.updateEnvValueOnDisk({ projectPath, filePath: envPath, key: "TARGET", value: "new", confirmed: true }, { fs, path, home: projectPath });
+
+  assert.equal(fs.readFileSync(envPath, "utf8"), "FIRST=one\r\nTARGET=new\r\nLAST=three\r\n");
 });
 
 test("env reveal and edit reject symlink escapes outside the project", (t) => {
