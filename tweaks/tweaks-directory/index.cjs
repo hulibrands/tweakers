@@ -28,10 +28,7 @@ const STORE_FILTERS = [
 ];
 // Master superset of every sort key, used for validation in normalizeDirectoryControls
 // and compareDirectoryRecords. The visible option list per surface is mode-specific
-// (see sortOptionsForMode). "default" preserves Codex's native order, which for the
-// Plugins/Skills directory is already its curated category grouping — so the native
-// surfaces label that key "Category" rather than inventing a category comparator
-// (no category metadata exists on directory records).
+// (see sortOptionsForMode). "default" means Category for native Plugins/Skills.
 const SORT_OPTIONS = [
   { key: "default", label: "Default" },
   { key: "created", label: "Date Created" },
@@ -48,7 +45,7 @@ const TWEAKS_SORT_OPTIONS = [
   { key: "updated", label: "Date Updated" },
   { key: "used", label: "File Accessed" },
 ];
-// Native Plugins directory sort list. "Category" === native order (the default).
+// Native Plugins directory sort list. "Category" groups by plugin metadata category.
 const PLUGINS_SORT_OPTIONS = [
   { key: "updated", label: "Date Updated" },
   { key: "created", label: "Date Created" },
@@ -69,8 +66,7 @@ function sortOptionsForMode(mode) {
   return TWEAKS_SORT_OPTIONS;
 }
 const NATIVE_DIRECTORY_MODES = ["plugins", "skills"];
-// The Plugins/Skills library is React-owned; Tweaks Directory only owns its Tweaks panel by default.
-const NATIVE_DIRECTORY_CONTROLS_ENABLED = false;
+const NATIVE_DIRECTORY_CONTROLS_ENABLED = true;
 const NATIVE_DIRECTORY_META_CACHE_TTL_MS = 2000;
 const OBSERVER_WORK_DELAY_MS = 120;
 const NATIVE_OBSERVER_REFRESH_MS = 10_000;
@@ -129,8 +125,8 @@ const DEFAULT_PREFS = {
 };
 const DEFAULT_DIRECTORY_STATE = {
   tweaks: { filter: "installed", sort: DEFAULT_SORT, installedEnabledOnly: false },
-  plugins: { sort: DEFAULT_SORT, installedEnabledOnly: false },
-  skills: { sort: DEFAULT_SORT, installedEnabledOnly: false, groupBy: "category" }, // groupBy retained for persisted back-compat; grouping is now driven by sort === "plugin"
+  plugins: { sort: DEFAULT_SORT, installedEnabledOnly: false, category: "" },
+  skills: { sort: DEFAULT_SORT, installedEnabledOnly: false, groupBy: "category", category: "" }, // groupBy retained for persisted back-compat; grouping is now driven by sort === "plugin"
 };
 
 /** @type {import("@shadgpt/sdk").Tweak} */
@@ -173,6 +169,7 @@ module.exports.__test = {
   isNativeDirectoryRowCandidate,
   isInsideAppSidebar,
   groupNativeSkillRowsByPlugin,
+  groupNativeRowsByCategory,
   pluginSkillsForDir,
   nativePluginMetadataRows,
   sanitizeNativeMetadataHref,
@@ -187,6 +184,7 @@ module.exports.__test = {
   nativeObserverMutationRoot,
   shouldRefreshNativeObserverData,
   syncNativeDirectoryIconFrames,
+  nativeDirectoryCategoryOptions,
 };
 
 function startMain(api) {
@@ -375,6 +373,8 @@ function getNativeDirectoryMeta(options = {}) {
         sourceId,
         dir: real,
         description: cleanText(meta.description || ""),
+        category: cleanText(meta.category || ""),
+        featured: meta.featured === true,
         website: cleanText(meta.website || ""),
         github: cleanText(meta.github || ""),
         githubRepoUrl: cleanText(meta.githubRepoUrl || ""),
@@ -490,6 +490,8 @@ function syntheticNativePluginFromStatus(status) {
     sourceId: id,
     dir: "",
     description: cleanText(status && status.description || ""),
+    category: cleanText(status && status.category || ""),
+    featured: status && status.featured === true,
     website: cleanText(status && status.website || ""),
     github: cleanText(status && status.github || ""),
     githubRepoUrl: cleanText(status && status.githubRepoUrl || ""),
@@ -800,6 +802,8 @@ function nativeSkillMeta(plugin, skill) {
     name: cleanText(skill.name),
     displayName: cleanText(skill.displayName || skill.name),
     description: cleanText(skill.description || ""),
+    category: cleanText(plugin.category || ""),
+    featured: plugin.featured === true,
     slash: cleanText(skill.slash || ""),
     pluginId: plugin.id,
     pluginName: plugin.displayName || plugin.name || plugin.id,
@@ -872,6 +876,8 @@ function getRuntimePluginStatuses(options = {}) {
       name: meta.name || meta.displayName || titleFromSlug(entry.id),
       displayName: meta.displayName || meta.name || titleFromSlug(entry.id),
       description: meta.description || "",
+      category: meta.category || "",
+      featured: meta.featured === true,
       website: meta.website || "",
       github: meta.github || "",
       githubRepoUrl: meta.githubRepoUrl || "",
@@ -1009,6 +1015,8 @@ function readPluginMetadata(root, deps) {
           displayName: nested.displayName || nested.title || interfaceDisplayName || nested.name,
           interface: iface,
           description: nested.description || iface && (iface.shortDescription || iface.longDescription) || pluginSidecar.description,
+          category: pluginSidecar.category || nested.category || iface && iface.category || "",
+          featured: pluginSidecar.featured === true || nested.featured === true || iface && iface.featured === true,
           author,
           website: pluginSidecar.website || nested.homepage || iface && iface.websiteURL || "",
           github: pluginSidecar.github || githubUrlFromManifest(nested) || "",
@@ -1914,6 +1922,7 @@ function normalizeDirectoryControls(value, fallback) {
     sort,
     installedEnabledOnly: Boolean(controls.installedEnabledOnly),
   };
+  if (controls.category !== undefined || fallback.category !== undefined) out.category = cleanText(controls.category || fallback.category || "");
   if (filter) out.filter = filter;
   if (groupBy) out.groupBy = groupBy;
   return out;
@@ -2266,6 +2275,8 @@ function normalizeNativeMetaItem(item) {
     label: cleanText(value.label || value.displayName || value.name || ""),
     pluginName: cleanText(value.pluginName || ""),
     pluginLabel: cleanText(value.pluginLabel || value.pluginName || ""),
+    category: cleanText(value.category || ""),
+    featured: value.featured === true,
     slash: cleanText(value.slash || ""),
     iconShape: cleanText(value.iconShape || ""),
     iconSource: cleanText(value.iconSource || ""),
@@ -2504,6 +2515,9 @@ function renderNativeDirectoryControlStrip(state, mode) {
   }));
   strip.appendChild(pills);
 
+  const categoryPills = renderNativeDirectoryCategoryPills(state, mode, controls);
+  if (categoryPills) strip.appendChild(categoryPills);
+
   const counts = renderNativeDirectoryCounts(state, mode);
   if (counts) strip.appendChild(counts);
 
@@ -2545,7 +2559,67 @@ function nativeControlsForMode(state, mode) {
       state.nativeDirectoryControls[mode].installedOnly || state.nativeDirectoryControls[mode].enabledOnly
     );
   }
+  if (state.nativeDirectoryControls[mode].category === undefined) state.nativeDirectoryControls[mode].category = "";
   return state.nativeDirectoryControls[mode];
+}
+
+function renderNativeDirectoryCategoryPills(state, mode, controls) {
+  const options = nativeDirectoryCategoryOptions(state, mode);
+  if (controls.category && !options.includes(controls.category)) controls.category = "";
+  if (options.length <= 1) return null;
+  const group = document.createElement("div");
+  group.className = "codexpp-td-pill-group codexpp-native-directory-category-pills";
+  group.dataset.codexppNativeDirectoryCategoryPills = "true";
+  group.appendChild(filterPill("All", !controls.category, () => {
+    controls.category = "";
+    persistDirectoryState(state);
+    rerenderNativeDirectoryControls(state);
+  }));
+  for (const category of options) {
+    group.appendChild(filterPill(category, controls.category === category, () => {
+      controls.category = category;
+      persistDirectoryState(state);
+      rerenderNativeDirectoryControls(state);
+    }));
+  }
+  return group;
+}
+
+function nativeDirectoryCategoryOptions(state, mode) {
+  const meta = state && state.nativeDirectoryMeta || {};
+  const items = mode === "skills" ? meta.skills : meta.plugins;
+  const categories = [];
+  let hasFeatured = false;
+  let hasOther = false;
+  for (const item of Array.isArray(items) ? items : []) {
+    if (item && item.featured === true) hasFeatured = true;
+    const category = cleanText(item && item.category || "");
+    if (category && !categories.includes(category)) categories.push(category);
+    else if (!category) hasOther = true;
+  }
+  if (hasOther && !categories.includes("Other")) categories.push("Other");
+  categories.sort((a, b) => categorySortRank(a) - categorySortRank(b) || a.localeCompare(b));
+  return hasFeatured ? ["Featured", ...categories] : categories;
+}
+
+function categorySortRank(category) {
+  const order = [
+    "Design",
+    "Coding",
+    "Productivity",
+    "Developer Tools",
+    "Data & Analytics",
+    "Business & Operations",
+    "Communication",
+    "Creativity",
+    "Education & Research",
+    "Finance",
+    "Security",
+    "Travel",
+    "Other",
+  ];
+  const index = order.indexOf(category);
+  return index === -1 ? order.length : index;
 }
 
 // Resolve Codex's native directory toolbar row: the lowest common ancestor of the native
@@ -2907,11 +2981,12 @@ function applyNativeDirectoryControls(state, pair, mode) {
   for (const record of rowRecords) setNativeDirectoryRowHidden(record.row, !visibleSet.has(record.row));
   sortNativeDirectoryRows(visible, controls.sort);
   const groupByPlugin = mode === "skills" && controls.sort === "plugin";
-  // Hide Codex's native section labels (Featured, etc.) for flat or regrouped orders;
-  // keep them for the "Category" sort, which IS the native order.
+  const groupByCategory = controls.sort === DEFAULT_SORT;
+  // Hide Codex's native section labels (Featured, etc.) for flat or regrouped orders.
   const flatSort = controls.sort === "az" || isDateSort(controls.sort);
-  setNativeDirectoryGroupLabelsHidden(root, flatSort || groupByPlugin);
+  setNativeDirectoryGroupLabelsHidden(root, flatSort || groupByPlugin || groupByCategory);
   if (groupByPlugin) groupNativeSkillRowsByPlugin(visible);
+  else if (groupByCategory) groupNativeRowsByCategory(visible);
   else {
     removeNativeDirectoryGroupHeadings(root);
     applyNativeDirectoryRowOrder(visible);
@@ -3330,6 +3405,8 @@ function syntheticSkillMetaForPlugin(plugin, skillLabel) {
     pluginId: cleanText(plugin.id || ""),
     pluginName: cleanText(plugin.displayName || plugin.name || plugin.label || plugin.id || ""),
     pluginLabel: cleanText(plugin.label || plugin.displayName || plugin.name || plugin.id || ""),
+    category: cleanText(plugin.category || ""),
+    featured: plugin.featured === true,
     installed: plugin.installed !== false,
     enabled: plugin.enabled !== false,
     createdAtMs: Number(plugin.createdAtMs || 0),
@@ -3340,6 +3417,15 @@ function syntheticSkillMetaForPlugin(plugin, skillLabel) {
 
 function nativeDirectoryRecordVisible(record, controls) {
   if (controls.installedEnabledOnly && !(record.installed && record.enabled)) return false;
+  const category = cleanText(controls.category || "");
+  if (category) {
+    const meta = record.meta || {};
+    if (category === "Featured") {
+      if (meta.featured !== true) return false;
+    } else if (nativeRecordCategoryLabel(record) !== category) {
+      return false;
+    }
+  }
   const query = directoryKey(controls.query || "");
   if (!query) return true;
   const meta = record.meta || {};
@@ -3352,6 +3438,7 @@ function nativeDirectoryRecordVisible(record, controls) {
     meta.label,
     meta.pluginName,
     meta.pluginLabel,
+    meta.category,
     meta.slash,
   ].filter(Boolean).join(" ");
   return directoryKey(haystack).includes(query);
@@ -3398,7 +3485,12 @@ function groupNativeSkillRowsByPlugin(records) {
     });
     const signature = ordered.map((record) => `${nativeRecordPluginLabel(record)}:${record.originalIndex}:${record.title}`).join("|");
     const existingHeadings = nativeDirectoryGroupHeadingsForParent(parent);
-    if (parent.dataset && parent.dataset.codexppNativeDirectoryPluginGroupSignature === signature && existingHeadings.length > 0) continue;
+    if (
+      parent.dataset
+      && parent.dataset.codexppNativeDirectoryGroupMode === "plugin"
+      && parent.dataset.codexppNativeDirectoryPluginGroupSignature === signature
+      && existingHeadings.length > 0
+    ) continue;
     for (const heading of existingHeadings) heading.remove();
     const fragment = document && typeof document.createDocumentFragment === "function" ? document.createDocumentFragment() : null;
     let currentPlugin = "";
@@ -3411,7 +3503,49 @@ function groupNativeSkillRowsByPlugin(records) {
       appendBatchNode(parent, fragment, record.row);
     }
     if (fragment) parent.appendChild(fragment);
-    if (parent.dataset) parent.dataset.codexppNativeDirectoryPluginGroupSignature = signature;
+    if (parent.dataset) {
+      parent.dataset.codexppNativeDirectoryGroupMode = "plugin";
+      parent.dataset.codexppNativeDirectoryPluginGroupSignature = signature;
+      delete parent.dataset.codexppNativeDirectoryCategoryGroupSignature;
+    }
+  }
+}
+
+function groupNativeRowsByCategory(records) {
+  const byParent = groupRecordsByParent(records);
+  for (const { parent, rows } of byParent) {
+    const ordered = rows.slice().sort((a, b) => {
+      const groupA = nativeRecordCategoryLabel(a);
+      const groupB = nativeRecordCategoryLabel(b);
+      return categorySortRank(groupA) - categorySortRank(groupB)
+        || groupA.localeCompare(groupB)
+        || compareDirectoryRecords(a, b, DEFAULT_SORT);
+    });
+    const signature = ordered.map((record) => `${nativeRecordCategoryLabel(record)}:${record.originalIndex}:${record.title}`).join("|");
+    const existingHeadings = nativeDirectoryGroupHeadingsForParent(parent);
+    if (
+      parent.dataset
+      && parent.dataset.codexppNativeDirectoryGroupMode === "category"
+      && parent.dataset.codexppNativeDirectoryCategoryGroupSignature === signature
+      && existingHeadings.length > 0
+    ) continue;
+    for (const heading of existingHeadings) heading.remove();
+    const fragment = document && typeof document.createDocumentFragment === "function" ? document.createDocumentFragment() : null;
+    let currentCategory = "";
+    for (const record of ordered) {
+      const category = nativeRecordCategoryLabel(record);
+      if (category !== currentCategory) {
+        currentCategory = category;
+        appendBatchNode(parent, fragment, nativeDirectoryGroupHeading(category));
+      }
+      appendBatchNode(parent, fragment, record.row);
+    }
+    if (fragment) parent.appendChild(fragment);
+    if (parent.dataset) {
+      parent.dataset.codexppNativeDirectoryGroupMode = "category";
+      parent.dataset.codexppNativeDirectoryCategoryGroupSignature = signature;
+      delete parent.dataset.codexppNativeDirectoryPluginGroupSignature;
+    }
   }
 }
 
@@ -3438,6 +3572,11 @@ function groupRecordsByParent(records) {
 
 function nativeRecordPluginLabel(record) {
   const label = record && record.meta && (record.meta.pluginLabel || record.meta.pluginName);
+  return cleanText(label || "Other");
+}
+
+function nativeRecordCategoryLabel(record) {
+  const label = record && record.meta && record.meta.category;
   return cleanText(label || "Other");
 }
 
@@ -4213,6 +4352,7 @@ function nativePluginMetadataRows(meta) {
   if (meta.currentVersion) rows.push({ label: "Current Version", value: meta.currentVersion });
   if (Number(meta.githubStars) > 0) rows.push({ label: "GitHub Stars", value: formatInteger(meta.githubStars) });
   if (meta.documentation) rows.push({ label: "Documentation", value: meta.documentation, href: sanitizeNativeMetadataHref(meta.documentation) });
+  if (meta.category) rows.push({ label: "Category", value: meta.category });
   if (Array.isArray(meta.tags) && meta.tags.length > 0) rows.push({ label: "Tags", value: formatTags(meta.tags) });
   if (meta.metadataFetchedAt) rows.push({ label: "Metadata Updated", value: formatMetadataDate(meta.metadataFetchedAt) });
   return rows;
@@ -7873,6 +8013,7 @@ function injectStyles() {
       border-color: color-mix(in srgb, var(--codexpp-td-ring) 44%, var(--codexpp-td-border));
     }
     .codexpp-td-pill-group { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+    .codexpp-native-directory-category-pills { flex-wrap: wrap; }
     .codexpp-native-directory-counts { flex: 0 0 auto; min-height: 28px; display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--codexpp-td-border) 78%, transparent); border-radius: 999px; padding: 0 9px; background: var(--codexpp-td-muted-bg); color: var(--codexpp-td-muted); font: inherit; font-size: 12px; line-height: 1.2; white-space: nowrap; }
     .codexpp-td-pill { height: 36px; min-width: 0; border: 1px solid var(--codexpp-td-border); border-radius: 999px; padding: 0 10px; background: var(--codexpp-td-background); color: var(--codexpp-td-muted); font: inherit; font-size: 13px; cursor: pointer; }
     .codexpp-td-pill.active { background: var(--codexpp-td-foreground); border-color: var(--codexpp-td-foreground); color: var(--codexpp-td-background); }

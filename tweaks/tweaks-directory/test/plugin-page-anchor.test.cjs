@@ -46,6 +46,8 @@ const {
   isNativeDirectoryRowCandidate,
   isInsideAppSidebar,
   groupNativeSkillRowsByPlugin,
+  groupNativeRowsByCategory,
+  nativeDirectoryCategoryOptions,
   createNativeDirectoryMetaCache,
   pluginSkillsForDir,
   nativePluginMetadataRows,
@@ -849,10 +851,14 @@ test("native directory record search includes plugin and skill metadata", () => 
     title: "debugpro-hypotheses",
     meta: {
       pluginLabel: "DebugPro",
+      category: "Design",
       slash: "$debugpro-hypotheses",
     },
   };
   assert.equal(nativeDirectoryRecordVisible(record, { query: "debugpro", installedEnabledOnly: false }), true);
+  assert.equal(nativeDirectoryRecordVisible(record, { query: "design", installedEnabledOnly: false }), true);
+  assert.equal(nativeDirectoryRecordVisible(record, { query: "", category: "Design", installedEnabledOnly: false }), true);
+  assert.equal(nativeDirectoryRecordVisible(record, { query: "", category: "Coding", installedEnabledOnly: false }), false);
   assert.equal(nativeDirectoryRecordVisible(record, { query: "missing", installedEnabledOnly: false }), false);
 });
 
@@ -885,8 +891,8 @@ test("directory state preferences persist tweaks and native directory controls",
     skills: { sort: "created", groupBy: "plugin", installedEnabledOnly: true },
   });
   assert.deepEqual(normalized.tweaks, { filter: "store", sort: "used", installedEnabledOnly: true });
-  assert.deepEqual(normalized.plugins, { sort: "updated", installedEnabledOnly: true });
-  assert.deepEqual(normalized.skills, { sort: "created", groupBy: "plugin", installedEnabledOnly: true });
+  assert.deepEqual(normalized.plugins, { sort: "updated", installedEnabledOnly: true, category: "" });
+  assert.deepEqual(normalized.skills, { sort: "created", groupBy: "plugin", installedEnabledOnly: true, category: "" });
 });
 
 test("native directory metadata cache bounds scans and supports explicit refresh", () => {
@@ -1411,10 +1417,38 @@ test("plugin metadata falls back to marketplace icon for non-GitHub marketplace 
   }
 });
 
+test("plugin metadata reads interface category and featured flags", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "td-plugin-category-"));
+  try {
+    const pluginDir = join(tmp, "design-docs-supporting");
+    mkdirSync(join(pluginDir, ".codex-plugin"), { recursive: true });
+    writeFileSync(
+      join(pluginDir, ".codex-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "design-docs-supporting",
+        displayName: "Design Docs Supporting Skills",
+        interface: {
+          category: "Design",
+          featured: true,
+          shortDescription: "Design Docs helpers",
+        },
+      }),
+    );
+
+    const meta = readPluginMetadata(pluginDir, { fs, path });
+    assert.equal(meta.category, "Design");
+    assert.equal(meta.featured, true);
+    assert.equal(meta.description, "Design Docs helpers");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("plugin metadata rows show marketplace icon source", () => {
   const rows = nativePluginMetadataRows({
     kind: "plugin",
     displayName: "mattpocock/skills",
+    category: "Design",
     iconPath: "./assets/owner-avatar.png",
     iconSource: "github",
     iconShape: "circle",
@@ -1428,6 +1462,7 @@ test("plugin metadata rows show marketplace icon source", () => {
   assert.equal(rows.find((row) => row.label === "Plugin Icon Source").value, "GitHub avatar, circle frame, cache-busted");
   assert.equal(rows.find((row) => row.label === "Marketplace Icon").href, "https://avatars.githubusercontent.com/u/28293365?s=256");
   assert.equal(rows.find((row) => row.label === "Marketplace Icon Source").value, "GitHub avatar, circle frame, cache-busted");
+  assert.equal(rows.find((row) => row.label === "Category").value, "Design");
 });
 
 test("native metadata links reject local files and unsafe schemes", () => {
@@ -1557,11 +1592,59 @@ test("Skills plugin grouping emits one section heading per plugin", () => {
   }
 });
 
+test("native directory category options include featured, categories, and uncategorized rows", () => {
+  const meta = normalizeNativeDirectoryMeta({
+    plugins: [
+      { id: "debugpro", category: "Coding" },
+      { id: "impeccable", category: "Design", featured: true },
+      { id: "plan-architect", category: "Productivity" },
+      { id: "legacy-plugin" },
+    ],
+    skills: [],
+  });
+  assert.deepEqual(nativeDirectoryCategoryOptions({ nativeDirectoryMeta: meta }, "plugins"), [
+    "Featured",
+    "Design",
+    "Coding",
+    "Productivity",
+    "Other",
+  ]);
+});
+
+test("native directory category grouping emits one section heading per category", () => {
+  const doc = new FakeDocument();
+  const restore = installFakeGlobals(doc);
+  try {
+    const parent = doc.createElement("div");
+    const first = doc.createElement("article");
+    first.textContent = "DebugPro";
+    const second = doc.createElement("article");
+    second.textContent = "Design Docs";
+    const third = doc.createElement("article");
+    third.textContent = "Legacy";
+    parent.append(first, second, third);
+    doc.body.appendChild(parent);
+
+    groupNativeRowsByCategory([
+      { row: first, title: "DebugPro", originalIndex: 0, meta: { category: "Coding" } },
+      { row: second, title: "Design Docs", originalIndex: 1, meta: { category: "Design" } },
+      { row: third, title: "Legacy", originalIndex: 2, meta: {} },
+    ]);
+
+    const headings = parent.children.filter((node) => node.dataset && node.dataset.codexppNativeDirectoryGroupHeading);
+    assert.deepEqual(headings.map((node) => node.textContent), ["Design", "Coding", "Other"]);
+    assert.deepEqual(parent.children.map((node) => node.textContent), ["Design", "Design Docs", "Coding", "DebugPro", "Other", "Legacy"]);
+    assert.equal(parent.dataset.codexppNativeDirectoryGroupMode, "category");
+  } finally {
+    restore();
+  }
+});
+
 test("sortOptionsForMode exposes per-surface sort keys", () => {
   assert.deepEqual(sortOptionsForMode("plugins").map((o) => o.key), ["updated", "created", "az", "default"]);
   assert.deepEqual(sortOptionsForMode("skills").map((o) => o.key), ["updated", "created", "az", "default", "plugin"]);
   assert.deepEqual(sortOptionsForMode("tweaks").map((o) => o.key), ["default", "created", "updated", "used"]);
-  // Plugins/Skills label the native-order "default" key as "Category" (no category metadata exists).
+  // Plugins/Skills label the default regrouping as "Category" to match native marketplace sections.
   assert.equal(sortOptionsForMode("plugins").find((o) => o.key === "default").label, "Category");
 });
 
