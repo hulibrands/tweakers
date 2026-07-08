@@ -7,6 +7,12 @@ const {
 } = require("../node-utils");
 const { emailFromAuthString } = require("./auth");
 
+async function copyPrivateFileLocal(source, target) {
+  const { fsp } = nodeDeps();
+  await fsp.copyFile(source, target);
+  if (process.platform !== "win32") await fsp.chmod(target, 0o600);
+}
+
 async function listAccountNames() {
   const { fsp } = nodeDeps();
   const { ACCOUNTS_DIR } = codexAuthPaths();
@@ -97,14 +103,14 @@ async function ensureAutosavedActiveAccount() {
   const active = await fsp.readFile(AUTH_PATH, "utf8");
   const sameEmail = await findMatchingAccountByEmail(accounts, active);
   if (sameEmail) {
-    await fsp.copyFile(AUTH_PATH, accountPath(sameEmail));
+    await copyPrivateFileLocal(AUTH_PATH, accountPath(sameEmail));
     await fsp.writeFile(CURRENT_NAME_PATH, `${sameEmail}\n`, "utf8");
     return sameEmail;
   }
 
   await ensureDir(ACCOUNTS_DIR);
   const name = await nextAvailableAccountName("account");
-  await fsp.copyFile(AUTH_PATH, accountPath(name));
+  await copyPrivateFileLocal(AUTH_PATH, accountPath(name));
   await fsp.writeFile(CURRENT_NAME_PATH, `${name}\n`, "utf8");
   return name;
 }

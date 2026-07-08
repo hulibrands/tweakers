@@ -1754,6 +1754,11 @@ var require_storage = __commonJS({
         return false;
       }
     }
+    async function copyPrivateFileLocal(source, target) {
+      const { fsp } = nodeDeps2();
+      await fsp.copyFile(source, target);
+      if (process.platform !== "win32") await fsp.chmod(target, 384);
+    }
     async function ensureAutosavedActiveAccount() {
       const { fsp } = nodeDeps2();
       const { AUTH_PATH, ACCOUNTS_DIR, CURRENT_NAME_PATH } = codexAuthPaths2();
@@ -1768,14 +1773,14 @@ var require_storage = __commonJS({
       const active = await fsp.readFile(AUTH_PATH, "utf8");
       const sameEmail = await findMatchingAccountByEmail(accounts, active);
       if (sameEmail) {
-        await fsp.copyFile(AUTH_PATH, accountPath2(sameEmail));
+        await copyPrivateFileLocal(AUTH_PATH, accountPath2(sameEmail));
         await fsp.writeFile(CURRENT_NAME_PATH, `${sameEmail}
 `, "utf8");
         return sameEmail;
       }
       await ensureDir2(ACCOUNTS_DIR);
       const name = await nextAvailableAccountName("account");
-      await fsp.copyFile(AUTH_PATH, accountPath2(name));
+      await copyPrivateFileLocal(AUTH_PATH, accountPath2(name));
       await fsp.writeFile(CURRENT_NAME_PATH, `${name}
 `, "utf8");
       return name;

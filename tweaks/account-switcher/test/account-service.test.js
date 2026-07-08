@@ -200,6 +200,26 @@ test("saving the current account stores the snapshot as a private file", async (
   });
 });
 
+test("state autosaves the active account as a private file", async () => {
+  await withTempHome(async (home) => {
+    const codexDir = path.join(home, ".codex");
+    const accountsDir = path.join(codexDir, "auth_accounts");
+    await fs.mkdir(codexDir, { recursive: true });
+    await fs.writeFile(path.join(codexDir, "auth.json"), authWithEmail("active@example.com"), { mode: 0o644 });
+
+    const { createAccountService } = require("../src/account/service");
+    const service = createAccountService({ log: { warn() {} } });
+    const result = await service.handle({ action: "state" });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.accounts, ["account"]);
+    if (process.platform !== "win32") {
+      const savedMode = (await fs.stat(path.join(accountsDir, "account.json"))).mode & 0o777;
+      assert.equal(savedMode, 0o600);
+    }
+  });
+});
+
 test("refresh-usage stores active account usage", async () => {
   const originalHome = process.env.HOME;
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "codex-account-switcher-"));
